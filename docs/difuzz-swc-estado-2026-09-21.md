@@ -97,3 +97,25 @@ Para cada uno, **antes de tocar nada**: leer el `config.json` del fixture (si fi
 6. **`cd … || exit 1`** en un comando interactivo: habría cerrado la terminal. Y `worktree remove` sin `--force` sobre un worktree modificado, parado adentro del directorio que se borraba.
 
 Patrón común de 1, 3, 4 y 5: afirmar un mecanismo antes de tener el experimento que lo distingue. El remedio que funcionó fue el mismo las cuatro veces: reducir con un control positivo (r05) y variar una sola cosa.
+
+---
+
+## 7 · Addendum — 21-sep, tarde
+
+**Fix de #12397:** PR **#12398**, abierto el mismo día que el issue. Un commit, CodSpeed sin impacto de performance, sin review al momento de anotar. Pendiente: el cuerpo dice que el reporte original reproducía *"with default options"*; nunca probamos defaults puros (corrimos carril A). Cambiar a "with `hoist_props` enabled" si no se verificó.
+
+**Lo que el PR le enseñó a difuzz:** el fixture `issues/9739` tenía un snapshot que **congelaba el mismo bug** (el swap `[arr[0], arr[1]] = …` se convertía en escrituras sobre arrays nuevos). difuzz lo tenía en el corpus y no lo vio: el programa no imprime y el guard de salida vacía lo descartaba. En el corpus hay 623 casos así.
+
+**Pasos 1 y 1b de §2: implementados** (commit "filtros de falsos positivos + epilogo observador"):
+- Filtros: path fijo por proceso, `preload.js` con `--require` y `TZ=UTC`, cuatro `keep_*` en `true`.
+- Epílogo observador: para programas mudos, comparación cruda primero y después una pasada con un epílogo que imprime los bindings top-level. El epílogo se agrega **antes** de minificar; el serializador vive en el preload y no se minifica.
+
+**Validado en el sandbox (sin SWC):**
+- `runner.rs` compilado aparte: 10/10 pruebas (determinismo, filename, timeout, streams, 10 MB sin deadlock, observador, `TZ`, limpieza).
+- Pipeline completo con un `minify` stub que devuelve el `output.js` del fixture: 9739 pasa de `descartado` a `DIVERGENCIA Stdout (observado)`. El repro de `meta.txt` funciona copiado tal cual.
+- Auditoría de snapshots (3.035 fixtures, `input.js` contra su `output.js`): 41 divergencias observadas = **1 real (9739)** + 34 `ReferenceError` (artefacto del método: el snapshot no tenía epílogo) + 5 de `mangle.props` + 1 bajo `unsafe_*`. Ninguna atribuible al serializador.
+- Bugs propios de F1 encontrados en el camino: reporte suelto en `div/` cuando el corpus es un solo caso; reportes `.js` sensibles a un `package.json` de tipo módulo.
+
+**Técnica candidata nueva — auditoría de snapshots:** comparar `input.js` contra el `output.js` congelado, con el mismo runner y observador. **No requiere compilar SWC.** Encuentra snapshots que congelaron un bug (así apareció el 9739). Hay 129 divergencias crudas sin triage; la mayoría probablemente sean configs con `unsafe_*` o nombres, pero no está verificado.
+
+**Criterio de éxito de 1b en tu máquina:** contra `main`, el 9739 diverge como observado; contra la rama del fix (`601e1db`), no.
