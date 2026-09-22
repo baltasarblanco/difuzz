@@ -119,3 +119,87 @@ Patrón común de 1, 3, 4 y 5: afirmar un mecanismo antes de tener el experiment
 **Técnica candidata nueva — auditoría de snapshots:** comparar `input.js` contra el `output.js` congelado, con el mismo runner y observador. **No requiere compilar SWC.** Encuentra snapshots que congelaron un bug (así apareció el 9739). Hay 129 divergencias crudas sin triage; la mayoría probablemente sean configs con `unsafe_*` o nombres, pero no está verificado.
 
 **Criterio de éxito de 1b en tu máquina:** contra `main`, el 9739 diverge como observado; contra la rama del fix (`601e1db`), no.
+
+---
+
+## 8 · Addendum — 21-sep, noche: policy del minifier y dos reportes más
+
+**Publicado:**
+- **#12400** — declaración de función borrada mientras sigue referenciada, cuando su cuerpo la asigna a una local no usada. `ReferenceError` con **defaults** de `@swc/core` 1.16.2 dentro de cualquier función. Reclamado en el mismo issue ("I'll send a fix").
+- Comentario en **#12397**: impacto con defaults de `@swc/core` dentro de funciones (`SyntaxError`); top-level necesita `toplevel`.
+- Body del **#12398** corregido: la frase *"reproduced with default options"* era falsa para top-level. Verificado con `grep -c` sobre el body publicado.
+
+### 8.1 · La policy de `crates/swc_ecma_minifier/AGENTS.md` (commit `ff6a3c3b19`, 11-sep)
+
+Mi doc de la PR #12290 decía que había que leerla antes de elegir el próximo candidato. **No se leyó hasta después de publicar #12397.** Lo que dice y lo que cambia:
+
+- **Exime** de lógica defensiva: globals o built-ins monkey-patcheados, reasignación rara de `arguments.length`, **bindings introducidos por `eval` directo**, y **resolución dinámica dentro de `with`**.
+- *"A required fix must demonstrate an impact on common usage or identify an explicit support contract that the change violates."*
+- Asunciones documentadas (= lista de exclusiones de difuzz): `toString`/`valueOf` sin efectos y built-ins no pisados; `undefined`/`NaN`/`Infinity` no redefinidos; sin `arguments.callee`/`.caller`; no depender de `Function.prototype.toString()` ni de `Error.prototype.stack`; acceso a propiedades de objetos planos sin efectos (Proxy/watch); `document.all` no es null; asignar propiedades a clases no lanza; acceder a identificadores top-level declarados no tiene efectos; **TDZ no se preserva**; aritmética sin efectos, incluidas excepciones de `bigint` + `number`.
+- Tests: no agregar cobertura nueva en `tests/terser`; usar `tests/fixture/issues` o `tests/exec.rs`. Correr `./scripts/exec.sh` después de cualquier cambio.
+
+**Consecuencias para difuzz:**
+1. **El sesgo `eval` del plan (§3.2: swc#12029, swc#11913) apunta a una categoría cerrada por escrito.** Es la lección §1.23 de la PR #12290, repetida en otra categoría. Se abandona como objetivo del generador.
+2. **Carril A se mantiene, pero su mejor argumento cae** (eval sloppy y `with`). Queda como default coherente de SWC, nada más.
+3. **Criterio de selección nuevo:** *uso común bajo configs que los fixtures no prueban*, no "mis clases históricas".
+4. **Todo issue tiene que mostrar uso común.** Técnica que funcionó: probe contra `@swc/core` con opciones por defecto (§8.3).
+
+### 8.2 · Cruce con el backlog conocido de SWC
+
+`tests/TODO.txt` (301) y `tests/postponed.txt` (130) listan fixtures de terser que SWC sabe que no cumple, y labor0 trabaja ese backlog.
+
+| candidato | lista | veredicto |
+|---|---|---|
+| `global_fns`, `issue_1830_2`, `inverted_var` | TODO | conocidos: fuera |
+| `unsafe_evaluate_object_2` | postponed | conocido |
+| `1672_for`, `lvalues_def_2`, `2719/warn`, `delete_*` ×4, `this_binding_sequences`, `unused_keep_harmony_destructuring` | passing | **pasan con su config, rompen con la nuestra**: evidencia del nicho |
+
+`this_binding_sequences` (eval + strict) baja de prioridad por la policy.
+
+### 8.3 · Probe contra `@swc/core` — paso estándar antes de cualquier issue
+
+`npm i @swc/core` + `minifySync(src, cfg)` + ejecución de original y minificado. Independiente de difuzz, es el producto real, y responde dos preguntas que difuzz no puede: **¿reproduce con defaults?** y **¿en qué forma de uso común?**
+
+| caso | defaults, top-level | `toplevel: true` | defaults, dentro de función |
+|---|---|---|---|
+| #12400 callback / export | ✓ correcto | ✗ `ReferenceError` | ✗ `ReferenceError` |
+| #12397 `[o.n] = [2]` / `({done: s.done} = …)` | ✓ correcto | ✗ `SyntaxError` | ✗ `SyntaxError` |
+
+La columna del medio es la que habíamos medido con difuzz; la de la derecha es la que prueba uso común (wrappers de módulo, IIFE).
+
+### 8.4 · El criterio de 1b falló, y aun así 1b encontró #12400
+
+- El 9739 dio `iguales` en `main` y en el fix. **Efecto observador:** el bug necesitaba que `arr` no tuviera usos posteriores, y el epílogo agrega uno. Mismo swap + `console.log(arr)` (11084, caso 2) → correcto. El observador **no puede** ver bugs cuyo disparador es "binding sin usos". La auditoría de snapshots había validado el serializador, no el diseño.
+- Contracara: #12400 salió **solo** gracias al epílogo (fixture `unused_keep_harmony_destructuring` + una referencia externa a `foo`). Un bug de "uso que el minifier no cuenta" solo se ve si alguien usa el binding.
+- Corrida completa con los filtros: 34 → **19 divergencias**, **524 programas mudos comparados**.
+- Candidato para el punto ciego, sin implementar: **lint estático** sobre el minificado. Un target de asignación que es miembro de un literal (`[…][0] = x`) es la firma del 9739.
+
+### 8.5 · Pendientes de código (no bloquean nada)
+
+- Warnings `field 0 is never read` en `Outcome::ParseError` / `CodegenError` (venían de F1).
+- Normalizar `[Function: …]` / `[class …]` en el oráculo: nombres **inferidos** (`2508_5/6`, `unsafe_evaluate_object_2`) que `keep_fnames` no protege.
+- Skip-list de asunciones de la policy (§8.1), empezando por `NaN_and_Infinity_…`.
+- Etiquetar automáticamente las divergencias cuyo fixture está en `TODO.txt` / `postponed.txt`.
+- Probe `@swc/core` como script del repo.
+
+### 8.6 · Errores propios de esta ronda
+
+1. **No leí `AGENTS.md` del minifier** antes de publicar, aunque mi propio doc lo mandaba. Es el más caro: cambia el objetivo del proyecto.
+2. Afirmé que el epílogo habría detectado el 9739 sin probarlo con el pipeline real.
+3. Reduje **reescribiendo** el caso en vez de **borrar una sentencia por vez**, y perdí la sentencia disparadora (k01 vs k02).
+4. m01 (`foo === foo`) fue un negativo fabricado por mi variante: el minifier lo pliega (§1.13b).
+5. El primer borrador de #12400 tenía una generalización no medida (el `ReferenceError` del repro mínimo). La cazó contrastar contra la salida cruda, como pide el método.
+
+### 8.7 · Próxima sesión
+
+1. **Fix de #12400, en chat nuevo** (handoff abajo).
+2. Seguir #12398: review, CI, `./scripts/exec.sh` si no se corrió.
+3. Los pendientes de §8.5.
+4. `1672_for` (función como cuerpo de un `for`, `SyntaxError`): antes de invertir, revisar territorio. Switch/case y for-init son zona de Austaras (`swc-caza-issues` §3).
+
+**Handoff del fix de #12400:**
+- Repro: `(function () { function handler() { var self = handler; } setTimeout(handler, 0); })();` → `ReferenceError` con defaults.
+- Condición (Rust API, `main`): declaración de función + local **no usada** inicializada con **su propio nombre**. No reproduce con la local usada, con `foo;` suelto, con alias a otra función, ni con **expresión** de función: ese último es el precedente in-tree.
+- Hipótesis `INF`, no confirmada: el analizador registra la referencia interna como **uso recursivo** (`report_usage` → `used_recursively` → no suma), y al eliminar la local algo descuenta un uso de `foo` que nunca se sumó. Alternativa: `subtract_cycles` de `simplify::dce` (tu terreno de #11963/#12029). Primer paso: los logs de `report_change!` / *"Dropping X because it's not used"* para saber qué pasada lo borra.
+- Territorio: el usage analyzer es zona de Austaras. Chequear ramas de su fork (§1.21) antes de escribir código.
+- Test: exec test en `tests/exec.rs`, que falle sin el fix. Correr `./scripts/exec.sh`.
