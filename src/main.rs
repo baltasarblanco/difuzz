@@ -171,7 +171,7 @@ fn main() {
             std::process::exit(1);
         }
     };
-    let reporter = oracle::Reporter::new(&cli.out, "carril_a", runner::PRELOAD);
+    let reporter = oracle::Reporter::new(&cli.out, minify::Config::NAME, runner::PRELOAD);
     let known = known::Known::load(&cli.corpus);
     let ctx = Ctx {
         reporter: &reporter,
@@ -180,8 +180,9 @@ fn main() {
     let jobs = cli.jobs.min(files.len());
 
     eprintln!(
-        "difuzz F1 · {} casos · config carril_a · {jobs} workers · timeout {:?} · observador {} · backlog conocido {} · salida en {}",
+        "difuzz F1 · {} casos · config {} · {jobs} workers · timeout {:?} · observador {} · backlog conocido {} · salida en {}",
         files.len(),
+        minify::Config::NAME,
         cli.timeout,
         if cli.observe { "on" } else { "off" },
         known.backlog_len(),

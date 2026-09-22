@@ -26,11 +26,12 @@ use swc_ecma_transforms_base::{
 };
 
 pub struct Config {
-    pub name: &'static str,
     pub minify: MinifyOptions,
 }
 
 impl Config {
+    pub const NAME: &'static str = "carril_a";
+
     /// Carril A: script + CommonJS (delta v1.2, decision #1).
     ///
     /// La base de compresion se construye por el mismo camino que @swc/core:
@@ -65,7 +66,6 @@ impl Config {
         compress.keep_classnames = true;
 
         Config {
-            name: "carril_a",
             minify: MinifyOptions {
                 compress: Some(compress),
                 mangle: Some(MangleOptions {
