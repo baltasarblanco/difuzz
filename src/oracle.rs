@@ -90,7 +90,14 @@ pub struct Reporter {
 impl Reporter {
     /// Guarda el preload una vez en la raiz: cada hallazgo se reproduce con
     /// `TZ=UTC node --require <out>/preload.cjs original.cjs`.
+    ///
+    /// Borra `div/`, `known/` y `panic/` de una corrida anterior: si no, los
+    /// hallazgos viejos se mezclan con los nuevos y el `ls` miente (paso en la
+    /// corrida del 21-sep, con 8 directorios de sobra).
     pub fn new(root: &Path, config_name: &'static str, preload: &str) -> Reporter {
+        for sub in ["div", "known", "panic"] {
+            let _ = std::fs::remove_dir_all(root.join(sub));
+        }
         write_all(root, &[("preload.cjs", preload)]);
         Reporter {
             root: root.to_path_buf(),

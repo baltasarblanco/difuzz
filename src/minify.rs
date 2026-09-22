@@ -14,10 +14,16 @@ use swc_ecma_ast::{Decl, EsVersion, ObjectPatProp, Pat, Program, Stmt};
 use swc_ecma_codegen::{text_writer::JsWriter, Emitter};
 use swc_ecma_minifier::{
     optimize,
-    option::{CompressOptions, ExtraOptions, MangleOptions, MinifyOptions, TopLevelOptions},
+    option::{
+        terser::TerserCompressorOptions, ExtraOptions, MangleOptions, MinifyOptions,
+        TopLevelOptions,
+    },
 };
 use swc_ecma_parser::{parse_file_as_script, Syntax};
-use swc_ecma_transforms_base::{fixer::fixer, resolver};
+use swc_ecma_transforms_base::{
+    fixer::{fixer, paren_remover},
+    resolver,
+};
 
 pub struct Config {
     pub name: &'static str,
@@ -26,6 +32,12 @@ pub struct Config {
 
 impl Config {
     /// Carril A: script + CommonJS (delta v1.2, decision #1).
+    ///
+    /// La base de compresion se construye por el mismo camino que @swc/core:
+    /// `TerserCompressorOptions` vacio → `into_config`. Asi los defaults son los
+    /// del producto por construccion (`CompressOptions::default()` de Rust no:
+    /// deja `reduce_vars: false`, y desde JS hereda `defaults = true`). Encima
+    /// van solo las decisiones del carril.
     ///
     /// - `compress.module = false`: el minifier asume sloppy, igual que Node
     ///   al ejecutar un `.cjs`.
@@ -43,16 +55,19 @@ impl Config {
     ///   `[Function: f]` contra `[Function: n]` y es divergencia esperada. En la
     ///   primera corrida fueron 14 de las 32 divergencias en main.
     pub fn carril_a() -> Self {
+        // into_config solo usa el SourceMap para parsear pure_funcs / global_defs,
+        // que aca vienen vacios.
+        let cm: Lrc<SourceMap> = Default::default();
+        let mut compress = TerserCompressorOptions::default().into_config(cm);
+        compress.module = false;
+        compress.top_level = Some(TopLevelOptions { functions: true });
+        compress.keep_fnames = true;
+        compress.keep_classnames = true;
+
         Config {
             name: "carril_a",
             minify: MinifyOptions {
-                compress: Some(CompressOptions {
-                    module: false,
-                    top_level: Some(TopLevelOptions { functions: true }),
-                    keep_fnames: true,
-                    keep_classnames: true,
-                    ..Default::default()
-                }),
+                compress: Some(compress),
                 mangle: Some(MangleOptions {
                     top_level: Some(true),
                     keep_fn_names: true,
@@ -108,8 +123,13 @@ fn prepare_inner(src: &str, cfg: &Config) -> Outcome {
     let unresolved_mark = Mark::new();
     let top_level_mark = Mark::new();
 
-    let program =
-        Program::Script(script).apply(resolver(unresolved_mark, top_level_mark, false));
+    // paren_remover va ANTES del resolver, como en @swc/core. Sin el, los nodos
+    // Paren del parser llegan al optimizador y algunas reglas no los ven: con
+    // `delete (1 ? undefined : x)` el conditional se simplificaba adentro del
+    // delete y quedaba `delete undefined` (los cuatro casos delete_* del corpus).
+    let program = Program::Script(script)
+        .apply(paren_remover(None))
+        .apply(resolver(unresolved_mark, top_level_mark, false));
 
     let original = program.clone().apply(fixer(None));
     let original = match emit(cm.clone(), &original) {

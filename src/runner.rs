@@ -54,26 +54,43 @@ impl Exec {
     }
 }
 
+/// El preload escrito a disco una vez por proceso; lo comparten todos los
+/// runners y se borra al soltar el guard.
+pub struct Preload {
+    path: PathBuf,
+}
+
+impl Preload {
+    pub fn write() -> std::io::Result<Preload> {
+        let path = std::env::temp_dir().join(format!("difuzz-{}-preload.cjs", std::process::id()));
+        std::fs::write(&path, PRELOAD)?;
+        Ok(Preload { path })
+    }
+}
+
+impl Drop for Preload {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
+    }
+}
+
 pub struct Runner {
-    /// Un solo path para todas las ejecuciones: corren en secuencia, y un
-    /// programa que imprime su propio filename (`module`, stacks) tiene que
-    /// ver lo mismo en A y en B.
+    /// Un solo path por worker: A y B de un mismo caso corren en secuencia en
+    /// el mismo worker, y un programa que imprime su propio filename
+    /// (`module`, stacks) tiene que ver lo mismo en los dos lados.
     script: PathBuf,
     preload: PathBuf,
     timeout: Duration,
 }
 
 impl Runner {
-    pub fn new(timeout: Duration) -> std::io::Result<Runner> {
-        let dir = std::env::temp_dir();
-        let pid = std::process::id();
-        let preload = dir.join(format!("difuzz-{pid}-preload.cjs"));
-        std::fs::write(&preload, PRELOAD)?;
-        Ok(Runner {
-            script: dir.join(format!("difuzz-{pid}.cjs")),
-            preload,
+    pub fn new(preload: &Preload, worker: usize, timeout: Duration) -> Runner {
+        Runner {
+            script: std::env::temp_dir()
+                .join(format!("difuzz-{}-w{worker}.cjs", std::process::id())),
+            preload: preload.path.clone(),
             timeout,
-        })
+        }
     }
 
     pub fn run(&self, js: &str) -> Exec {
@@ -88,7 +105,6 @@ impl Runner {
 impl Drop for Runner {
     fn drop(&mut self) {
         let _ = std::fs::remove_file(&self.script);
-        let _ = std::fs::remove_file(&self.preload);
     }
 }
 
