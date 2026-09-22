@@ -5,6 +5,7 @@
 //! entrega.
 
 mod corpus;
+mod known;
 mod minify;
 mod oracle;
 mod runner;
@@ -80,6 +81,8 @@ struct Stats {
     panics: usize,
     same: usize,
     divergences: usize,
+    /// Divergencias esperadas: asuncion documentada o backlog de SWC (known.rs).
+    known: usize,
     /// Casos mudos comparados via epilogo (subconjunto de same + divergences).
     observed: usize,
     /// Casos mudos sin bindings top-level que observar.
@@ -89,10 +92,11 @@ struct Stats {
 impl Stats {
     fn line(&self) -> String {
         format!(
-            "total={} iguales={} DIVERGENCIAS={} PANICS={} observados={} | descartados: original={} mudos_sin_bindings={} parse={} codegen={} runner={} ilegibles={}",
+            "total={} iguales={} DIVERGENCIAS={} conocidas={} PANICS={} observados={} | descartados: original={} mudos_sin_bindings={} parse={} codegen={} runner={} ilegibles={}",
             self.total,
             self.same,
             self.divergences,
+            self.known,
             self.panics,
             self.observed,
             self.original_discarded,
@@ -139,14 +143,21 @@ fn main() {
         }
     };
     let reporter = oracle::Reporter::new(&cli.out, cfg.name, runner::PRELOAD);
+    let known = known::Known::load(&cli.corpus);
+    let ctx = Ctx {
+        runner: &runner,
+        reporter: &reporter,
+        known: &known,
+    };
     let mut stats = Stats::default();
 
     eprintln!(
-        "difuzz F1 · {} casos · config {} · timeout {:?} · observador {} · salida en {}",
+        "difuzz F1 · {} casos · config {} · timeout {:?} · observador {} · backlog conocido {} · salida en {}",
         files.len(),
         cfg.name,
         cli.timeout,
         if cli.observe { "on" } else { "off" },
+        known.backlog_len(),
         cli.out.display()
     );
 
@@ -164,11 +175,11 @@ fn main() {
 
         let (original, minified) = match minify::prepare(&src, &cfg) {
             minify::Outcome::Ok { original, minified } => (original, minified),
-            minify::Outcome::ParseError(_) => {
+            minify::Outcome::ParseError => {
                 stats.parse_error += 1;
                 continue;
             }
-            minify::Outcome::CodegenError(_) => {
+            minify::Outcome::CodegenError => {
                 stats.codegen_error += 1;
                 continue;
             }
@@ -188,14 +199,14 @@ fn main() {
         }
 
         if a.ok_with_output() {
-            if !compare_and_report(&runner, &reporter, &mut stats, rel, &original, &minified, a, false) {
+            if !compare_and_report(&ctx, &mut stats, rel, &original, &minified, a, false) {
                 stats.same += 1;
             }
         } else if a.ok_silent() {
             // Programa mudo. Primero la comparacion cruda: si el minificado lanza,
             // se cuelga o imprime algo, ya es divergencia (asi se ve un SyntaxError
             // como el de swc#12397 en un programa que no imprime).
-            if compare_and_report(&runner, &reporter, &mut stats, rel, &original, &minified, a, false) {
+            if compare_and_report(&ctx, &mut stats, rel, &original, &minified, a, false) {
                 continue;
             }
             if !cli.observe {
@@ -216,7 +227,7 @@ fn main() {
                 }
                 // El fuente ya parseo sin el epilogo; si falla con el, es problema
                 // del instrumentador, no un hallazgo.
-                minify::Outcome::ParseError(_) | minify::Outcome::CodegenError(_) => {
+                minify::Outcome::ParseError | minify::Outcome::CodegenError => {
                     stats.silent_unobservable += 1;
                     continue;
                 }
@@ -227,7 +238,7 @@ fn main() {
                 continue;
             }
             stats.observed += 1;
-            if !compare_and_report(&runner, &reporter, &mut stats, rel, &original, &minified, a, true) {
+            if !compare_and_report(&ctx, &mut stats, rel, &original, &minified, a, true) {
                 stats.same += 1;
             }
         } else {
@@ -243,14 +254,19 @@ fn main() {
     print_hint(&cli.out, &stats);
 }
 
+/// Lo que comparten todas las comparaciones de una corrida.
+struct Ctx<'a> {
+    runner: &'a runner::Runner,
+    reporter: &'a oracle::Reporter,
+    known: &'a known::Known,
+}
+
 /// Corre B y compara contra A (que ya termino con exit 0). Devuelve `true` si
 /// el caso quedo cerrado: divergencia reportada o falla del runner. `false`
 /// significa "iguales"; el llamador decide si eso cuenta como `same` o si sigue
 /// a la pasada observada.
-#[allow(clippy::too_many_arguments)]
 fn compare_and_report(
-    runner: &runner::Runner,
-    reporter: &oracle::Reporter,
+    ctx: &Ctx,
     stats: &mut Stats,
     rel: &Path,
     original: &str,
@@ -258,7 +274,7 @@ fn compare_and_report(
     a: runner::Exec,
     observed: bool,
 ) -> bool {
-    let b = runner.run(minified);
+    let b = ctx.runner.run(minified);
     if let Status::Failed(e) = &b.status {
         stats.runner_failed += 1;
         eprintln!("runner: {e}");
@@ -267,10 +283,15 @@ fn compare_and_report(
     match oracle::compare(&a, &b) {
         oracle::Verdict::Same => false,
         oracle::Verdict::Divergence(kind) => {
-            stats.divergences += 1;
-            let tag = if observed { " (observado)" } else { "" };
-            eprintln!("DIVERGENCIA {kind:?}{tag}: {}", rel.display());
-            reporter.divergence(rel, original, minified, &a, &b, kind, observed);
+            let why = ctx.known.classify(rel);
+            if why.is_some() {
+                stats.known += 1;
+            } else {
+                stats.divergences += 1;
+                let tag = if observed { " (observado)" } else { "" };
+                eprintln!("DIVERGENCIA {kind:?}{tag}: {}", rel.display());
+            }
+            ctx.reporter.divergence(rel, original, minified, &a, &b, kind, observed, why);
             true
         }
     }
@@ -278,6 +299,9 @@ fn compare_and_report(
 
 fn print_hint(out: &Path, stats: &Stats) {
     if stats.divergences + stats.panics > 0 {
-        println!("hallazgos en {}", out.display());
+        println!("hallazgos en {}/div", out.display());
+    }
+    if stats.known > 0 {
+        println!("conocidas (asuncion o backlog) en {}/known", out.display());
     }
 }

@@ -68,8 +68,8 @@ impl Config {
 pub enum Outcome {
     Ok { original: String, minified: String },
     /// El parser rechazo el fuente o lo acepto con errores recuperados.
-    ParseError(String),
-    CodegenError(String),
+    ParseError,
+    CodegenError,
     /// `optimize` (o algo en la cadena) entro en panico. Es un hallazgo.
     Panic(String),
 }
@@ -99,10 +99,10 @@ fn prepare_inner(src: &str, cfg: &Config) -> Outcome {
         &mut recovered,
     ) {
         Ok(s) => s,
-        Err(e) => return Outcome::ParseError(format!("{e:?}")),
+        Err(_) => return Outcome::ParseError,
     };
     if !recovered.is_empty() {
-        return Outcome::ParseError(format!("{} errores recuperados", recovered.len()));
+        return Outcome::ParseError;
     }
 
     let unresolved_mark = Mark::new();
@@ -114,7 +114,7 @@ fn prepare_inner(src: &str, cfg: &Config) -> Outcome {
     let original = program.clone().apply(fixer(None));
     let original = match emit(cm.clone(), &original) {
         Ok(s) => s,
-        Err(e) => return Outcome::CodegenError(format!("original: {e}")),
+        Err(_) => return Outcome::CodegenError,
     };
 
     let minified = optimize(
@@ -132,7 +132,7 @@ fn prepare_inner(src: &str, cfg: &Config) -> Outcome {
     .apply(fixer(None));
     let minified = match emit(cm, &minified) {
         Ok(s) => s,
-        Err(e) => return Outcome::CodegenError(format!("minificado: {e}")),
+        Err(_) => return Outcome::CodegenError,
     };
 
     Outcome::Ok { original, minified }

@@ -33,11 +33,52 @@ pub fn compare(a: &Exec, b: &Exec) -> Verdict {
         // Error del fuzzer, no del programa: no es divergencia. main lo cuenta.
         Status::Failed(_) => return Verdict::Same,
     }
-    if a.stdout != b.stdout {
+    if normalize_names(&a.stdout) != normalize_names(&b.stdout) {
         Verdict::Divergence(Kind::Stdout)
     } else {
         Verdict::Same
     }
+}
+
+/// Borra los nombres de funciones y clases que imprime `util.inspect`
+/// (`[Function: f]`, `[Function (anonymous)]`, `[class A extends B]`, ...).
+///
+/// `keep_fnames` protege nombres explicitos, pero no los inferidos: en
+/// `var o = { f: function () {} }` la funcion se llama `f` por la clave, y si
+/// `hoist_props` la mueve a una variable mangleada pasa a llamarse `o`. Eso no
+/// es un bug (casos 2508_5/6, unsafe_evaluate_object_2). Una funcion sigue sin
+/// ser igual a un numero: `[Function]` contra `6` diverge igual.
+pub fn normalize_names(s: &str) -> String {
+    const OPENERS: [&str; 5] = [
+        "[Function",
+        "[AsyncFunction",
+        "[GeneratorFunction",
+        "[AsyncGeneratorFunction",
+        "[class",
+    ];
+    let mut out = String::with_capacity(s.len());
+    let mut rest = s;
+    while let Some((i, opener)) = OPENERS
+        .iter()
+        .filter_map(|o| rest.find(o).map(|i| (i, *o)))
+        .min_by_key(|(i, _)| *i)
+    {
+        let after = &rest[i + opener.len()..];
+        // Solo si lo que sigue es ':' ' ' o ']' (evita tocar "[Functional]").
+        let Some(next) = after.chars().next() else {
+            break;
+        };
+        let Some(close) = after.find(']').filter(|_| matches!(next, ':' | ' ' | ']')) else {
+            out.push_str(&rest[..i + opener.len()]);
+            rest = after;
+            continue;
+        };
+        out.push_str(&rest[..i]);
+        out.push_str(if opener == "[class" { "[class]" } else { "[Function]" });
+        rest = &after[close + 1..];
+    }
+    out.push_str(rest);
+    out
 }
 
 /// Un directorio por hallazgo con todo lo necesario para reproducirlo a mano.
@@ -67,12 +108,14 @@ impl Reporter {
         b: &Exec,
         kind: Kind,
         observed: bool,
+        known: Option<&str>,
     ) {
-        let dir = self.case_dir("div", case);
+        let dir = self.case_dir(if known.is_some() { "known" } else { "div" }, case);
         let meta = format!(
-            "case: {}\nkind: {kind:?}\nconfig: {}\nobserved: {observed}\n\noriginal: {:?} en {:?}\nminificado: {:?} en {:?}\n\nrepro: TZ=UTC node --require {}/preload.cjs original.cjs\n",
+            "case: {}\nkind: {kind:?}\nconfig: {}\nobserved: {observed}\nknown: {}\n\noriginal: {:?} en {:?}\nminificado: {:?} en {:?}\n\nrepro: TZ=UTC node --require {}/preload.cjs original.cjs\n",
             case.display(),
             self.config_name,
+            known.unwrap_or("no"),
             a.status,
             a.elapsed,
             b.status,
@@ -127,5 +170,32 @@ fn write_all(dir: &Path, files: &[(&str, &str)]) {
         if let Err(e) = std::fs::write(dir.join(name), content) {
             eprintln!("reporter: no pude escribir {}/{name}: {e}", dir.display());
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::normalize_names as n;
+
+    #[test]
+    fn borra_nombres_de_funciones_y_clases() {
+        assert_eq!(n("[Function: f]"), "[Function]");
+        assert_eq!(n("1 2 4 [Function (anonymous)]"), "1 2 4 [Function]");
+        assert_eq!(
+            n("[class B extends A] [AsyncFunction: x] [Function: g] { a: 1 }"),
+            "[class] [Function] [Function] { a: 1 }"
+        );
+    }
+
+    #[test]
+    fn no_toca_lo_que_no_es_un_nombre() {
+        assert_eq!(n("[Functional] [Function"), "[Functional] [Function");
+        assert_eq!(n("sin nada"), "sin nada");
+    }
+
+    #[test]
+    fn una_funcion_sigue_sin_ser_un_numero() {
+        // inverted_var: [Function: c] contra 6 tiene que seguir divergiendo.
+        assert_ne!(n("1 2 [Function: c] 7"), n("1 2 6 7"));
     }
 }

@@ -1,2 +1,3 @@
 target/
 difuzz-out/
+probe/node_modules/

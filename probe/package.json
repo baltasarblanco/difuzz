@@ -1,0 +1,8 @@
+{
+  "name": "difuzz-probe",
+  "private": true,
+  "description": "Probe de difuzz contra @swc/core publicado, con opciones por defecto",
+  "dependencies": {
+    "@swc/core": "1.16.2"
+  }
+}
