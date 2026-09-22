@@ -4,19 +4,24 @@
 //!
 //! Carril A: el programa se escribe a un `.cjs` y se corre con `node archivo`.
 //! Node lo envuelve en la funcion de CommonJS: sloppy mode, top-level privado.
+//!
+//! A y B corren con el mismo path, el mismo preload y TZ=UTC: cualquier cosa
+//! que el programa pueda leer del entorno es identica en los dos lados.
 
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
+
+/// Determinismo + observador. Ver `preload.js`.
+pub const PRELOAD: &str = include_str!("preload.js");
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Status {
     Exited(i32),
     /// Termino por senal (sin exit code). En Linux: crash, OOM killer, etc.
     Signal,
-    /// Superó el timeout y fue matado.
+    /// Supero el timeout y fue matado.
     Timeout,
     /// No se pudo escribir el archivo o lanzar `node`. Error del fuzzer, no del
     /// programa: main lo trata aparte.
@@ -35,6 +40,10 @@ impl Exec {
         self.status == Status::Exited(0) && !self.stdout.trim().is_empty()
     }
 
+    pub fn ok_silent(&self) -> bool {
+        self.status == Status::Exited(0) && self.stdout.trim().is_empty()
+    }
+
     fn failed(msg: String, start: Instant) -> Exec {
         Exec {
             status: Status::Failed(msg),
@@ -45,27 +54,50 @@ impl Exec {
     }
 }
 
-static COUNTER: AtomicU64 = AtomicU64::new(0);
+pub struct Runner {
+    /// Un solo path para todas las ejecuciones: corren en secuencia, y un
+    /// programa que imprime su propio filename (`module`, stacks) tiene que
+    /// ver lo mismo en A y en B.
+    script: PathBuf,
+    preload: PathBuf,
+    timeout: Duration,
+}
 
-pub fn run(js: &str, timeout: Duration) -> Exec {
-    let start = Instant::now();
-    let path = temp_path();
-    if let Err(e) = std::fs::write(&path, js) {
-        return Exec::failed(format!("escribir {}: {e}", path.display()), start);
+impl Runner {
+    pub fn new(timeout: Duration) -> std::io::Result<Runner> {
+        let dir = std::env::temp_dir();
+        let pid = std::process::id();
+        let preload = dir.join(format!("difuzz-{pid}-preload.cjs"));
+        std::fs::write(&preload, PRELOAD)?;
+        Ok(Runner {
+            script: dir.join(format!("difuzz-{pid}.cjs")),
+            preload,
+            timeout,
+        })
     }
-    let exec = run_file(&path, timeout, start);
-    let _ = std::fs::remove_file(&path);
-    exec
+
+    pub fn run(&self, js: &str) -> Exec {
+        let start = Instant::now();
+        if let Err(e) = std::fs::write(&self.script, js) {
+            return Exec::failed(format!("escribir {}: {e}", self.script.display()), start);
+        }
+        run_file(&self.preload, &self.script, self.timeout, start)
+    }
 }
 
-fn temp_path() -> PathBuf {
-    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-    std::env::temp_dir().join(format!("difuzz-{}-{n}.cjs", std::process::id()))
+impl Drop for Runner {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.script);
+        let _ = std::fs::remove_file(&self.preload);
+    }
 }
 
-fn run_file(path: &Path, timeout: Duration, start: Instant) -> Exec {
+fn run_file(preload: &Path, script: &Path, timeout: Duration, start: Instant) -> Exec {
     let mut child = match Command::new("node")
-        .arg(path)
+        .arg("--require")
+        .arg(preload)
+        .arg(script)
+        .env("TZ", "UTC")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())

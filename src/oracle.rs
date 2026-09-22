@@ -1,7 +1,10 @@
 //! CMP: que cuenta como divergencia (delta v1.2 §1 §3.4) y como se guarda.
 //!
-//! Precondicion que garantiza main: el original termino con exit 0 y stdout
-//! no vacio (el guard de salida vacia de tests/exec.rs).
+//! Precondicion que garantiza main: el original termino con exit 0. Si ademas
+//! su stdout es vacio, la comparacion cruda solo puede ver que el minificado
+//! lanzo, se colgo o imprimio algo; los valores se comparan en la pasada
+//! observada (epilogo). Sin epilogo, dos programas mudos "coinciden" siempre:
+//! por eso tests/exec.rs tiene el guard de salida vacia.
 
 use std::path::{Path, PathBuf};
 
@@ -44,13 +47,17 @@ pub struct Reporter {
 }
 
 impl Reporter {
-    pub fn new(root: &Path, config_name: &'static str) -> Reporter {
+    /// Guarda el preload una vez en la raiz: cada hallazgo se reproduce con
+    /// `TZ=UTC node --require <out>/preload.cjs original.cjs`.
+    pub fn new(root: &Path, config_name: &'static str, preload: &str) -> Reporter {
+        write_all(root, &[("preload.cjs", preload)]);
         Reporter {
             root: root.to_path_buf(),
             config_name,
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn divergence(
         &self,
         case: &Path,
@@ -59,23 +66,25 @@ impl Reporter {
         a: &Exec,
         b: &Exec,
         kind: Kind,
+        observed: bool,
     ) {
         let dir = self.case_dir("div", case);
         let meta = format!(
-            "case: {}\nkind: {kind:?}\nconfig: {}\n\noriginal: {:?} en {:?}\nminificado: {:?} en {:?}\n",
+            "case: {}\nkind: {kind:?}\nconfig: {}\nobserved: {observed}\n\noriginal: {:?} en {:?}\nminificado: {:?} en {:?}\n\nrepro: TZ=UTC node --require {}/preload.cjs original.cjs\n",
             case.display(),
             self.config_name,
             a.status,
             a.elapsed,
             b.status,
             b.elapsed,
+            self.root.display(),
         );
         write_all(
             &dir,
             &[
                 ("meta.txt", meta.as_str()),
-                ("original.js", original),
-                ("minified.js", minified),
+                ("original.cjs", original),
+                ("minified.cjs", minified),
                 ("a.stdout", a.stdout.as_str()),
                 ("a.stderr", a.stderr.as_str()),
                 ("b.stdout", b.stdout.as_str()),
@@ -94,7 +103,8 @@ impl Reporter {
         write_all(&dir, &[("meta.txt", meta.as_str()), ("input.js", src)]);
     }
 
-    /// `<root>/<prefijo>/<ruta del caso con '/' → '__'>`
+    /// `<root>/<prefijo>/<ruta del caso con '/' → '__'>`. Si el corpus es el
+    /// directorio del caso mismo, la ruta relativa no tiene padre: `_root`.
     fn case_dir(&self, prefix: &str, case: &Path) -> PathBuf {
         let slug: Vec<String> = case
             .parent()
@@ -103,7 +113,8 @@ impl Reporter {
             .map(|c| c.as_os_str().to_string_lossy().into_owned())
             .filter(|c| c != "." && c != "/")
             .collect();
-        self.root.join(prefix).join(slug.join("__"))
+        let name = if slug.is_empty() { "_root".to_string() } else { slug.join("__") };
+        self.root.join(prefix).join(name)
     }
 }
 
