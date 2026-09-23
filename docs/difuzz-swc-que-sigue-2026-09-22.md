@@ -1,71 +1,80 @@
-# difuzz (SWC) — Qué sigue · 22-sep-2026
+# difuzz (SWC) — Qué sigue · 22-sep-2026 (cierre)
 
-**Qué es este doc:** la cola de trabajo al cierre de la sesión del 22-sep. Complementa `difuzz-swc-estado-2026-09-21.md`, que no reemplaza. Todo es específico de SWC (`swc_ecma_minifier` 61.0.8, `main` @ `4b42cd59d7`, `@swc/core` 1.16.2).
+**Qué es este doc:** la cola de trabajo al cierre del 22-sep. **Reemplaza** a la versión de
+la mañana del mismo nombre y complementa `difuzz-swc-estado-2026-09-21.md`. Todo es
+específico de SWC: `main` @ `42e4f7e98b`, `@swc/core` 1.16.2.
 
 ---
 
-## Dónde quedó la herramienta (commit `6b81374` + el de `Config::NAME`)
+## Qué pasó hoy
 
-- **Pipeline igual al producto**: `paren_remover` antes del resolver, y la compresión construida con `TerserCompressorOptions::default().into_config()` (misma ruta que `swc::Compiler::minify`). Los cuatro `delete_*` eran un artefacto de no correr `paren_remover`: `handle_known_delete` no matchea `Paren(Cond)`.
-- **Paralelo**: `--jobs N` (default: núcleos). Corpus completo: **2 min 07 → 15 s**.
-- **Robusto**: `catch_unwind` por caso; un panic del fuzzer pierde el caso, no el worker.
-- **Reporter** limpia `div/`, `known/`, `panic/` al arrancar.
-- Corrida del 22-sep: `total=3102 iguales=1894 DIVERGENCIAS=9 conocidas=5 PANICS=0 observados=524`.
+- **#12398 MERGEADA** por kdy1 (squash `42e4f7e98b`, ~19 h, sin pedidos de cambio).
+  #12397 quedó `CLOSED COMPLETED`. Lecciones en `lecciones-pr-12398-swc.md`.
+- **#12401 abierta**: fix de #12400 en `simplify/dce/mod.rs` (no en el minifier). Rebaseada
+  sobre `42e4f7e98b`, CI corriendo al cierre, esperando review. Lecciones en
+  `lecciones-pr-12401-swc.md`.
+- **#12404 reportado**: `fixture/issues/8953` es una **regresión** de #8953, introducida por
+  #10201 (kdy1, 2025-03-20). Sin compromiso de fix.
 
-## Las 9 divergencias vivas
+## Las 9 divergencias de la corrida del 22-sep, estado actual
 
-| caso | estado | producto (defaults, en función) |
-|---|---|---|
-| `fixture/issues/11084` | **#12397** reportado, fix **#12398** | `SyntaxError` |
-| `drop_unused/unused_keep_harmony_destructuring` | **#12400** reportado, fix pendiente | `ReferenceError` |
-| `fixture/issues/8953` | **listo para reportar** | `SyntaxError` ×6 combinaciones |
-| `functions/issue_2101` | **candidato nuevo** (destapado por `paren_remover`) | `true → false`: IIFE inlineado pierde el `this` global |
-| `collapse_vars/duplicate_argname` | candidato nuevo, uso común flojo | `PASS → FAIL`: `function (a, a)`, solo sloppy |
-| `blocks/issue_1672_for` | real, Annex B, zona de Austaras | `SyntaxError` |
-| `reduce_vars/lvalues_def_2` | real dentro de funciones | `2 NaN → 2 2` |
-| `fixture/issues/do-while-false-terminal-jump/condition-exceptions` | real, exótico | `ReferenceError → unexpected` |
-| `issue_973/this_binding_sequences` | baja: semántica de `eval`, fuera de policy | — |
+| caso | estado |
+|---|---|
+| `fixture/issues/11084` | **arreglado** en `main` (#12398). Confirmar con difuzz tras actualizar `~/swc-main` |
+| `drop_unused/unused_keep_harmony_destructuring` | fix en **#12401** (abierta); difuzz con el fix: sale de `div/` y nada más cambia |
+| `fixture/issues/8953` | **#12404** reportado (regresión de #10201) |
+| `functions/issue_2101` | candidato; depende de **#12267** (labor0, OPEN, toca `iife.rs`) |
+| `collapse_vars/duplicate_argname` | candidato, uso común flojo (`function (a, a)`, solo sloppy) |
+| `blocks/issue_1672_for` | real, Annex B, zona de Austaras |
+| `reduce_vars/lvalues_def_2` | real dentro de funciones |
+| `fixture/issues/do-while-false-terminal-jump/condition-exceptions` | real, exótico |
+| `issue_973/this_binding_sequences` | baja: semántica de `eval`, fuera de policy |
 
-Todas menos `this_binding_sequences` pasaron el probe contra `@swc/core` con defaults. Las nueve están en `passing.txt`: pasan con su config y rompen con otra.
+## Datos de #12404 (8953) para un eventual fix
 
-## Qué sigue
+- Historial del `output.js`: `7344a638b5` (#9677) válido → `6841523977` (#10201) inválido →
+  `1115d37049` (revert) válido → `7cd3dac138` (re-land) inválido, igual en `main`.
+- El snapshot tiene **congelado el bug**: si se toma el fix, el `output.js` vuelve a algo
+  equivalente a `console.log(1)`, y eso va justificado en el body (como `9739` en #12398).
+- Solo `async function` diverge; `function`, `function*`, sloppy y módulo pliegan a `1`
+  (probe de 5 variantes, `@swc/core` 1.16.2). Coincide con el reporte original.
+- `NO SE` qué parte de #10201 arma el `if` sin bloque. Punto de partida:
+  `git show 6841523977 --stat` y la conversión `switch` → `if` en el pure optimizer.
 
-Dos candidatos nuevos con evidencia de producto, y uno ya listo. Para no romper la regla de ritmo dos veces en un día: **el próximo reporte espera a la reacción de #12397 o #12400.**
+## Orden sugerido
 
-### Pre-flight de `issue_2101` — hecho el 22-sep
+1. **#12401**: mirar la CI al terminar (`gh pr checks 12401 --json name,state,link`,
+   filtrar `FAILURE`/`CANCELLED`). Ante un rojo, checklist §10 de `lecciones-pr-12398-swc.md`.
+2. **Regla de ritmo:** el próximo reporte espera una reacción de maintainer a **#12404 o
+   #12401**.
+3. **#12404**: si hay señal de que kdy1 no lo toma, localizar la pasada en #10201 y
+   comentar *"I'll send a fix"* recién con el fix localizado.
+4. **`issue_2101`**: esperar el merge de #12267 o probar el repro contra su rama.
+5. **`1672_for`**: revisar ramas del fork de Austaras antes de invertir.
 
-- `gh search issues "IIFE this inlining"` y `"this global function inline"`: **sin resultados**.
-- **PR #12267 de labor0** (*preserve new.target IIFE boundaries*, OPEN) toca `compress/optimize/iife.rs`, la misma pasada que inlinea la IIFE de `issue_2101`. Sus fixtures (`issues/12220/*`) cubren `new.target`, no `this`.
+## Mantenimiento de entorno
 
-**Decisión pendiente:** `NO SE` si el fix de #12267 arregla el `this` de paso. Antes de reportar `issue_2101`:
-1. Esperar el merge de #12267 **o** probar el repro contra su rama (`gh pr checkout 12267` en un worktree, `[patch]` como con `~/swc-main`).
-2. Si sigue rompiendo, reportarlo citando #12267 como vecino y `iife.rs` como pasada.
+- `~/swc-main` sigue en `4b42cd59d7`: actualizar a `upstream/main` y correr difuzz para
+  confirmar que `11084` salió de `div/`.
+- `~/swc-12400` (worktree de la rama de #12401): borrar con `git worktree remove` **después**
+  del merge, no antes.
+- `~/difuzz-main` corre un binario viejo (sin `--jobs`, `<corpus_dir>` posicional). Su base
+  de comparación es la corrida del 21-sep (19 divergencias), no la del 22.
 
-Repro para el issue (ya medido en `@swc/core` 1.16.2 y nightly 20260913, defaults, con y sin mangle):
-```js
-a = {};
-console.log((function () { return (function () { return this.a; })(); })() === (function () { return a; })());
-// original: true · minificado: false
-```
+## Pendientes de difuzz (no bloquean)
 
-### Orden sugerido
-
-1. **Fix de #12400** en chat nuevo (handoff en `difuzz-swc-estado-2026-09-21.md` §8.7).
-2. Seguir **#12398**: review, CI, `./scripts/exec.sh` si no se corrió.
-3. Al primer comentario de maintainer en #12397 o #12400: reportar **8953** (pre-flight primero: qué PR cerró el issue original, y si su fixture se verificó solo con su config, como el 11084).
-4. **`issue_2101`**, según el punto de arriba.
-5. `1672_for`: revisar ramas del fork de Austaras antes de invertir (`git ls-remote --heads`).
-
-### Pendientes de difuzz (no bloquean)
-
-- Matriz de configs (F2 del plan): ahora es viable, cada config cuesta ~15 s.
+- Matriz de configs (F2 del plan): ~15 s por config.
 - Lint estático sobre el minificado para el punto ciego del observador (`[…][0] = x`).
 - Nicho *fixture config ∪ pasadas apagadas*: leer cómo `tests/compress.rs` traduce `config.json`.
-- Auditoría de snapshots (`input.js` vs `output.js`, sin compilar SWC): 129 divergencias crudas sin triage.
+- Auditoría de snapshots (`input.js` vs `output.js`): 129 divergencias crudas sin triage.
+  **Subió de prioridad:** #12398 (`9739`) y #12404 (`8953`) fueron snapshots con el bug
+  congelado. Ejecutar cada `output.js` contra su `input.js` es barato y ya dio dos casos.
+- Agujero anotado en `lecciones-pr-12398-swc.md` §8: `[(o.n)] = …` y `[super.x] = …` no
+  marcan mutación. NO VERIFICADO que produzca un miscompile.
 - `README.md` y hacer público el repo (F5).
 
-## Errores propios del 22-sep
+## Errores propios del 22-sep (tarde)
 
-1. Predije 7 divergencias y salieron 9: no consideré que `paren_remover` podía **destapar** bugs además de tapar artefactos. Fue mejor que la predicción, pero la predicción estaba mal fundada.
-2. El `tail -1` de un comando anterior cortaba la línea `total=`; ahora es lo único que va a stdout.
-3. `Config.name` quedó sin leer al reordenar la construcción; un warning que el stub no mostró porque el stub lo leía distinto.
+Registrados en `lecciones-pr-12401-swc.md` §7. Los dos que se repiten de sesiones
+anteriores: comandos que requieren espera pegados en el mismo bloque, y conteos esperados
+anunciados sin recontar.
