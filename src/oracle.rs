@@ -129,16 +129,19 @@ impl Reporter {
         observed: bool,
         known: Option<&str>,
         note: Option<&str>,
-        flags: &[&str],
+        flags_a: &[&str],
+        flags_b: &[&str],
     ) {
+        let list = |f: &[&str]| if f.is_empty() { "-".to_string() } else { f.join(",") };
         let dir = self.case_dir(if known.is_some() { "known" } else { "div" }, case);
         let meta = format!(
-            "case: {}\nkind: {kind:?}\nconfig: {}\nobserved: {observed}\nknown: {}\nnota: {}\nflags: {}\n\noriginal: {:?} en {:?}\nminificado: {:?} en {:?}\n\nrepro: TZ=UTC node --require {}/preload.cjs original.cjs\n",
+            "case: {}\nkind: {kind:?}\nconfig: {}\nobserved: {observed}\nknown: {}\nnota: {}\nflags_a: {}\nflags_b: {}\n\noriginal: {:?} en {:?}\nminificado: {:?} en {:?}\n\nrepro: TZ=UTC node --require {}/preload.cjs original.cjs\n",
             case.display(),
             self.config_name,
             known.unwrap_or("no"),
             note.unwrap_or("-"),
-            if flags.is_empty() { "-".to_string() } else { flags.join(",") },
+            list(flags_a),
+            list(flags_b),
             a.status,
             a.elapsed,
             b.status,

@@ -460,8 +460,13 @@ fn compare_and_report(
     match oracle::compare(&a, &b) {
         oracle::Verdict::Same => false,
         oracle::Verdict::Divergence(kind) => {
-            let mut flags: Vec<&str> = a.flags.iter().chain(&b.flags).map(String::as_str).collect();
+            // Una asuncion habla del programa de entrada: clasifican los flags de A
+            // y los estaticos del original. Un flag solo en B es algo que el
+            // minificado hace y el original no (p. ej. el .stack que Node lee al
+            // cargar un SyntaxError): hallazgo, no asuncion.
+            let mut flags: Vec<&str> = a.flags.iter().map(String::as_str).collect();
             flags.extend_from_slice(static_flags);
+            let flags_b: Vec<&str> = b.flags.iter().map(String::as_str).collect();
             let mut why = ctx.known.classify(rel, &flags);
             // Una conocida que cambia de sintoma deja de estar cubierta.
             let drift = why.as_ref().and_then(|w| {
@@ -497,6 +502,7 @@ fn compare_and_report(
                 why.as_deref(),
                 drift.as_deref(),
                 &flags,
+                &flags_b,
             );
             true
         }
