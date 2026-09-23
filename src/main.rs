@@ -4,6 +4,7 @@
 //! sin reduccion, una sola configuracion. Feo a proposito: el pipeline es la
 //! entrega.
 
+mod checks;
 mod corpus;
 mod known;
 mod minify;
@@ -104,6 +105,8 @@ struct Stats {
     divergences: usize,
     /// Divergencias esperadas: asuncion documentada o backlog de SWC (known.rs).
     known: usize,
+    /// Conocidas que divergieron con otro sintoma: cuentan en `divergences`.
+    known_drift: usize,
     /// Casos mudos comparados via epilogo (subconjunto de same + divergences).
     observed: usize,
     /// Casos mudos sin bindings top-level que observar.
@@ -132,6 +135,7 @@ impl Stats {
         self.same += o.same;
         self.divergences += o.divergences;
         self.known += o.known;
+        self.known_drift += o.known_drift;
         self.observed += o.observed;
         self.silent_unobservable += o.silent_unobservable;
         self.fuzzer_panics += o.fuzzer_panics;
@@ -148,11 +152,12 @@ impl Stats {
 
     fn line(&self) -> String {
         format!(
-            "total={} iguales={} DIVERGENCIAS={} conocidas={} PANICS={} observados={} lanzaron={} | descartados: original={} (exit={} timeout={} senal={} observado_sin_salida={} mudo_sin_observar={}) mudos_sin_bindings={} parse={} (esm={} otro={}) codegen={} runner={} ilegibles={} panics_del_fuzzer={}",
+            "total={} iguales={} DIVERGENCIAS={} conocidas={} conocidas_sintoma_nuevo={} PANICS={} observados={} lanzaron={} | descartados: original={} (exit={} timeout={} senal={} observado_sin_salida={} mudo_sin_observar={}) mudos_sin_bindings={} parse={} (esm={} otro={}) codegen={} runner={} ilegibles={} panics_del_fuzzer={}",
             self.total,
             self.same,
             self.divergences,
             self.known,
+            self.known_drift,
             self.panics,
             self.observed,
             self.threw,
@@ -205,7 +210,11 @@ fn main() {
         }
     };
     let reporter = oracle::Reporter::new(&cli.out, minify::Config::NAME, runner::PRELOAD);
-    let known = known::Known::load(&cli.corpus);
+    let known = known::Known::load(
+        &cli.corpus,
+        &cli.out,
+        known::fnv1a(&[runner::PRELOAD, minify::Config::NAME]),
+    );
     let ctx = Ctx {
         reporter: &reporter,
         known: &known,
@@ -270,6 +279,9 @@ fn main() {
         }
     });
 
+    if let Err(e) = known.save() {
+        eprintln!("no pude guardar known-sintomas.tsv: {e}");
+    }
     print_hint(&cli.out, &stats);
     println!("{}", stats.line());
 }
@@ -294,8 +306,12 @@ fn process_case(
         }
     };
 
-    let (original, minified) = match minify::prepare(&src, cfg) {
-        minify::Outcome::Ok { original, minified } => (original, minified),
+    let (original, minified, static_flags) = match minify::prepare(&src, cfg) {
+        minify::Outcome::Ok {
+            original,
+            minified,
+            static_flags,
+        } => (original, minified, static_flags),
         minify::Outcome::ParseError { esm } => {
             if esm {
                 stats.parse_esm += 1;
@@ -327,14 +343,14 @@ fn process_case(
         if a.threw() {
             stats.threw += 1;
         }
-        if !compare_and_report(ctx, runner, stats, rel, &original, &minified, a, false) {
+        if !compare_and_report(ctx, runner, stats, rel, &original, &minified, a, false, &static_flags) {
             stats.same += 1;
         }
     } else if a.ok_silent() {
         // Programa mudo. Primero la comparacion cruda: si el minificado lanza,
         // se cuelga o imprime algo, ya es divergencia (asi se ve un SyntaxError
         // como el de swc#12397 en un programa que no imprime).
-        if compare_and_report(ctx, runner, stats, rel, &original, &minified, a, false) {
+        if compare_and_report(ctx, runner, stats, rel, &original, &minified, a, false, &static_flags) {
             return;
         }
         if !cli.observe {
@@ -346,8 +362,12 @@ fn process_case(
             stats.silent_unobservable += 1;
             return;
         };
-        let (original, minified) = match minify::prepare(&instrumented, cfg) {
-            minify::Outcome::Ok { original, minified } => (original, minified),
+        let (original, minified, static_flags) = match minify::prepare(&instrumented, cfg) {
+            minify::Outcome::Ok {
+                original,
+                minified,
+                static_flags,
+            } => (original, minified, static_flags),
             minify::Outcome::Panic(msg) => {
                 stats.panics += 1;
                 ctx.reporter.panic(rel, &instrumented, &msg);
@@ -369,7 +389,7 @@ fn process_case(
         if a.threw() {
             stats.threw += 1;
         }
-        if !compare_and_report(ctx, runner, stats, rel, &original, &minified, a, true) {
+        if !compare_and_report(ctx, runner, stats, rel, &original, &minified, a, true, &static_flags) {
             stats.same += 1;
         }
     } else {
@@ -397,6 +417,7 @@ fn compare_and_report(
     minified: &str,
     a: runner::Exec,
     observed: bool,
+    static_flags: &[&'static str],
 ) -> bool {
     let b = runner.run(minified);
     if let Status::Failed(e) = &b.status {
@@ -407,7 +428,25 @@ fn compare_and_report(
     match oracle::compare(&a, &b) {
         oracle::Verdict::Same => false,
         oracle::Verdict::Divergence(kind) => {
-            let why = ctx.known.classify(rel);
+            let mut flags: Vec<&str> = a.flags.iter().chain(&b.flags).map(String::as_str).collect();
+            flags.extend_from_slice(static_flags);
+            let mut why = ctx.known.classify(rel, &flags);
+            // Una conocida que cambia de sintoma deja de estar cubierta.
+            let drift = why.as_ref().and_then(|w| {
+                let h = known::fnv1a(&[
+                    format!("{kind:?}").as_str(),
+                    oracle::normalize_names(&a.stdout).as_str(),
+                    oracle::normalize_names(&b.stdout).as_str(),
+                ]);
+                ctx.known
+                    .record_symptom(rel, h)
+                    .err()
+                    .map(|prev| format!("conocida ({w}) con sintoma nuevo: antes {prev:016x}, ahora {h:016x}"))
+            });
+            if drift.is_some() {
+                why = None;
+                stats.known_drift += 1;
+            }
             if why.is_some() {
                 stats.known += 1;
             } else {
@@ -415,7 +454,18 @@ fn compare_and_report(
                 let tag = if observed { " (observado)" } else { "" };
                 eprintln!("DIVERGENCIA {kind:?}{tag}: {}", rel.display());
             }
-            ctx.reporter.divergence(rel, original, minified, &a, &b, kind, observed, why);
+            ctx.reporter.divergence(
+                rel,
+                original,
+                minified,
+                &a,
+                &b,
+                kind,
+                observed,
+                why.as_deref(),
+                drift.as_deref(),
+                &flags,
+            );
             true
         }
     }

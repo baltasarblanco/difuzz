@@ -23,6 +23,9 @@ pub const THROW_EXIT: i32 = 70;
 /// Prefijo de las lineas que escribe difuzz, no el programa.
 pub const DZ: &str = "!dz ";
 
+/// Linea de stderr donde el preload deja los flags del sensor de asunciones.
+pub const FLAGS_TAG: &str = "__DIFUZZ_FLAGS__";
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Status {
     Exited(i32),
@@ -39,6 +42,9 @@ pub struct Exec {
     pub status: Status,
     pub stdout: String,
     pub stderr: String,
+    /// Flags del sensor de asunciones (preload). Vacio si el proceso no llego
+    /// a salir solo (timeout, senal).
+    pub flags: Vec<String>,
     pub elapsed: Duration,
 }
 
@@ -73,6 +79,7 @@ impl Exec {
             status: Status::Failed(msg),
             stdout: String::new(),
             stderr: String::new(),
+            flags: Vec::new(),
             elapsed: start.elapsed(),
         }
     }
@@ -190,10 +197,47 @@ fn run_file(preload: &Path, script: &Path, timeout: Duration, start: Instant) ->
     let stdout = out_thread.join().unwrap_or_default();
     let stderr = err_thread.join().unwrap_or_default();
 
+    let (stderr, flags) = split_flags(String::from_utf8_lossy(&stderr).into_owned());
     Exec {
         status,
         stdout: String::from_utf8_lossy(&stdout).into_owned(),
-        stderr: String::from_utf8_lossy(&stderr).into_owned(),
+        stderr,
+        flags,
         elapsed: start.elapsed(),
+    }
+}
+
+/// Saca la linea de flags del stderr y la parsea.
+fn split_flags(stderr: String) -> (String, Vec<String>) {
+    let Some(i) = stderr.rfind(FLAGS_TAG) else {
+        return (stderr, Vec::new());
+    };
+    let end = stderr[i..].find('\n').map_or(stderr.len(), |j| i + j);
+    let flags = stderr[i + FLAGS_TAG.len()..end]
+        .split(',')
+        .map(str::trim)
+        .filter(|f| !f.is_empty())
+        .map(String::from)
+        .collect();
+    let mut rest = stderr[..i].trim_end_matches('\n').to_string();
+    rest.push_str(&stderr[end..]);
+    (rest, flags)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::split_flags;
+
+    #[test]
+    fn separa_los_flags_del_stderr() {
+        let (rest, flags) = split_flags("warn\n\n__DIFUZZ_FLAGS__ proxy,stack\n".into());
+        assert_eq!(rest, "warn\n");
+        assert_eq!(flags, ["proxy", "stack"]);
+        let (rest, flags) = split_flags("__DIFUZZ_FLAGS__ \n".into());
+        assert_eq!(rest, "\n");
+        assert!(flags.is_empty());
+        let (rest, flags) = split_flags("nada".into());
+        assert_eq!(rest, "nada");
+        assert!(flags.is_empty());
     }
 }

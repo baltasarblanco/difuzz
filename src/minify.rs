@@ -81,7 +81,12 @@ impl Config {
 }
 
 pub enum Outcome {
-    Ok { original: String, minified: String },
+    Ok {
+        original: String,
+        minified: String,
+        /// checks::static_flags sobre el original.
+        static_flags: Vec<&'static str>,
+    },
     /// El parser rechazo el fuente o lo acepto con errores recuperados.
     /// `esm`: como modulo si parsea (carril B pendiente); solo se cuenta.
     ParseError { esm: bool },
@@ -128,6 +133,7 @@ fn prepare_inner(src: &str, cfg: &Config) -> Outcome {
     let program = Program::Script(script)
         .apply(paren_remover(None))
         .apply(resolver(unresolved_mark, top_level_mark, false));
+    let static_flags = crate::checks::static_flags(&program);
 
     let original = program.clone().apply(fixer(None));
     let original = match emit(cm.clone(), &original) {
@@ -153,7 +159,11 @@ fn prepare_inner(src: &str, cfg: &Config) -> Outcome {
         Err(_) => return Outcome::CodegenError,
     };
 
-    Outcome::Ok { original, minified }
+    Outcome::Ok {
+        original,
+        minified,
+        static_flags,
+    }
 }
 
 /// Solo para el desglose de descartes: distingue ESM de sintaxis rechazada.
