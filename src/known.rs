@@ -28,12 +28,10 @@ const FLAG_REASONS: &[(&str, &str)] = &[
     ("coercion", "toString/valueOf (helpers de coercion) sin efectos"),
 ];
 
-/// (prefijo de ruta relativa al corpus, asuncion que el caso viola)
+/// (prefijo de ruta relativa al corpus, asuncion que el caso viola). Solo lo que
+/// el sensor no puede ver: 2719 arma `"call" + "er"` en runtime, y V8 le da a
+/// cada funcion sloppy su propio `caller` no configurable (no hay donde engancharse).
 const ASSUMPTIONS: &[(&str, &str)] = &[
-    (
-        "terser/compress/issue_597/NaN_and_Infinity_should_not_be_replaced_when_they_are_redefined",
-        "asuncion: undefined/NaN/Infinity no se redefinen",
-    ),
     (
         "terser/compress/issue_2719/",
         "asuncion: no se usa Function.prototype.caller",
@@ -188,9 +186,10 @@ mod tests {
                 Path::new(
                     "terser/compress/issue_597/NaN_and_Infinity_should_not_be_replaced_when_they_are_redefined_evaluate/input.js"
                 ),
-                &[]
+                &["redefine_global"]
             )
-            .is_some());
+            .is_some_and(|w| w.starts_with("sensor")));
+        assert!(k.classify(Path::new("terser/compress/issue_2719/warn/input.js"), &[]).is_some());
         assert!(k.classify(Path::new("fixture/issues/8953/input.js"), &[]).is_none());
         let by_flag = k.classify(Path::new("fixture/issues/8953/input.js"), &["tdz"]);
         assert!(by_flag.is_some_and(|w| w.starts_with("sensor")));

@@ -19,8 +19,14 @@ pub enum Kind {
     ExitStatus,
     /// El minificado se colgo y el original no. Posible loop introducido.
     Timeout,
-    /// Uno lanzo y el otro no, o lanzaron tipos distintos.
-    Throw,
+    /// El minificado lanza y el original no: el minifier introdujo el error
+    /// (p. ej. un SyntaxError, como swc#12397 o el 8953). La mas grave.
+    ThrowNew,
+    /// El original lanza y el minificado no: suele ser codigo muerto que lanzaba
+    /// y se borro. Prioridad mas baja.
+    ThrowLost,
+    /// Los dos lanzan, tipos distintos.
+    ThrowType,
 }
 
 pub enum Verdict {
@@ -39,10 +45,14 @@ pub fn compare(a: &Exec, b: &Exec) -> Verdict {
     let (na, nb) = (normalize_names(&a.stdout), normalize_names(&b.stdout));
     if na == nb {
         Verdict::Same
-    } else if throw_line(&na) != throw_line(&nb) {
-        Verdict::Divergence(Kind::Throw)
     } else {
-        Verdict::Divergence(Kind::Stdout)
+        let kind = match (throw_line(&na), throw_line(&nb)) {
+            (None, Some(_)) => Kind::ThrowNew,
+            (Some(_), None) => Kind::ThrowLost,
+            (Some(x), Some(y)) if x != y => Kind::ThrowType,
+            _ => Kind::Stdout,
+        };
+        Verdict::Divergence(kind)
     }
 }
 

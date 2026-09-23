@@ -92,6 +92,8 @@ struct Stats {
     /// es la suma, igual que antes del desglose.
     a_exit: usize,
     a_timeout: usize,
+    /// Node no acepta el original como script (`node --check`).
+    a_invalid: usize,
     a_signal: usize,
     /// Mudo: el original con epilogo no termino con salida.
     observed_not_ok: usize,
@@ -130,6 +132,7 @@ impl Stats {
         self.unreadable += o.unreadable;
         self.a_exit += o.a_exit;
         self.a_timeout += o.a_timeout;
+        self.a_invalid += o.a_invalid;
         self.a_signal += o.a_signal;
         self.observed_not_ok += o.observed_not_ok;
         self.silent_no_observe += o.silent_no_observe;
@@ -160,7 +163,7 @@ impl Stats {
 
     fn line(&self) -> String {
         format!(
-            "total={} iguales={} DIVERGENCIAS={} conocidas={} conocidas_sintoma_nuevo={} PANICS={} LINT={} observados={} observados_por_globals={} lanzaron={} | descartados: original={} (exit={} timeout={} senal={} observado_sin_salida={} mudo_sin_observar={}) mudos_sin_bindings={} parse={} (esm={} otro={}) codegen={} runner={} ilegibles={} panics_del_fuzzer={}",
+            "total={} iguales={} DIVERGENCIAS={} conocidas={} conocidas_sintoma_nuevo={} PANICS={} LINT={} observados={} observados_por_globals={} lanzaron={} | descartados: original={} (exit={} timeout={} senal={} invalido={} observado_sin_salida={} mudo_sin_observar={}) mudos_sin_bindings={} parse={} (esm={} otro={}) codegen={} runner={} ilegibles={} panics_del_fuzzer={}",
             self.total,
             self.same,
             self.divergences,
@@ -171,10 +174,16 @@ impl Stats {
             self.observed,
             self.observed_globals,
             self.threw,
-            self.a_exit + self.a_timeout + self.a_signal + self.observed_not_ok + self.silent_no_observe,
+            self.a_exit
+                + self.a_timeout
+                + self.a_signal
+                + self.a_invalid
+                + self.observed_not_ok
+                + self.silent_no_observe,
             self.a_exit,
             self.a_timeout,
             self.a_signal,
+            self.a_invalid,
             self.observed_not_ok,
             self.silent_no_observe,
             self.silent_unobservable,
@@ -357,6 +366,12 @@ fn process_case(
 
     // Precondicion del oraculo: el original termina solo (exit 0 o lanzando).
     let a = runner.run(&original);
+    // Un SyntaxError antes de imprimir nada puede ser que node no acepta el
+    // original como script: entonces no es un caso.
+    if a.threw() && a.stdout.starts_with("!dz throw SyntaxError") && !runner.node_accepts(&original) {
+        stats.a_invalid += 1;
+        return;
+    }
     if let Status::Failed(e) = &a.status {
         stats.runner_failed += 1;
         eprintln!("runner: {e}");

@@ -139,6 +139,22 @@ impl Runner {
         self.run_inner(js, true)
     }
 
+    /// `node --check`: si node no acepta el fuente, no es un caso. El parser de SWC
+    /// es mas permisivo (p. ej. claves duplicadas en un patron de parametros).
+    pub fn node_accepts(&self, js: &str) -> bool {
+        if std::fs::write(&self.script, js).is_err() {
+            return true;
+        }
+        Command::new("node")
+            .arg("--check")
+            .arg(&self.script)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .map_or(true, |s| s.success())
+    }
+
     fn run_inner(&self, js: &str, salted: bool) -> Exec {
         let start = Instant::now();
         if let Err(e) = std::fs::write(&self.script, js) {
