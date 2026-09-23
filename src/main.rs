@@ -429,6 +429,9 @@ fn process_case(
     }
 }
 
+/// Flags cuya asuncion es sobre el contenido, no sobre la llamada.
+const CONTENT_FLAGS: [&str; 2] = ["fn_tostring", "stack"];
+
 /// Lo que comparten todas las comparaciones de una corrida.
 struct Ctx<'a> {
     reporter: &'a oracle::Reporter,
@@ -466,6 +469,16 @@ fn compare_and_report(
             // cargar un SyntaxError): hallazgo, no asuncion.
             let mut flags: Vec<&str> = a.flags.iter().map(String::as_str).collect();
             flags.extend_from_slice(static_flags);
+            // AGENTS.md habla de depender del *contenido* de toString y .stack, no
+            // de llamarlos (`f++` llama a toString y da NaN igual). A se corre de
+            // nuevo con esos contenidos cambiados: si la salida no cambia, no dependen.
+            if flags.iter().any(|f| CONTENT_FLAGS.contains(f)) {
+                let salted = runner.run_salted(original);
+                if salted.status == a.status && salted.stdout == a.stdout {
+                    flags.retain(|f| !CONTENT_FLAGS.contains(f));
+                    flags.push("contenido_irrelevante");
+                }
+            }
             let flags_b: Vec<&str> = b.flags.iter().map(String::as_str).collect();
             let mut why = ctx.known.classify(rel, &flags);
             // Una conocida que cambia de sintoma deja de estar cubierta.

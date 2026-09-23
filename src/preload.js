@@ -51,6 +51,10 @@
 
   // --- Sensor de asunciones ---------------------------------------------------
   const flags = new Set();
+  // Corrida "salada" (runner::run_salted): mismo programa, otro contenido de
+  // toString y .stack. Se borra del entorno para que el programa no la vea.
+  const SALT = process.env.DIFUZZ_SALT === '1';
+  delete process.env.DIFUZZ_SALT;
 
   // Node usa primordials internos: console.log(f) no pasa por aca, solo el programa.
   const realToString = Function.prototype.toString;
@@ -58,7 +62,8 @@
     value: {
       toString() {
         flags.add('fn_tostring');
-        return realToString.call(this);
+        const s = realToString.call(this);
+        return SALT ? `${s}/*dz*/` : s;
       },
     }.toString,
     writable: true,
@@ -75,7 +80,7 @@
     } catch {
       head = 'Error';
     }
-    return head + frames.map((f) => `\n    at ${f}`).join('');
+    return head + frames.map((f) => `\n    at ${f}`).join('') + (SALT ? '\n    at dz' : '');
   };
 
   const RealProxy = Proxy;

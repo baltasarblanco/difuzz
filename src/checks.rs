@@ -1,14 +1,16 @@
 //! Chequeos estaticos sobre el AST, sin ejecutar nada.
 
 use swc_ecma_ast::{
-    AssignExpr, AssignTarget, BindingIdent, Expr, FnDecl, Ident, MemberExpr, Pat, Program, Prop,
-    PropName, PropOrSpread, SimpleAssignTarget, UpdateExpr,
+    AssignExpr, AssignTarget, BindingIdent, Expr, FnDecl, Ident, MemberExpr, MemberProp, Pat,
+    Program, Prop, PropName, PropOrSpread, SimpleAssignTarget, UpdateExpr,
 };
 use swc_ecma_visit::{Visit, VisitWith};
 
 /// Asunciones de AGENTS.md que se ven en el fuente y no en runtime:
-/// `arguments.callee`, `.caller` y bindings llamados `undefined`, `NaN` o
-/// `Infinity`. Se suman a los flags del preload (known.rs).
+/// `arguments.callee`, `.caller`, bindings llamados `undefined`, `NaN` o
+/// `Infinity`, y helpers de coercion propios (`valueOf`, `toString`,
+/// `Symbol.toPrimitive`), que AGENTS.md asume sin efectos. Se suman a los flags
+/// del preload (known.rs).
 pub fn static_flags(program: &Program) -> Vec<&'static str> {
     let mut v = StaticFlags::default();
     program.visit_with(&mut v);
@@ -19,6 +21,9 @@ pub fn static_flags(program: &Program) -> Vec<&'static str> {
     if v.redefines_global {
         out.push("redefine_global");
     }
+    if v.coercion {
+        out.push("coercion");
+    }
     out
 }
 
@@ -26,6 +31,7 @@ pub fn static_flags(program: &Program) -> Vec<&'static str> {
 struct StaticFlags {
     callee: bool,
     redefines_global: bool,
+    coercion: bool,
 }
 
 impl StaticFlags {
@@ -36,7 +42,42 @@ impl StaticFlags {
     }
 }
 
+fn is_coercion_name(name: &str) -> bool {
+    matches!(name, "valueOf" | "toString")
+}
+
+fn is_symbol_to_primitive(e: &Expr) -> bool {
+    matches!(e, Expr::Member(m)
+        if matches!(&*m.obj, Expr::Ident(i) if i.sym.as_str() == "Symbol")
+            && m.prop.is_ident_with("toPrimitive"))
+}
+
 impl Visit for StaticFlags {
+    // Claves de objetos literales y de miembros de clase.
+    fn visit_prop_name(&mut self, n: &PropName) {
+        match n {
+            PropName::Ident(i) if is_coercion_name(i.sym.as_str()) => self.coercion = true,
+            PropName::Computed(c) if is_symbol_to_primitive(&c.expr) => self.coercion = true,
+            _ => {}
+        }
+        n.visit_children_with(self);
+    }
+
+    // `o.valueOf = …`, `C.prototype.toString = …`, `o[Symbol.toPrimitive] = …`.
+    fn visit_assign_expr(&mut self, n: &AssignExpr) {
+        if let AssignTarget::Simple(SimpleAssignTarget::Member(m)) = &n.left {
+            let hit = match &m.prop {
+                MemberProp::Ident(i) => is_coercion_name(i.sym.as_str()),
+                MemberProp::Computed(c) => is_symbol_to_primitive(&c.expr),
+                _ => false,
+            };
+            if hit {
+                self.coercion = true;
+            }
+        }
+        n.visit_children_with(self);
+    }
+
     fn visit_member_expr(&mut self, n: &MemberExpr) {
         let on_arguments = matches!(&*n.obj, Expr::Ident(i) if i.sym.as_str() == "arguments");
         if n.prop.is_ident_with("caller") || (on_arguments && n.prop.is_ident_with("callee")) {
@@ -167,5 +208,9 @@ mod tests {
         assert_eq!(static_flags(&parse("f.caller;")), ["callee"]);
         assert_eq!(static_flags(&parse("function g(NaN) {}")), ["redefine_global"]);
         assert!(static_flags(&parse("x === undefined; o.callee;")).is_empty());
+        assert_eq!(static_flags(&parse("var o = { valueOf() { f() } };")), ["coercion"]);
+        assert_eq!(static_flags(&parse("class A { toString() {} }")), ["coercion"]);
+        assert_eq!(static_flags(&parse("o[Symbol.toPrimitive] = g;")), ["coercion"]);
+        assert!(static_flags(&parse("x.toString(); String(y); o.valueOf();")).is_empty());
     }
 }

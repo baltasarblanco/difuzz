@@ -25,6 +25,7 @@ const FLAG_REASONS: &[(&str, &str)] = &[
     ("tdz", "TDZ no se preserva"),
     ("callee", "sin arguments.callee/.caller ni Function.prototype.caller"),
     ("redefine_global", "undefined/NaN/Infinity no se redefinen"),
+    ("coercion", "toString/valueOf (helpers de coercion) sin efectos"),
 ];
 
 /// (prefijo de ruta relativa al corpus, asuncion que el caso viola)

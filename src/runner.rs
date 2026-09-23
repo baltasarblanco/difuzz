@@ -130,11 +130,21 @@ impl Runner {
     }
 
     pub fn run(&self, js: &str) -> Exec {
+        self.run_inner(js, false)
+    }
+
+    /// Igual, pero el preload cambia el contenido de `Function.prototype.toString()`
+    /// y de `.stack`. Si la salida no cambia, el programa no depende de ellos.
+    pub fn run_salted(&self, js: &str) -> Exec {
+        self.run_inner(js, true)
+    }
+
+    fn run_inner(&self, js: &str, salted: bool) -> Exec {
         let start = Instant::now();
         if let Err(e) = std::fs::write(&self.script, js) {
             return Exec::failed(format!("escribir {}: {e}", self.script.display()), start);
         }
-        run_file(&self.preload, &self.script, self.timeout, start)
+        run_file(&self.preload, &self.script, self.timeout, start, salted)
     }
 }
 
@@ -144,12 +154,19 @@ impl Drop for Runner {
     }
 }
 
-fn run_file(preload: &Path, script: &Path, timeout: Duration, start: Instant) -> Exec {
-    let mut child = match Command::new("node")
+fn run_file(preload: &Path, script: &Path, timeout: Duration, start: Instant, salted: bool) -> Exec {
+    let mut cmd = Command::new("node");
+    // --no-warnings: los avisos de node (p. ej. "Invalid asm.js") traen el PID y
+    // no son salida del programa.
+    cmd.arg("--no-warnings")
         .arg("--require")
         .arg(preload)
         .arg(script)
-        .env("TZ", "UTC")
+        .env("TZ", "UTC");
+    if salted {
+        cmd.env("DIFUZZ_SALT", "1");
+    }
+    let mut child = match cmd
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
