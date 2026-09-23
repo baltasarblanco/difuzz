@@ -9,7 +9,7 @@
 use std::any::Any;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 
-use swc_common::{sync::Lrc, FileName, Globals, Mark, SourceMap, GLOBALS};
+use swc_common::{sync::Lrc, FileName, Globals, Mark, SourceFile, SourceMap, GLOBALS};
 use swc_ecma_ast::{Decl, EsVersion, ObjectPatProp, Pat, Program, Stmt};
 use swc_ecma_codegen::{text_writer::JsWriter, Emitter};
 use swc_ecma_minifier::{
@@ -19,7 +19,7 @@ use swc_ecma_minifier::{
         TopLevelOptions,
     },
 };
-use swc_ecma_parser::{parse_file_as_script, Syntax};
+use swc_ecma_parser::{parse_file_as_module, parse_file_as_script, Syntax};
 use swc_ecma_transforms_base::{
     fixer::{fixer, paren_remover},
     resolver,
@@ -83,7 +83,8 @@ impl Config {
 pub enum Outcome {
     Ok { original: String, minified: String },
     /// El parser rechazo el fuente o lo acepto con errores recuperados.
-    ParseError,
+    /// `esm`: como modulo si parsea (carril B pendiente); solo se cuenta.
+    ParseError { esm: bool },
     CodegenError,
     /// `optimize` (o algo en la cadena) entro en panico. Es un hallazgo.
     Panic(String),
@@ -113,12 +114,9 @@ fn prepare_inner(src: &str, cfg: &Config) -> Outcome {
         None,
         &mut recovered,
     ) {
-        Ok(s) => s,
-        Err(_) => return Outcome::ParseError,
+        Ok(s) if recovered.is_empty() => s,
+        _ => return Outcome::ParseError { esm: parses_as_module(&fm) },
     };
-    if !recovered.is_empty() {
-        return Outcome::ParseError;
-    }
 
     let unresolved_mark = Mark::new();
     let top_level_mark = Mark::new();
@@ -156,6 +154,13 @@ fn prepare_inner(src: &str, cfg: &Config) -> Outcome {
     };
 
     Outcome::Ok { original, minified }
+}
+
+/// Solo para el desglose de descartes: distingue ESM de sintaxis rechazada.
+fn parses_as_module(fm: &SourceFile) -> bool {
+    let mut recovered = Vec::new();
+    parse_file_as_module(fm, Syntax::default(), EsVersion::latest(), None, &mut recovered).is_ok()
+        && recovered.is_empty()
 }
 
 /// Maximo de bindings que observa el epilogo. Mas no agrega senal y alarga la salida.

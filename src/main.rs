@@ -86,8 +86,17 @@ impl Cli {
 struct Stats {
     total: usize,
     unreadable: usize,
-    original_discarded: usize,
-    parse_error: usize,
+    /// Descartes por el original, por causa. `original=` en la linea de stats
+    /// es la suma, igual que antes del desglose.
+    a_exit: usize,
+    a_timeout: usize,
+    a_signal: usize,
+    /// Mudo: el original con epilogo no termino con salida.
+    observed_not_ok: usize,
+    /// Mudo con `--no-observe`.
+    silent_no_observe: usize,
+    parse_esm: usize,
+    parse_other: usize,
     codegen_error: usize,
     runner_failed: usize,
     panics: usize,
@@ -108,8 +117,13 @@ impl Stats {
     fn merge(&mut self, o: &Stats) {
         self.total += o.total;
         self.unreadable += o.unreadable;
-        self.original_discarded += o.original_discarded;
-        self.parse_error += o.parse_error;
+        self.a_exit += o.a_exit;
+        self.a_timeout += o.a_timeout;
+        self.a_signal += o.a_signal;
+        self.observed_not_ok += o.observed_not_ok;
+        self.silent_no_observe += o.silent_no_observe;
+        self.parse_esm += o.parse_esm;
+        self.parse_other += o.parse_other;
         self.codegen_error += o.codegen_error;
         self.runner_failed += o.runner_failed;
         self.panics += o.panics;
@@ -121,18 +135,33 @@ impl Stats {
         self.fuzzer_panics += o.fuzzer_panics;
     }
 
+    fn discard_original(&mut self, st: &Status) {
+        match st {
+            Status::Timeout => self.a_timeout += 1,
+            Status::Signal => self.a_signal += 1,
+            _ => self.a_exit += 1,
+        }
+    }
+
     fn line(&self) -> String {
         format!(
-            "total={} iguales={} DIVERGENCIAS={} conocidas={} PANICS={} observados={} | descartados: original={} mudos_sin_bindings={} parse={} codegen={} runner={} ilegibles={} panics_del_fuzzer={}",
+            "total={} iguales={} DIVERGENCIAS={} conocidas={} PANICS={} observados={} | descartados: original={} (exit={} timeout={} senal={} observado_sin_salida={} mudo_sin_observar={}) mudos_sin_bindings={} parse={} (esm={} otro={}) codegen={} runner={} ilegibles={} panics_del_fuzzer={}",
             self.total,
             self.same,
             self.divergences,
             self.known,
             self.panics,
             self.observed,
-            self.original_discarded,
+            self.a_exit + self.a_timeout + self.a_signal + self.observed_not_ok + self.silent_no_observe,
+            self.a_exit,
+            self.a_timeout,
+            self.a_signal,
+            self.observed_not_ok,
+            self.silent_no_observe,
             self.silent_unobservable,
-            self.parse_error,
+            self.parse_esm + self.parse_other,
+            self.parse_esm,
+            self.parse_other,
             self.codegen_error,
             self.runner_failed,
             self.unreadable,
@@ -263,8 +292,12 @@ fn process_case(
 
     let (original, minified) = match minify::prepare(&src, cfg) {
         minify::Outcome::Ok { original, minified } => (original, minified),
-        minify::Outcome::ParseError => {
-            stats.parse_error += 1;
+        minify::Outcome::ParseError { esm } => {
+            if esm {
+                stats.parse_esm += 1;
+            } else {
+                stats.parse_other += 1;
+            }
             return;
         }
         minify::Outcome::CodegenError => {
@@ -298,7 +331,7 @@ fn process_case(
             return;
         }
         if !cli.observe {
-            stats.original_discarded += 1;
+            stats.silent_no_observe += 1;
             return;
         }
         // Segunda pasada con el epilogo observador.
@@ -315,14 +348,14 @@ fn process_case(
             }
             // El fuente ya parseo sin el epilogo; si falla con el, es problema
             // del instrumentador, no un hallazgo.
-            minify::Outcome::ParseError | minify::Outcome::CodegenError => {
+            minify::Outcome::ParseError { .. } | minify::Outcome::CodegenError => {
                 stats.silent_unobservable += 1;
                 return;
             }
         };
         let a = runner.run(&original);
         if !a.ok_with_output() {
-            stats.original_discarded += 1;
+            stats.observed_not_ok += 1;
             return;
         }
         stats.observed += 1;
@@ -330,7 +363,7 @@ fn process_case(
             stats.same += 1;
         }
     } else {
-        stats.original_discarded += 1;
+        stats.discard_original(&a.status);
     }
 }
 
