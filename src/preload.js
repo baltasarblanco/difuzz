@@ -2,10 +2,13 @@
 // difuzz preload. Se carga con `node --require` antes de A y antes de B, igual en los dos.
 // No pasa por el minifier: es infraestructura del oraculo, no parte del programa.
 //
-// Dos trabajos:
+// Tres trabajos:
 //   1. Determinismo: Date, performance.now y Math.random dan lo mismo en cada ejecucion.
 //   2. Observador: define __difuzzObserve, que el epilogo llama con los bindings top-level
 //      de programas que no imprimen nada.
+//   3. Excepciones: un throw no atrapado imprime su tipo y sale con 70 (runner::THROW_EXIT).
+//
+// Las lineas que escribe difuzz (no el programa) empiezan con "!dz " (runner::DZ).
 (() => {
   const FIXED_TIME = 1700000000000;
 
@@ -97,6 +100,30 @@
       ancestors.delete(v);
     }
   };
+
+  // Oraculo de excepciones. Solo el tipo: el mensaje trae nombres mangleados
+  // ("n is not a function"). Clases propias que extienden Error se ven como su
+  // built-in mas cercano, porque su nombre tambien puede cambiar.
+  const ERRORS = [AggregateError, EvalError, RangeError, ReferenceError, SyntaxError, TypeError, URIError, Error];
+  const thrownType = (e) => {
+    if (e === null || (typeof e !== 'object' && typeof e !== 'function')) {
+      return `valor ${ser(e, 0, new Set())}`;
+    }
+    for (const E of ERRORS) {
+      try {
+        if (e instanceof E) return E.name;
+      } catch {}
+    }
+    return 'objeto';
+  };
+  // process.exit y no exitCode: despues de un uncaughtException, node seguiria
+  // corriendo timers pendientes, y un crash real no los corre.
+  const onThrow = (e) => {
+    write(`!dz throw ${thrownType(e)}\n`);
+    process.exit(70);
+  };
+  process.on('uncaughtException', onThrow);
+  process.on('unhandledRejection', onThrow);
 
   Object.defineProperty(globalThis, '__difuzzObserve', {
     value: (...pairs) => {

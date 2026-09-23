@@ -108,6 +108,8 @@ struct Stats {
     observed: usize,
     /// Casos mudos sin bindings top-level que observar.
     silent_unobservable: usize,
+    /// Comparados cuyo original lanzo (subconjunto de same + divergences).
+    threw: usize,
     /// Panics del propio fuzzer (no del minifier: esos van en `panics`). Un
     /// caso perdido, no un worker perdido.
     fuzzer_panics: usize,
@@ -133,6 +135,7 @@ impl Stats {
         self.observed += o.observed;
         self.silent_unobservable += o.silent_unobservable;
         self.fuzzer_panics += o.fuzzer_panics;
+        self.threw += o.threw;
     }
 
     fn discard_original(&mut self, st: &Status) {
@@ -145,13 +148,14 @@ impl Stats {
 
     fn line(&self) -> String {
         format!(
-            "total={} iguales={} DIVERGENCIAS={} conocidas={} PANICS={} observados={} | descartados: original={} (exit={} timeout={} senal={} observado_sin_salida={} mudo_sin_observar={}) mudos_sin_bindings={} parse={} (esm={} otro={}) codegen={} runner={} ilegibles={} panics_del_fuzzer={}",
+            "total={} iguales={} DIVERGENCIAS={} conocidas={} PANICS={} observados={} lanzaron={} | descartados: original={} (exit={} timeout={} senal={} observado_sin_salida={} mudo_sin_observar={}) mudos_sin_bindings={} parse={} (esm={} otro={}) codegen={} runner={} ilegibles={} panics_del_fuzzer={}",
             self.total,
             self.same,
             self.divergences,
             self.known,
             self.panics,
             self.observed,
+            self.threw,
             self.a_exit + self.a_timeout + self.a_signal + self.observed_not_ok + self.silent_no_observe,
             self.a_exit,
             self.a_timeout,
@@ -311,7 +315,7 @@ fn process_case(
         }
     };
 
-    // Precondicion del oraculo: el original corre.
+    // Precondicion del oraculo: el original termina solo (exit 0 o lanzando).
     let a = runner.run(&original);
     if let Status::Failed(e) = &a.status {
         stats.runner_failed += 1;
@@ -320,6 +324,9 @@ fn process_case(
     }
 
     if a.ok_with_output() {
+        if a.threw() {
+            stats.threw += 1;
+        }
         if !compare_and_report(ctx, runner, stats, rel, &original, &minified, a, false) {
             stats.same += 1;
         }
@@ -359,6 +366,9 @@ fn process_case(
             return;
         }
         stats.observed += 1;
+        if a.threw() {
+            stats.threw += 1;
+        }
         if !compare_and_report(ctx, runner, stats, rel, &original, &minified, a, true) {
             stats.same += 1;
         }

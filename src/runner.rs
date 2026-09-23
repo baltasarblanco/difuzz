@@ -13,8 +13,15 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
-/// Determinismo + observador. Ver `preload.js`.
+/// Determinismo + observador + excepciones. Ver `preload.js`.
 pub const PRELOAD: &str = include_str!("preload.js");
+
+/// Exit code con el que el preload termina un programa que lanzo sin atrapar.
+/// Es un resultado comparable, no un descarte: el tipo va en stdout.
+pub const THROW_EXIT: i32 = 70;
+
+/// Prefijo de las lineas que escribe difuzz, no el programa.
+pub const DZ: &str = "!dz ";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Status {
@@ -36,12 +43,29 @@ pub struct Exec {
 }
 
 impl Exec {
+    /// Termino por si mismo: exit 0 o lanzando (THROW_EXIT).
+    pub fn completed(&self) -> bool {
+        matches!(self.status, Status::Exited(0) | Status::Exited(THROW_EXIT))
+    }
+
+    pub fn threw(&self) -> bool {
+        self.status == Status::Exited(THROW_EXIT)
+    }
+
+    /// Algo que comparar: el programa imprimio, o lanzo (y el tipo esta en stdout).
     pub fn ok_with_output(&self) -> bool {
-        self.status == Status::Exited(0) && !self.stdout.trim().is_empty()
+        self.completed() && (self.threw() || self.own_output())
     }
 
     pub fn ok_silent(&self) -> bool {
-        self.status == Status::Exited(0) && self.stdout.trim().is_empty()
+        self.completed() && !self.threw() && !self.own_output()
+    }
+
+    /// Lineas escritas por el programa, no por difuzz.
+    fn own_output(&self) -> bool {
+        self.stdout
+            .lines()
+            .any(|l| !l.trim().is_empty() && !l.starts_with(DZ))
     }
 
     fn failed(msg: String, start: Instant) -> Exec {

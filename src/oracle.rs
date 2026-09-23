@@ -1,6 +1,7 @@
 //! CMP: que cuenta como divergencia (delta v1.2 §1 §3.4) y como se guarda.
 //!
-//! Precondicion que garantiza main: el original termino con exit 0. Si ademas
+//! Precondicion que garantiza main: el original termino solo (exit 0, o lanzando
+//! con el tipo en stdout: runner::THROW_EXIT). Si ademas
 //! su stdout es vacio, la comparacion cruda solo puede ver que el minificado
 //! lanzo, se colgo o imprimio algo; los valores se comparan en la pasada
 //! observada (epilogo). Sin epilogo, dos programas mudos "coinciden" siempre:
@@ -8,7 +9,7 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::runner::{Exec, Status};
+use crate::runner::{Exec, Status, DZ, THROW_EXIT};
 
 #[derive(Debug, Clone, Copy)]
 pub enum Kind {
@@ -18,6 +19,8 @@ pub enum Kind {
     ExitStatus,
     /// El minificado se colgo y el original no. Posible loop introducido.
     Timeout,
+    /// Uno lanzo y el otro no, o lanzaron tipos distintos.
+    Throw,
 }
 
 pub enum Verdict {
@@ -28,16 +31,25 @@ pub enum Verdict {
 pub fn compare(a: &Exec, b: &Exec) -> Verdict {
     match b.status {
         Status::Timeout => return Verdict::Divergence(Kind::Timeout),
-        Status::Exited(0) => {}
+        Status::Exited(0) | Status::Exited(THROW_EXIT) => {}
         Status::Exited(_) | Status::Signal => return Verdict::Divergence(Kind::ExitStatus),
         // Error del fuzzer, no del programa: no es divergencia. main lo cuenta.
         Status::Failed(_) => return Verdict::Same,
     }
-    if normalize_names(&a.stdout) != normalize_names(&b.stdout) {
-        Verdict::Divergence(Kind::Stdout)
-    } else {
+    let (na, nb) = (normalize_names(&a.stdout), normalize_names(&b.stdout));
+    if na == nb {
         Verdict::Same
+    } else if throw_line(&na) != throw_line(&nb) {
+        Verdict::Divergence(Kind::Throw)
+    } else {
+        Verdict::Divergence(Kind::Stdout)
     }
+}
+
+fn throw_line(s: &str) -> Option<&str> {
+    s.lines()
+        .rev()
+        .find(|l| l.strip_prefix(DZ).is_some_and(|r| r.starts_with("throw ")))
 }
 
 /// Borra los nombres de funciones y clases que imprime `util.inspect`
@@ -198,6 +210,14 @@ mod tests {
     fn no_toca_lo_que_no_es_un_nombre() {
         assert_eq!(n("[Functional] [Function"), "[Functional] [Function");
         assert_eq!(n("sin nada"), "sin nada");
+    }
+
+    #[test]
+    fn throw_line_toma_la_ultima_linea_de_difuzz() {
+        use super::throw_line;
+        assert_eq!(throw_line("1\n!dz throw TypeError\n"), Some("!dz throw TypeError"));
+        assert_eq!(throw_line("!throw TypeError\n"), None);
+        assert_eq!(throw_line("1\n2\n"), None);
     }
 
     #[test]
