@@ -291,6 +291,10 @@ fn main() {
                     (&files, &next, &done, &ctx, &cli, &preload);
                 scope.spawn(move || {
                     let cfg = cli.preset.build();
+                    // Solo core_defaults cambia nombres: ahi cada divergencia se
+                    // vuelve a probar con los nombres preservados (names_only).
+                    let names_cfg = (cli.preset == minify::Preset::CoreDefaults)
+                        .then(minify::Config::core_defaults_keep_names);
                     let runner = runner::Runner::new(preload, w, cli.timeout);
                     let mut stats = Stats::default();
                     loop {
@@ -301,7 +305,7 @@ fn main() {
                         // Un panic nuestro (no del minifier: ese lo captura
                         // minify::prepare) pierde el caso, no el worker ni sus stats.
                         let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                            process_case(ctx, &runner, &cfg, cli, &mut stats, path)
+                            process_case(ctx, &runner, &cfg, names_cfg.as_ref(), cli, &mut stats, path)
                         }));
                         if r.is_err() {
                             stats.fuzzer_panics += 1;
@@ -336,6 +340,7 @@ fn process_case(
     ctx: &Ctx,
     runner: &runner::Runner,
     cfg: &minify::Config,
+    names_cfg: Option<&minify::Config>,
     cli: &Cli,
     stats: &mut Stats,
     path: &Path,
@@ -409,7 +414,7 @@ fn process_case(
         if a.threw() {
             stats.threw += 1;
         }
-        if !compare_and_report(ctx, runner, stats, rel, &original, &minified, a, false, &static_flags) {
+        if !compare_and_report(ctx, runner, stats, rel, &original, &minified, a, false, &static_flags, names_cfg) {
             stats.same += 1;
         }
     } else if a.ok_silent() {
@@ -418,7 +423,7 @@ fn process_case(
         // como el de swc#12397 en un programa que no imprime). Los globals que
         // creo (lineas `!dz global`) entran en esta comparacion.
         let had_globals = a.has_globals();
-        if compare_and_report(ctx, runner, stats, rel, &original, &minified, a, false, &static_flags) {
+        if compare_and_report(ctx, runner, stats, rel, &original, &minified, a, false, &static_flags, names_cfg) {
             return;
         }
         if !cli.observe {
@@ -465,12 +470,22 @@ fn process_case(
         if a.threw() {
             stats.threw += 1;
         }
-        if !compare_and_report(ctx, runner, stats, rel, &original, &minified, a, true, &static_flags) {
+        if !compare_and_report(ctx, runner, stats, rel, &original, &minified, a, true, &static_flags, names_cfg) {
             stats.same += 1;
         }
     } else {
         stats.discard_original(&a.status);
     }
+}
+
+/// La divergencia desaparece si se minifica igual pero preservando nombres: es
+/// el costo de keep_* apagado (`f.name`, `Foo { x: 7 }` impreso como `{ x: 7 }`),
+/// no un bug. Se minifica el original ya impreso: es el mismo programa.
+fn names_only(runner: &runner::Runner, cfg: &minify::Config, original: &str, a: &runner::Exec) -> bool {
+    let minify::Outcome::Ok { minified, .. } = minify::prepare(original, cfg) else {
+        return false;
+    };
+    matches!(oracle::compare(a, &runner.run(&minified)), oracle::Verdict::Same)
 }
 
 /// Flags cuya asuncion es sobre el contenido, no sobre la llamada.
@@ -497,6 +512,7 @@ fn compare_and_report(
     a: runner::Exec,
     observed: bool,
     static_flags: &[&'static str],
+    names_cfg: Option<&minify::Config>,
 ) -> bool {
     let b = runner.run(minified);
     if let Status::Failed(e) = &b.status {
@@ -524,6 +540,9 @@ fn compare_and_report(
                 }
             }
             let flags_b: Vec<&str> = b.flags.iter().map(String::as_str).collect();
+            if names_cfg.is_some_and(|c| names_only(runner, c, original, &a)) {
+                flags.push("nombres");
+            }
             let mut why = ctx.known.classify(rel, &flags);
             // Una conocida que cambia de sintoma deja de estar cubierta.
             let drift = why.as_ref().and_then(|w| {

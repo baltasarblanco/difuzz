@@ -168,6 +168,22 @@ impl Config {
             },
         }
     }
+
+    /// core_defaults con los nombres preservados (keep_* en compress y mangle).
+    /// No es una celda: sirve para preguntar si una divergencia de core_defaults
+    /// desaparece cuando los nombres no cambian (main::names_only).
+    pub fn core_defaults_keep_names() -> Self {
+        let mut c = Config::core_defaults();
+        if let Some(compress) = c.minify.compress.as_mut() {
+            compress.keep_fnames = true;
+            compress.keep_classnames = true;
+        }
+        if let Some(mangle) = c.minify.mangle.as_mut() {
+            mangle.keep_fn_names = true;
+            mangle.keep_class_names = true;
+        }
+        c
+    }
 }
 
 pub enum Outcome {
