@@ -15,12 +15,21 @@ específico de SWC: `main` @ `42e4f7e98b`, `@swc/core` 1.16.2.
   `lecciones-pr-12401-swc.md`.
 - **#12404 reportado**: `fixture/issues/8953` es una **regresión** de #8953, introducida por
   #10201 (kdy1, 2025-03-20). Sin compromiso de fix.
+- **Noche: `11084` confirmado fuera de `div/` en `main`.** A/B con el mismo binario
+  (`~/difuzz-main2`) y el mismo corpus (`corpus-4b42`, 3119 `input.js`): `4b42cd59d7` → 9
+  divergencias, `42e4f7e98b` → 8. `diff` de `div/`: solo `< fixture__issues__11084`;
+  `known/` sin cambios, 0 panics. Entre los dos commits solo hay #12398 y #12392 (Austaras,
+  refactor de dead code), que no cambió nada observable en el corpus.
+- **Estado al cierre de la noche:** #12401 sin review, CI sin rojos con 4 jobs en progreso
+  (`Test - swc_cli - windows-latest`, `Test - swc - windows-latest`,
+  `Test - swc - ubuntu-latest`, `Test node bindings - windows-latest`). #12404: 0
+  reacciones, timeline vacío.
 
 ## Las 9 divergencias de la corrida del 22-sep, estado actual
 
 | caso | estado |
 |---|---|
-| `fixture/issues/11084` | **arreglado** en `main` (#12398). Confirmar con difuzz tras actualizar `~/swc-main` |
+| `fixture/issues/11084` | **arreglado** en `main` (#12398). **Confirmado** fuera de `div/` con A/B `4b42cd59d7` → `42e4f7e98b` (noche del 22-sep) |
 | `drop_unused/unused_keep_harmony_destructuring` | fix en **#12401** (abierta); difuzz con el fix: sale de `div/` y nada más cambia |
 | `fixture/issues/8953` | **#12404** reportado (regresión de #10201) |
 | `functions/issue_2101` | candidato; depende de **#12267** (labor0, OPEN, toca `iife.rs`) |
@@ -43,8 +52,9 @@ específico de SWC: `main` @ `42e4f7e98b`, `@swc/core` 1.16.2.
 
 ## Orden sugerido
 
-1. **#12401**: mirar la CI al terminar (`gh pr checks 12401 --json name,state,link`,
-   filtrar `FAILURE`/`CANCELLED`). Ante un rojo, checklist §10 de `lecciones-pr-12398-swc.md`.
+1. **#12401**: mirar la CI al terminar
+   (`gh pr checks 12401 -R swc-project/swc --json name,state,link`, filtrar
+   `FAILURE`/`CANCELLED`; los que no son `SUCCESS`/`SKIPPED`/`NEUTRAL` siguen corriendo). Ante un rojo, checklist §10 de `lecciones-pr-12398-swc.md`.
 2. **Regla de ritmo:** el próximo reporte espera una reacción de maintainer a **#12404 o
    #12401**.
 3. **#12404**: si hay señal de que kdy1 no lo toma, localizar la pasada en #10201 y
@@ -54,12 +64,16 @@ específico de SWC: `main` @ `42e4f7e98b`, `@swc/core` 1.16.2.
 
 ## Mantenimiento de entorno
 
-- `~/swc-main` sigue en `4b42cd59d7`: actualizar a `upstream/main` y correr difuzz para
-  confirmar que `11084` salió de `div/`.
+- `~/swc-main` **actualizado** a `42e4f7e98b` (detached, limpio). Hecho la noche del 22-sep.
+- `~/difuzz-main2` **creado**: código de `~/difuzz` + el `[patch.crates-io]` hacia
+  `~/swc-main`. Tiene el corpus fijo `corpus-4b42` y las corridas `out-4b42` (9) y
+  `out-main` (8). Es el binario para medir `main` de ahora en adelante.
+- `~/difuzz-main` sigue atado a `~/swc-main` por `[patch]`: al mover `~/swc-main` dejó de
+  reproducir la base del 21-sep. Para reproducirla hay que volver `~/swc-main` a
+  `4b42cd59d7` antes de compilarlo.
 - `~/swc-12400` (worktree de la rama de #12401): borrar con `git worktree remove` **después**
   del merge, no antes.
-- `~/difuzz-main` corre un binario viejo (sin `--jobs`, `<corpus_dir>` posicional). Su base
-  de comparación es la corrida del 21-sep (19 divergencias), no la del 22.
+- Ubicaciones y bases de comparación: ver `difuzz-swc-mapa-carpetas-2026-09-22.md`.
 
 ## Pendientes de difuzz (no bloquean)
 
@@ -78,3 +92,8 @@ específico de SWC: `main` @ `42e4f7e98b`, `@swc/core` 1.16.2.
 Registrados en `lecciones-pr-12401-swc.md` §7. Los dos que se repiten de sesiones
 anteriores: comandos que requieren espera pegados en el mismo bloque, y conteos esperados
 anunciados sin recontar.
+
+## Errores propios del 22-sep (noche)
+
+Registrados en `lecciones-pr-12401-swc.md` §7 (8 y 9): `gh pr checks` sin `-R` desde
+`~/difuzz`, y una base de comparación tomada del mapa sin verificarla.

@@ -123,8 +123,10 @@ También falló la invocación: el binario viejo no tiene `--jobs` ni `--help` (
 `<corpus_dir>` posicional). ⇒ Antes de invocar un binario de difuzz que no sea el de
 `~/difuzz`, leer su `uso:` primero.
 
-**NO VERIFICADO:** `total=3119` contra `3102` del 22-sep (17 `input.js` de diferencia
-entre binarios o árboles). No cambia el veredicto.
+**Resuelto (noche del 22-sep):** `total=3119` contra `3102` es el **árbol**, no el
+binario. El binario nuevo (`~/difuzz-main2`) sobre `tests/` de `4b42cd59d7` también da
+`total=3119`. La corrida del 22-sep (`~/difuzz-out-4`, 3102) usó otro árbol; cuál, NO SE.
+No cambia ningún veredicto: las dos dieron las mismas 9 divergencias.
 
 ---
 
@@ -172,6 +174,13 @@ títulos.
    y mostraron el SHA viejo. Repite el error §7.1 de #12398. ⇒ Lo que requiere esperar, en
    un bloque aparte, siempre.
 7. **Invocación de difuzz sin leer su `uso:`** (§4).
+8. **`gh pr checks 12401` desde `~/difuzz`** (noche): sin `-R`, `gh` resuelve el repo del
+   directorio actual y responde *Could not resolve to a PullRequest*. Los `gh api` con ruta
+   completa sí andaban. ⇒ Todo `gh pr`/`gh issue` sobre SWC lleva `-R swc-project/swc`.
+9. **La base de comparación salió de un doc, no de disco** (noche). El mapa decía que la
+   base del 22-sep vivía en `~/difuzz/difuzz-out/div`; tenía 34 entradas del 21-sep. La real
+   era `~/difuzz-out-4/div` (9). ⇒ Antes de comparar contra una base: `stat` + conteo +
+   lista, y cotejar con la tabla de divergencias.
 
 ---
 
@@ -197,6 +206,8 @@ títulos.
 - [ ] ¿Conté los tests que matchean el filtro, no solo `ok`?
 - [ ] ¿La base de comparación de difuzz es del mismo binario?
 - [ ] ¿Los comandos que requieren esperar están en un bloque aparte?
+- [ ] ¿Todo `gh pr`/`gh issue` sobre SWC lleva `-R swc-project/swc`?
+- [ ] ¿La base de comparación la verifiqué en disco (`stat`, conteo, lista), no en un doc?
 
 ---
 
