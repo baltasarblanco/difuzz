@@ -106,7 +106,7 @@ pub fn normalize_names(s: &str) -> String {
 /// Un directorio por hallazgo con todo lo necesario para reproducirlo a mano.
 pub struct Reporter {
     root: PathBuf,
-    config_name: &'static str,
+    config_name: String,
 }
 
 impl Reporter {
@@ -116,7 +116,7 @@ impl Reporter {
     /// Borra `div/`, `known/`, `panic/` y `lint/` de una corrida anterior: si no, los
     /// hallazgos viejos se mezclan con los nuevos y el `ls` miente (paso en la
     /// corrida del 21-sep, con 8 directorios de sobra).
-    pub fn new(root: &Path, config_name: &'static str, preload: &str) -> Reporter {
+    pub fn new(root: &Path, config_name: String, preload: &str) -> Reporter {
         for sub in ["div", "known", "panic", "lint"] {
             let _ = std::fs::remove_dir_all(root.join(sub));
         }

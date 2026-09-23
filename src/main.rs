@@ -19,10 +19,12 @@ use std::time::Duration;
 use runner::Status;
 
 const USAGE: &str = "\
-uso: difuzz <corpus_dir> [--out DIR] [--timeout-ms N] [--limit N] [--jobs N] [--no-observe]
+uso: difuzz <corpus_dir> [--out DIR] [--config C] [--forma F] [--timeout-ms N] [--limit N] [--jobs N] [--no-observe]
 
   corpus_dir     raiz con archivos input.js (p. ej. crates/swc_ecma_minifier/tests)
   --out DIR      donde guardar hallazgos          (default: ./difuzz-out)
+  --config C     carril_a | core_defaults           (default: carril_a)
+  --forma F      tal_cual | en_funcion              (default: tal_cual)
   --timeout-ms N timeout por ejecucion de node    (default: 5000)
   --limit N      procesar solo los primeros N casos
   --jobs N       workers en paralelo                (default: nucleos disponibles)
@@ -35,6 +37,15 @@ struct Cli {
     limit: Option<usize>,
     jobs: usize,
     observe: bool,
+    preset: minify::Preset,
+    forma: minify::Forma,
+}
+
+impl Cli {
+    /// Celda de la matriz: nombra la salida y el oraculo (known-sintomas).
+    fn cell(&self) -> String {
+        format!("{}+{}", self.preset.name(), self.forma.name())
+    }
 }
 
 impl Cli {
@@ -44,6 +55,8 @@ impl Cli {
         let mut timeout = Duration::from_millis(5000);
         let mut limit = None;
         let mut observe = true;
+        let mut preset = minify::Preset::CarrilA;
+        let mut forma = minify::Forma::TalCual;
         let mut jobs = std::thread::available_parallelism().map_or(4, |n| n.get());
 
         let mut it = args.into_iter();
@@ -68,6 +81,16 @@ impl Cli {
                     }
                 }
                 "--no-observe" => observe = false,
+                "--config" => {
+                    let v = it.next().ok_or("--config necesita un valor")?;
+                    preset = minify::Preset::parse(&v)
+                        .ok_or_else(|| format!("--config invalido: {v} ({})", minify::Preset::ALL))?;
+                }
+                "--forma" => {
+                    let v = it.next().ok_or("--forma necesita un valor")?;
+                    forma = minify::Forma::parse(&v)
+                        .ok_or_else(|| format!("--forma invalida: {v} ({})", minify::Forma::ALL))?;
+                }
                 other if other.starts_with("--") => return Err(format!("opcion desconocida: {other}")),
                 other => corpus = Some(PathBuf::from(other)),
             }
@@ -80,6 +103,8 @@ impl Cli {
             limit,
             jobs,
             observe,
+            preset,
+            forma,
         })
     }
 }
@@ -228,11 +253,12 @@ fn main() {
             std::process::exit(1);
         }
     };
-    let reporter = oracle::Reporter::new(&cli.out, minify::Config::NAME, runner::PRELOAD);
+    let cell = cli.cell();
+    let reporter = oracle::Reporter::new(&cli.out, cell.clone(), runner::PRELOAD);
     let known = known::Known::load(
         &cli.corpus,
         &cli.out,
-        known::fnv1a(&[runner::PRELOAD, minify::Config::NAME]),
+        known::fnv1a(&[runner::PRELOAD, cell.as_str()]),
     );
     let ctx = Ctx {
         reporter: &reporter,
@@ -243,7 +269,7 @@ fn main() {
     eprintln!(
         "difuzz F1 · {} casos · config {} · {jobs} workers · timeout {:?} · observador {} · backlog conocido {} · salida en {}",
         files.len(),
-        minify::Config::NAME,
+        cell,
         cli.timeout,
         if cli.observe { "on" } else { "off" },
         known.backlog_len(),
@@ -264,7 +290,7 @@ fn main() {
                 let (files, next, done, ctx, cli, preload) =
                     (&files, &next, &done, &ctx, &cli, &preload);
                 scope.spawn(move || {
-                    let cfg = minify::Config::carril_a();
+                    let cfg = cli.preset.build();
                     let runner = runner::Runner::new(preload, w, cli.timeout);
                     let mut stats = Stats::default();
                     loop {
@@ -317,13 +343,14 @@ fn process_case(
     stats.total += 1;
     let rel = path.strip_prefix(&cli.corpus).unwrap_or(path);
 
-    let src = match std::fs::read_to_string(path) {
+    let raw = match std::fs::read_to_string(path) {
         Ok(s) => s,
         Err(_) => {
             stats.unreadable += 1;
             return;
         }
     };
+    let src = cli.forma.apply(&raw);
 
     let (original, minified, static_flags, dead_writes) = match minify::prepare(&src, cfg) {
         minify::Outcome::Ok {
@@ -399,7 +426,9 @@ fn process_case(
             return;
         }
         // Segunda pasada con el epilogo observador.
-        let Some(instrumented) = minify::instrument(&src) else {
+        // El epilogo se agrega al fuente crudo y despues se aplica la forma: asi
+        // queda dentro de la funcion y ve los bindings.
+        let Some(instrumented) = minify::instrument(&raw).map(|s| cli.forma.apply(&s)) else {
             if had_globals {
                 stats.observed_globals += 1;
                 stats.same += 1;

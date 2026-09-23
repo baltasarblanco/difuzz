@@ -29,9 +29,78 @@ pub struct Config {
     pub minify: MinifyOptions,
 }
 
-impl Config {
-    pub const NAME: &'static str = "carril_a";
+/// Primer eje de la matriz: con que opciones se minifica.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Preset {
+    CarrilA,
+    CoreDefaults,
+}
 
+impl Preset {
+    pub const ALL: &'static str = "carril_a | core_defaults";
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Preset::CarrilA => "carril_a",
+            Preset::CoreDefaults => "core_defaults",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Preset> {
+        match s {
+            "carril_a" => Some(Preset::CarrilA),
+            "core_defaults" => Some(Preset::CoreDefaults),
+            _ => None,
+        }
+    }
+
+    pub fn build(self) -> Config {
+        match self {
+            Preset::CarrilA => Config::carril_a(),
+            Preset::CoreDefaults => Config::core_defaults(),
+        }
+    }
+}
+
+/// Segundo eje de la matriz: la forma del programa que se minifica.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Forma {
+    TalCual,
+    EnFuncion,
+}
+
+impl Forma {
+    pub const ALL: &'static str = "tal_cual | en_funcion";
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Forma::TalCual => "tal_cual",
+            Forma::EnFuncion => "en_funcion",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Forma> {
+        match s {
+            "tal_cual" => Some(Forma::TalCual),
+            "en_funcion" => Some(Forma::EnFuncion),
+            _ => None,
+        }
+    }
+
+    /// `en_funcion` es el wrapper de probe/probe.cjs, caracter por caracter: el
+    /// codigo real vive casi todo dentro de funciones (modulos, wrappers de
+    /// bundlers), y ahi el DCE corre sin `top_level`. Es la forma que mostro uso
+    /// comun en swc#12397 y swc#12400. Se aplica DESPUES del epilogo observador,
+    /// para que el epilogo quede dentro de la funcion y vea los bindings.
+    pub fn apply(self, src: &str) -> String {
+        match self {
+            Forma::TalCual => src.to_string(),
+            Forma::EnFuncion => format!("(function () {{\n{src}\n}})();\n"),
+        }
+    }
+}
+
+impl Config {
     /// Carril A: script + CommonJS (delta v1.2, decision #1).
     ///
     /// La base de compresion se construye por el mismo camino que @swc/core:
@@ -74,6 +143,27 @@ impl Config {
                     keep_class_names: true,
                     ..Default::default()
                 }),
+                ..Default::default()
+            },
+        }
+    }
+}
+
+impl Config {
+    /// Lo que corre `minifySync(src, { compress: {}, mangle: {} })` de @swc/core:
+    /// la compresion por el mismo camino (`into_config`) sin tocar nada, y
+    /// `MangleOptions` por defecto (sin `top_level`, sin `keep_*`). Una
+    /// divergencia aca es de uso comun por construccion (policy de AGENTS.md).
+    ///
+    /// Sin `keep_*`, `console.log(f)` cambia de nombre: lo absorbe
+    /// oracle::normalize_names. Un `f.name` impreso como string no: es
+    /// divergencia esperada de esta config.
+    pub fn core_defaults() -> Self {
+        let cm: Lrc<SourceMap> = Default::default();
+        Config {
+            minify: MinifyOptions {
+                compress: Some(TerserCompressorOptions::default().into_config(cm)),
+                mangle: Some(MangleOptions::default()),
                 ..Default::default()
             },
         }
@@ -297,5 +387,28 @@ fn panic_message(payload: &Box<dyn Any + Send>) -> String {
         s.clone()
     } else {
         "panic sin mensaje".to_string()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Config, Forma, Preset};
+
+    #[test]
+    fn ejes_de_la_matriz() {
+        for p in [Preset::CarrilA, Preset::CoreDefaults] {
+            assert_eq!(Preset::parse(p.name()), Some(p));
+        }
+        for f in [Forma::TalCual, Forma::EnFuncion] {
+            assert_eq!(Forma::parse(f.name()), Some(f));
+        }
+        assert_eq!(Preset::parse("otro"), None);
+        // El mismo wrapper que probe/probe.cjs.
+        assert_eq!(Forma::EnFuncion.apply("x;"), "(function () {\nx;\n})();\n");
+        assert_eq!(Forma::TalCual.apply("x;"), "x;");
+        // core_defaults: sin top_level ni keep_* en mangle (a diferencia de carril_a).
+        let m = Config::core_defaults().minify.mangle.unwrap();
+        assert_ne!(m.top_level, Some(true));
+        assert!(!m.keep_fn_names && !m.keep_class_names);
     }
 }
