@@ -22,19 +22,18 @@ en `difuzz-swc-mejoras-2026-09-23.md`; los errores y aprendizajes, en
 
 ## Estado de difuzz
 
-- 11 commits locales sobre `9ac4db5` (c1–c8, m6, m6b, m6c) + el commit de docs. **Sin push.**
+- 11 commits locales sobre `9ac4db5` (c1–c8, m6, m6b, m6c `cd623e6`) + 2 de docs. **Sin push.**
 - Eje de confianza (mejoras 1–5) cerrado y validado; mejora 6 (matriz) implementada.
 - Binario de medición: `~/difuzz-main2` (código de `~/difuzz` + `[patch]` a `~/swc-main`
   @ `42e4f7e98b`, incluye `swc_ecma_visit`). Corpus fijo `corpus-4b42`.
 
 ## Cola, en orden
 
-### A. Cerrar la mejora 6 (en curso)
+### A. Cerrar la mejora 6
 
-1. Aplicar `difuzz-volumen-6c.patch` → **11 tests**.
-2. `scripts/matriz.sh out-matriz-c` → `12188` vuelve a la tabla (solo `C.fn`); los 6 casos de
-   nombres siguen en `known`. Anotar la línea de stats de las 4 celdas (m6b quedó sin la de
-   `core_defaults+en_funcion`).
+1. ~~Aplicar m6c~~ hecho: `cd623e6`, 11 tests.
+2. ~~Matriz `out-matriz-c`~~ hecho: `12188` de vuelta (solo `C.fn`); stats de las 4 celdas en
+   `difuzz-swc-mejoras-2026-09-23.md` §8.
 3. `git push` de la serie + docs (decisión tuya).
 
 ### B. Candidatos (preparar, no reportar: regla de ritmo)

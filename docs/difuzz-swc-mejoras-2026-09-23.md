@@ -239,7 +239,7 @@ Comparados **2.660** (+39 %), descartes **459**. Divergencias: 6 `Stdout`, 3 `Th
 `minifySync(src, {compress: {}, mangle: {}})`; `en_funcion` = wrapper de `probe.cjs`; caché de A;
 saltear B si el minificado es idéntico; dedup entre configs.
 
-**Implementado (m6 `bdb0376`, m6b `2674434`, m6c pendiente de aplicar al escribir este doc).**
+**Implementado (m6 `bdb0376`, m6b `2674434`, m6c `cd623e6`).**
 - CLI: `--config carril_a|core_defaults`, `--forma tal_cual|en_funcion`. Sin flags, idéntico a
   antes. La celda (`<config>+<forma>`) nombra la salida y entra en el id del oráculo.
 - `Config::core_defaults()`: `TerserCompressorOptions::default().into_config` sin tocar +
@@ -286,8 +286,21 @@ Efecto lateral de `en_funcion`: un ESM envuelto no parsea ni como script ni como
   como `nombres`**. Desaparecer con `keep_*` es condición necesaria, no suficiente. m6c exige
   además `names_visible`: el original lee `.name`, o su salida imprime una instancia con nombre
   de clase (`Ident {`). Test con los casos reales.
-- **PENDIENTE (corrida `out-matriz-c`):** `12188` de vuelta en la tabla (solo `C.fn`), los 6 de
-  nombres en `known`.
+- **Resultado de m6c (VERIFICADO, `out-matriz-c`):** `12188` volvió a la tabla, solo en `C.fn`;
+  las conocidas por `nombres` bajaron de 16 a 15 (la que salió es `12188`). Las celdas
+  `carril_a` no cambiaron.
+
+**Corrida m6c, estado final de la matriz (VERIFICADO):**
+
+| celda | iguales | div | conocidas | LINT |
+|---|---|---|---|---|
+| core_defaults+en_funcion | 2629 | 13 | 21 | 6 |
+| core_defaults+tal_cual | 2630 | 7 | 23 | 3 |
+| carril_a+en_funcion | 2641 | 12 | 10 | 6 |
+| carril_a+tal_cual | 2634 | 12 | 14 | 6 |
+
+Conocidas de las dos celdas `core_defaults` por motivo: 17 backlog, 15 nombres, 4
+redefine_global, 2 ruta (2719), 2 stack, 2 tdz, 2 coercion.
 
 **Corrida m6b (VERIFICADO, parcial):** `core_defaults+tal_cual`: `iguales=2630
 DIVERGENCIAS=7 conocidas=23`; celdas `carril_a` sin cambios; 16 conocidas por `nombres` entre
@@ -306,7 +319,7 @@ tiene prioridad sobre el backlog). La línea de `core_defaults+en_funcion` qued�
 |---|---|---|---|
 | `fixture/issues/8953` | ThrowNew | las 4 | **#12404** reportado (regresión de #10201) |
 | `blocks/issue_1672_for` | ThrowNew | las 4 | real, Annex B (`SyntaxError` en el minificado), zona de Austaras |
-| `drop_unused/unused_keep_harmony_destructuring` | ThrowNew | C.fn, A.fn, A.tc | **fix en #12401** (abierta). Se ve por el epílogo: el minificado deja `__difuzzObserve(["foo",foo])` sin la declaración |
+| `drop_unused/unused_keep_harmony_destructuring` | ThrowNew | C.fn, A.fn, A.tc | **fix en #12401** (abierta). Se ve por el epílogo: el minificado deja `__difuzzObserve(["foo",foo])` sin la declaración. Con un uso real (`console.log(typeof foo, foo)`) no diverge en ninguna celda (VERIFICADO, `/tmp/ukhd`): el disparador de #12400 es que `foo` solo se referencie a sí misma |
 | `functions/issue_2101` | Stdout | las 4 | candidato; depende de **#12267** (labor0, OPEN, `iife.rs`) |
 | `issue_973/this_binding_sequences` | Stdout | las 4 | baja: semántica de `eval`, fuera de policy |
 | `do-while-false-terminal-jump/condition-exceptions` | Stdout | las 4 | real, exótico |
@@ -342,9 +355,9 @@ asunción documentada), los 6 de nombres de `core_defaults`.
 
 ## 10. Pendientes de las mejoras
 
-**De verificación (en curso al escribir este doc):**
-1. Aplicar m6c (`difuzz-volumen-6c.patch`): 11 tests.
-2. Correr `scripts/matriz.sh out-matriz-c`: `12188` tiene que volver (solo `C.fn`).
+**De verificación:** hechos (m6c aplicado, 11 tests; `out-matriz-c` con `12188` de vuelta).
+Queda solo el `git push` (decisión del usuario).
+
 
 **De la mejora 6 (desvíos):**
 3. Caché de A por hash del original (A no depende de la config): 6 ejecuciones por caso en vez
@@ -399,7 +412,7 @@ asunción documentada), los 6 de nombres de `core_defaults`.
 | c8 | `24a529f` | `ThrowNew`/`ThrowLost`/`ThrowType`, `invalido`, tabla sin NaN |
 | m6 | `bdb0376` | matriz (`--config`, `--forma`) |
 | m6b | `2674434` | `nombres` en `core_defaults` |
-| m6c | PENDIENTE | `names_visible` (keep_* tapaba el 12188) |
+| m6c | `cd623e6` | `names_visible` (keep_* tapaba el 12188) |
 | docs | este commit | docs + `scripts/` |
 
 Tests: 9 (c1–c8) → 10 (m6) → 11 (m6c).
