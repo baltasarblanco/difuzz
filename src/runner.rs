@@ -67,6 +67,11 @@ impl Exec {
         self.completed() && !self.threw() && !self.own_output()
     }
 
+    /// El preload vio globals creados por el programa (`!dz global …`).
+    pub fn has_globals(&self) -> bool {
+        self.stdout.lines().any(|l| l.starts_with("!dz global "))
+    }
+
     /// Lineas escritas por el programa, no por difuzz.
     fn own_output(&self) -> bool {
         self.stdout

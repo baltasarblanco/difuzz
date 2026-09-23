@@ -10,6 +10,9 @@
 //   4. Sensor de asunciones: marca si el programa usa algo que AGENTS.md del minifier
 //      declara asumido (toString de funciones, .stack, Proxy, built-ins pisados, TDZ).
 //      Al salir escribe los flags en stderr (runner::FLAGS_TAG), que no se compara.
+//   5. Canales: console.error/warn/trace van a stdout (stderr no se compara), y al salir
+//      se imprimen los globals que el programa creo (sin tocar el fuente: sin efecto
+//      observador).
 //
 // Las lineas que escribe difuzz (no el programa) empiezan con "!dz " (runner::DZ).
 (() => {
@@ -142,10 +145,19 @@
         if (v.length > MAX_ITEMS) out.push(`...${v.length}`);
         return `[${out.join(', ')}]`;
       }
-      const keys = Object.keys(v);
-      const out = keys.slice(0, MAX_ITEMS).map((k) => `${JSON.stringify(k)}: ${field(k)}`);
+      // Prototipo: una instancia y un objeto plano con las mismas claves no son lo mismo.
+      // Claves propias todas (symbol y no enumerables con ~): mangle.props esta apagado,
+      // asi que los nombres de propiedades no cambian al minificar.
+      const proto = Object.getPrototypeOf(v);
+      const tag = proto === Object.prototype ? '' : proto === null ? 'null' : 'inst';
+      const keys = Reflect.ownKeys(v);
+      const out = keys.slice(0, MAX_ITEMS).map((k) => {
+        const d = Object.getOwnPropertyDescriptor(v, k);
+        const name = typeof k === 'symbol' ? `[${String(k)}]` : JSON.stringify(k);
+        return `${d && !d.enumerable ? '~' : ''}${name}: ${field(k)}`;
+      });
       if (keys.length > MAX_ITEMS) out.push(`...${keys.length}`);
-      return `{${out.join(', ')}}`;
+      return `${tag}{${out.join(', ')}}`;
     } finally {
       ancestors.delete(v);
     }
@@ -193,6 +205,32 @@
     enumerable: false,
   });
 
+  // stderr no se compara: lo que el programa escribe por console.error/warn/trace pasaria
+  // desapercibido (y un programa que solo usa esos contaria como mudo). trace sin stack.
+  const util = require('util');
+  for (const m of ['error', 'warn', 'trace']) {
+    console[m] = (...args) => {
+      write(`[${m}] ${util.format(...args)}\n`);
+    };
+  }
+
+  // Globals que crea el programa (asignaciones implicitas en sloppy): el minifier no
+  // puede renombrarlos, y observarlos al salir no agrega usos al fuente.
+  const baseGlobals = new Set(Reflect.ownKeys(globalThis));
+  const observeNewGlobals = () => {
+    for (const k of Reflect.ownKeys(globalThis)) {
+      if (baseGlobals.has(k)) continue;
+      const d = Object.getOwnPropertyDescriptor(globalThis, k);
+      let s;
+      try {
+        s = d && 'value' in d ? ser(d.value, 0, new Set()) : '[accessor]';
+      } catch (e) {
+        s = `[throws ${e && e.name}]`;
+      }
+      write(`!dz global ${String(k)} = ${s}\n`);
+    }
+  };
+
   // Built-ins pisados: foto de los descriptores al final del preload (despues de
   // lo que el preload mismo cambia) contra los descriptores al salir.
   const WATCHED = [
@@ -239,6 +277,7 @@
   };
 
   process.on('exit', () => {
+    observeNewGlobals();
     try {
       if (builtinsChanged()) flags.add('builtins');
     } catch {

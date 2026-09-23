@@ -174,6 +174,7 @@ fn parses_as_module(fm: &SourceFile) -> bool {
 }
 
 /// Maximo de bindings que observa el epilogo. Mas no agrega senal y alarga la salida.
+/// Si hay mas, el epilogo lo dice (`!dz truncados = N`): el recorte no es silencioso.
 const MAX_OBSERVED: usize = 30;
 
 /// Epilogo observador: devuelve `src` con una llamada al final que imprime sus
@@ -194,7 +195,14 @@ pub fn instrument(src: &str) -> Option<String> {
     if names.is_empty() {
         return None;
     }
-    let args: Vec<String> = names.iter().map(|n| format!("[\"{n}\", {n}]")).collect();
+    let mut args: Vec<String> = names
+        .iter()
+        .take(MAX_OBSERVED)
+        .map(|n| format!("[\"{n}\", {n}]"))
+        .collect();
+    if names.len() > MAX_OBSERVED {
+        args.push(format!("[\"!dz truncados\", {}]", names.len() - MAX_OBSERVED));
+    }
     // "\n;\n": cierra un comentario de linea final y evita que ASI pegue el
     // epilogo a la ultima expresion del programa.
     Some(format!("{src}\n;\n__difuzzObserve({});\n", args.join(", ")))
@@ -228,7 +236,6 @@ fn top_level_bindings(src: &str) -> Option<Vec<String>> {
             _ => {}
         }
     }
-    names.truncate(MAX_OBSERVED);
     Some(names)
 }
 

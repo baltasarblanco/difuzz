@@ -111,6 +111,9 @@ struct Stats {
     observed: usize,
     /// Casos mudos sin bindings top-level que observar.
     silent_unobservable: usize,
+    /// Mudos sin bindings pero con globals creados: los comparo la pasada cruda
+    /// (el preload los imprime al salir). Subconjunto de `same`.
+    observed_globals: usize,
     /// Comparados cuyo original lanzo (subconjunto de same + divergences).
     threw: usize,
     /// Panics del propio fuzzer (no del minifier: esos van en `panics`). Un
@@ -138,6 +141,7 @@ impl Stats {
         self.known_drift += o.known_drift;
         self.observed += o.observed;
         self.silent_unobservable += o.silent_unobservable;
+        self.observed_globals += o.observed_globals;
         self.fuzzer_panics += o.fuzzer_panics;
         self.threw += o.threw;
     }
@@ -152,7 +156,7 @@ impl Stats {
 
     fn line(&self) -> String {
         format!(
-            "total={} iguales={} DIVERGENCIAS={} conocidas={} conocidas_sintoma_nuevo={} PANICS={} observados={} lanzaron={} | descartados: original={} (exit={} timeout={} senal={} observado_sin_salida={} mudo_sin_observar={}) mudos_sin_bindings={} parse={} (esm={} otro={}) codegen={} runner={} ilegibles={} panics_del_fuzzer={}",
+            "total={} iguales={} DIVERGENCIAS={} conocidas={} conocidas_sintoma_nuevo={} PANICS={} observados={} observados_por_globals={} lanzaron={} | descartados: original={} (exit={} timeout={} senal={} observado_sin_salida={} mudo_sin_observar={}) mudos_sin_bindings={} parse={} (esm={} otro={}) codegen={} runner={} ilegibles={} panics_del_fuzzer={}",
             self.total,
             self.same,
             self.divergences,
@@ -160,6 +164,7 @@ impl Stats {
             self.known_drift,
             self.panics,
             self.observed,
+            self.observed_globals,
             self.threw,
             self.a_exit + self.a_timeout + self.a_signal + self.observed_not_ok + self.silent_no_observe,
             self.a_exit,
@@ -349,7 +354,9 @@ fn process_case(
     } else if a.ok_silent() {
         // Programa mudo. Primero la comparacion cruda: si el minificado lanza,
         // se cuelga o imprime algo, ya es divergencia (asi se ve un SyntaxError
-        // como el de swc#12397 en un programa que no imprime).
+        // como el de swc#12397 en un programa que no imprime). Los globals que
+        // creo (lineas `!dz global`) entran en esta comparacion.
+        let had_globals = a.has_globals();
         if compare_and_report(ctx, runner, stats, rel, &original, &minified, a, false, &static_flags) {
             return;
         }
@@ -359,7 +366,12 @@ fn process_case(
         }
         // Segunda pasada con el epilogo observador.
         let Some(instrumented) = minify::instrument(&src) else {
-            stats.silent_unobservable += 1;
+            if had_globals {
+                stats.observed_globals += 1;
+                stats.same += 1;
+            } else {
+                stats.silent_unobservable += 1;
+            }
             return;
         };
         let (original, minified, static_flags) = match minify::prepare(&instrumented, cfg) {
