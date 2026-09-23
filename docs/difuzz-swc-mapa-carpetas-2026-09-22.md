@@ -1,5 +1,7 @@
 # difuzz (SWC) — Mapa de carpetas · 22-sep-2026
 
+> **Actualizado el 23-sep: ver §7.** Donde §7 contradice a §1–§6, vale §7.
+
 **Qué es este doc:** qué es cada carpeta del trabajo difuzz/SWC, de qué depende, y si se
 puede tocar o borrar. Todo es específico de difuzz + SWC.
 
@@ -152,3 +154,52 @@ Qué mirar en la salida:
 *Complementa a `difuzz-swc-que-sigue-2026-09-22.md` (versión de cierre) y
 `difuzz-swc-estado-2026-09-21.md`. Actualizar cuando se borre `~/swc-12400`, se mueva
 `~/swc-main` o se re-copie `~/difuzz-main2`.*
+
+---
+
+## 7. Actualización del 23-sep (serie de mejoras)
+
+Todo VERIFICADO con salida de comandos del 23-sep salvo lo marcado.
+
+**Cambios de estado**
+
+| carpeta | ahora |
+|---|---|
+| `~/swc-main` | `42e4f7e98b`, detached, limpio. Estuvo un rato en `4b42cd59d7` para validar el lint y volvió |
+| `~/difuzz` | `master` con 10 commits locales sobre `9ac4db5` (c1–c8, m6, m6b) + m6c y docs pendientes de aplicar. **Sin push.** Nuevos: `src/checks.rs`, `scripts/` |
+| `~/difuzz-main2` | `src/` = último commit de `~/difuzz` extraído con `git archive` (+ `touch`). `Cargo.toml` = el de `~/difuzz` + `[patch.crates-io]` a `~/swc-main`, **incluido `swc_ecma_visit`**. `Cargo.toml.antes-serie` = el previo a la serie |
+
+**Salidas nuevas en `~/difuzz-main2`** (todas contra `corpus-4b42`)
+
+| carpeta | qué es |
+|---|---|
+| `out-c1` … `out-c6` | medición de la serie de confianza (`scripts/medir-serie.sh`, corrida válida) |
+| `out-c7`, `out-c8` | commits 7 y 8, medidos a mano |
+| `out-lint-4b42` | c8 contra `4b42cd59d7`: validación del lint (9739 en `lint/`, 11084 en `div/`) |
+| `out-matriz/` | matriz m6: una carpeta por celda + `<celda>.stats` y `<celda>.log` |
+| `out-matriz-b/` | matriz m6b (verificación de nombres, con el error que tapaba 12188) |
+| `out-matriz-c/` | PENDIENTE: matriz m6c |
+| `build-*.log`, `run-*.log`, `stats-c*.txt` | logs de cada build y corrida |
+
+**Bases de comparación vigentes**
+
+| base | dónde | para qué |
+|---|---|---|
+| `out-main` | `~/difuzz-main2/out-main` | la base previa a la serie (8 div) |
+| c8 | `~/difuzz-main2/out-c8` = `out-matriz/carril_a+tal_cual` | estado del eje de confianza |
+| matriz | `~/difuzz-main2/out-matriz-c/` (cuando exista) | estado del eje de volumen |
+
+**Nuevo en cada `out-*`:** `lint/` (lo borra el reporter al arrancar, como `div/`, `known/` y
+`panic/`, VERIFICADO en `oracle.rs`) y `known-sintomas.tsv` (**no** se borra: persiste entre
+corridas del mismo directorio; su encabezado lleva el id del oráculo).
+
+**Temporales:** `/tmp/ukhd/` (corpus de un caso para `unused_keep_harmony`, que resultó ser el
+caso de #12401), `/tmp/ukhd-out/`.
+
+**Scripts** (antes en `~/Downloads`, ahora versionados en `~/difuzz/scripts/`): `matriz.sh`
+(reutilizable: `bash scripts/matriz.sh <dir_salida>`), `medir-serie.sh` (mide `HEAD~5..HEAD`;
+específico de la serie de confianza).
+
+**Qué se puede borrar:** `out-c1` … `out-c7` y `out-matriz-b` cuando la documentación esté
+subida (la historia queda en los docs). `out-main`, `out-c8`, `out-lint-4b42` y la última
+matriz se conservan como bases.

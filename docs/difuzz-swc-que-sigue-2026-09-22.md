@@ -1,5 +1,7 @@
 # difuzz (SWC) — Qué sigue · 22-sep-2026 (cierre)
 
+> **Reemplazado por `difuzz-swc-que-sigue-2026-09-23.md`.** Queda como historial.
+
 **Qué es este doc:** la cola de trabajo al cierre del 22-sep. **Reemplaza** a la versión de
 la mañana del mismo nombre y complementa `difuzz-swc-estado-2026-09-21.md`. Todo es
 específico de SWC: `main` @ `42e4f7e98b`, `@swc/core` 1.16.2.
