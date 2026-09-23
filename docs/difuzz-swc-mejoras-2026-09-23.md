@@ -413,6 +413,7 @@ Queda solo el `git push` (decisión del usuario).
 | m6 | `bdb0376` | matriz (`--config`, `--forma`) |
 | m6b | `2674434` | `nombres` en `core_defaults` |
 | m6c | `cd623e6` | `names_visible` (keep_* tapaba el 12188) |
-| docs | este commit | docs + `scripts/` |
+| docs | `85f7b9f`, `2502fbf` | docs + `scripts/` |
+| lock | `90e71c4` | `Cargo.lock` con `swc_ecma_visit` (faltaba desde c3) |
 
 Tests: 9 (c1–c8) → 10 (m6) → 11 (m6c).

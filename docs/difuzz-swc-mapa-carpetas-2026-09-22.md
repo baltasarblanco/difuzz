@@ -166,7 +166,7 @@ Todo VERIFICADO con salida de comandos del 23-sep salvo lo marcado.
 | carpeta | ahora |
 |---|---|
 | `~/swc-main` | `42e4f7e98b`, detached, limpio. Estuvo un rato en `4b42cd59d7` para validar el lint y volvió |
-| `~/difuzz` | `master` con 11 commits locales sobre `9ac4db5` (c1–c8, m6, m6b, m6c `cd623e6`) + 2 de docs. **Sin push.** Nuevos: `src/checks.rs`, `scripts/` |
+| `~/difuzz` | `master` @ `90e71c4` al cierre: 14 commits sobre `9ac4db5` (11 de código, 2 de docs, 1 de `Cargo.lock`). Push indicado; verificar con `git status -sb`. Nuevos: `src/checks.rs`, `scripts/` |
 | `~/difuzz-main2` | `src/` = último commit de `~/difuzz` extraído con `git archive` (+ `touch`). `Cargo.toml` = el de `~/difuzz` + `[patch.crates-io]` a `~/swc-main`, **incluido `swc_ecma_visit`**. `Cargo.toml.antes-serie` = el previo a la serie |
 
 **Salidas nuevas en `~/difuzz-main2`** (todas contra `corpus-4b42`)

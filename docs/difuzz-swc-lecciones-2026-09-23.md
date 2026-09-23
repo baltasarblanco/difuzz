@@ -58,6 +58,14 @@ qué pasó, cómo se detectó y qué regla queda.
 14. **Afirmar "candidato nuevo" sin releer la cola:** `unused_keep_harmony_destructuring` era
     el caso de #12401. ⇒ **Antes de llamar nuevo a un caso, buscarlo en que-sigue, estado y
     lecciones** (`grep -rn <caso> ~/difuzz/docs`).
+15. **Patch que agrega una dependencia sin el `Cargo.lock`:** el primer `cargo build` lo
+    reescribió, el árbol quedó sucio y un `rebase` posterior falló. Además se siguió adelante
+    con `status` = 1 cuando la instrucción decía frenar. ⇒ **Un patch que toca dependencias
+    incluye el `Cargo.lock` (o avisa que el build lo va a modificar), y un `status` distinto de
+    lo esperado frena el bloque.**
+16. **Sesión de `git am` colgada** de un intento anterior (`.git/rebase-apply`): bloqueó el
+    siguiente `am`. ⇒ **Limpiar con `git am --quit`, nunca `--abort`** (`--abort` vuelve HEAD al
+    punto de esa sesión vieja y puede deshacer commits posteriores).
 
 ## 4. Lo que funcionó y conviene repetir
 
