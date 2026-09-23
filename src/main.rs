@@ -1,4 +1,5 @@
-//! difuzz F1: esqueleto que camina.
+//! difuzz F1: esqueleto que camina (+ confianza: descartes, excepciones,
+//! sensor de asunciones, canales, lint).
 //!
 //! GEN (corpus) → MIN (minify) → EXEC (runner) → CMP (oracle). Sin mutacion,
 //! sin reduccion, una sola configuracion. Feo a proposito: el pipeline es la
@@ -101,6 +102,8 @@ struct Stats {
     codegen_error: usize,
     runner_failed: usize,
     panics: usize,
+    /// Sospechosos del lint de escrituras sobre literales (independiente del veredicto).
+    lint: usize,
     same: usize,
     divergences: usize,
     /// Divergencias esperadas: asuncion documentada o backlog de SWC (known.rs).
@@ -135,6 +138,7 @@ impl Stats {
         self.codegen_error += o.codegen_error;
         self.runner_failed += o.runner_failed;
         self.panics += o.panics;
+        self.lint += o.lint;
         self.same += o.same;
         self.divergences += o.divergences;
         self.known += o.known;
@@ -156,13 +160,14 @@ impl Stats {
 
     fn line(&self) -> String {
         format!(
-            "total={} iguales={} DIVERGENCIAS={} conocidas={} conocidas_sintoma_nuevo={} PANICS={} observados={} observados_por_globals={} lanzaron={} | descartados: original={} (exit={} timeout={} senal={} observado_sin_salida={} mudo_sin_observar={}) mudos_sin_bindings={} parse={} (esm={} otro={}) codegen={} runner={} ilegibles={} panics_del_fuzzer={}",
+            "total={} iguales={} DIVERGENCIAS={} conocidas={} conocidas_sintoma_nuevo={} PANICS={} LINT={} observados={} observados_por_globals={} lanzaron={} | descartados: original={} (exit={} timeout={} senal={} observado_sin_salida={} mudo_sin_observar={}) mudos_sin_bindings={} parse={} (esm={} otro={}) codegen={} runner={} ilegibles={} panics_del_fuzzer={}",
             self.total,
             self.same,
             self.divergences,
             self.known,
             self.known_drift,
             self.panics,
+            self.lint,
             self.observed,
             self.observed_globals,
             self.threw,
@@ -311,12 +316,13 @@ fn process_case(
         }
     };
 
-    let (original, minified, static_flags) = match minify::prepare(&src, cfg) {
+    let (original, minified, static_flags, dead_writes) = match minify::prepare(&src, cfg) {
         minify::Outcome::Ok {
             original,
             minified,
             static_flags,
-        } => (original, minified, static_flags),
+            dead_writes,
+        } => (original, minified, static_flags, dead_writes),
         minify::Outcome::ParseError { esm } => {
             if esm {
                 stats.parse_esm += 1;
@@ -335,6 +341,19 @@ fn process_case(
             return;
         }
     };
+
+    // Lint sobre la pasada cruda (sin observador: el epilogo apagaria el
+    // disparador). No depende de ejecutar nada.
+    if dead_writes.1 > dead_writes.0 {
+        stats.lint += 1;
+        eprintln!(
+            "LINT escrituras sobre literales {} -> {}: {}",
+            dead_writes.0,
+            dead_writes.1,
+            rel.display()
+        );
+        ctx.reporter.lint(rel, &original, &minified, dead_writes);
+    }
 
     // Precondicion del oraculo: el original termina solo (exit 0 o lanzando).
     let a = runner.run(&original);
@@ -379,6 +398,7 @@ fn process_case(
                 original,
                 minified,
                 static_flags,
+                ..
             } => (original, minified, static_flags),
             minify::Outcome::Panic(msg) => {
                 stats.panics += 1;
@@ -489,5 +509,8 @@ fn print_hint(out: &Path, stats: &Stats) {
     }
     if stats.known > 0 {
         eprintln!("conocidas (asuncion o backlog) en {}/known", out.display());
+    }
+    if stats.lint > 0 {
+        eprintln!("sospechosos del lint (triage a mano) en {}/lint", out.display());
     }
 }

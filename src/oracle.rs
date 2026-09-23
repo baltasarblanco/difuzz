@@ -103,11 +103,11 @@ impl Reporter {
     /// Guarda el preload una vez en la raiz: cada hallazgo se reproduce con
     /// `TZ=UTC node --require <out>/preload.cjs original.cjs`.
     ///
-    /// Borra `div/`, `known/` y `panic/` de una corrida anterior: si no, los
+    /// Borra `div/`, `known/`, `panic/` y `lint/` de una corrida anterior: si no, los
     /// hallazgos viejos se mezclan con los nuevos y el `ls` miente (paso en la
     /// corrida del 21-sep, con 8 directorios de sobra).
     pub fn new(root: &Path, config_name: &'static str, preload: &str) -> Reporter {
-        for sub in ["div", "known", "panic"] {
+        for sub in ["div", "known", "panic", "lint"] {
             let _ = std::fs::remove_dir_all(root.join(sub));
         }
         write_all(root, &[("preload.cjs", preload)]);
@@ -155,6 +155,27 @@ impl Reporter {
                 ("a.stderr", a.stderr.as_str()),
                 ("b.stdout", b.stdout.as_str()),
                 ("b.stderr", b.stderr.as_str()),
+            ],
+        );
+    }
+
+    /// Sospechoso, no veredicto: el minificado escribe sobre literales frescos
+    /// mas veces que el original (checks::dead_writes). Se triagea a mano.
+    pub fn lint(&self, case: &Path, original: &str, minified: &str, counts: (usize, usize)) {
+        let dir = self.case_dir("lint", case);
+        let meta = format!(
+            "case: {}\nkind: EscriturasSobreLiterales\nconfig: {}\nen original: {}\nen minificado: {}\n\nsospechoso, no veredicto: buscar en minified.cjs una asignacion cuyo destino es [...] o {{...}}\n",
+            case.display(),
+            self.config_name,
+            counts.0,
+            counts.1,
+        );
+        write_all(
+            &dir,
+            &[
+                ("meta.txt", meta.as_str()),
+                ("original.cjs", original),
+                ("minified.cjs", minified),
             ],
         );
     }

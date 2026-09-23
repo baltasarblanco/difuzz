@@ -86,6 +86,8 @@ pub enum Outcome {
         minified: String,
         /// checks::static_flags sobre el original.
         static_flags: Vec<&'static str>,
+        /// checks::dead_writes (original, minificado).
+        dead_writes: (usize, usize),
     },
     /// El parser rechazo el fuente o lo acepto con errores recuperados.
     /// `esm`: como modulo si parsea (carril B pendiente); solo se cuenta.
@@ -136,6 +138,7 @@ fn prepare_inner(src: &str, cfg: &Config) -> Outcome {
     let static_flags = crate::checks::static_flags(&program);
 
     let original = program.clone().apply(fixer(None));
+    let dead_original = crate::checks::dead_writes(&original);
     let original = match emit(cm.clone(), &original) {
         Ok(s) => s,
         Err(_) => return Outcome::CodegenError,
@@ -154,6 +157,7 @@ fn prepare_inner(src: &str, cfg: &Config) -> Outcome {
         },
     )
     .apply(fixer(None));
+    let dead_minified = crate::checks::dead_writes(&minified);
     let minified = match emit(cm, &minified) {
         Ok(s) => s,
         Err(_) => return Outcome::CodegenError,
@@ -163,6 +167,7 @@ fn prepare_inner(src: &str, cfg: &Config) -> Outcome {
         original,
         minified,
         static_flags,
+        dead_writes: (dead_original, dead_minified),
     }
 }
 
