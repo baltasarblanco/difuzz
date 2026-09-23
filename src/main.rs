@@ -478,6 +478,23 @@ fn process_case(
     }
 }
 
+/// Precondicion de names_only: la salida del original puede mostrar nombres,
+/// porque lee `.name` o imprime una instancia con el nombre de su clase
+/// (`Foo { x: 7 }`). Sin esto, names_only tapaba bugs reales: keep_* tambien
+/// apaga optimizaciones (inlining de funciones con nombre) y el 12188 dejaba de
+/// dispararse.
+fn names_visible(original: &str, a_stdout: &str) -> bool {
+    let ident = |c: char| c.is_alphanumeric() || c == '_' || c == '$';
+    let reads_name = original
+        .match_indices(".name")
+        .any(|(i, _)| !original[i + 5..].chars().next().is_some_and(ident));
+    let named_instance = a_stdout.lines().any(|l| {
+        l.match_indices(" {")
+            .any(|(i, _)| l[..i].chars().next_back().is_some_and(ident))
+    });
+    reads_name || named_instance
+}
+
 /// La divergencia desaparece si se minifica igual pero preservando nombres: es
 /// el costo de keep_* apagado (`f.name`, `Foo { x: 7 }` impreso como `{ x: 7 }`),
 /// no un bug. Se minifica el original ya impreso: es el mismo programa.
@@ -540,7 +557,7 @@ fn compare_and_report(
                 }
             }
             let flags_b: Vec<&str> = b.flags.iter().map(String::as_str).collect();
-            if names_cfg.is_some_and(|c| names_only(runner, c, original, &a)) {
+            if names_cfg.is_some_and(|c| names_visible(original, &a.stdout) && names_only(runner, c, original, &a)) {
                 flags.push("nombres");
             }
             let mut why = ctx.known.classify(rel, &flags);
@@ -594,5 +611,21 @@ fn print_hint(out: &Path, stats: &Stats) {
     }
     if stats.lint > 0 {
         eprintln!("sospechosos del lint (triage a mano) en {}/lint", out.display());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::names_visible;
+
+    #[test]
+    fn nombres_visibles_solo_si_la_salida_puede_mostrarlos() {
+        assert!(names_visible("console.log(f.name);", ""));
+        assert!(names_visible("", "Foo { x: 7 }"));
+        assert!(names_visible("", "A {} A {}"));
+        // 12188: nada de nombres a la vista.
+        assert!(!names_visible("a[index++]=1;", "member result 1 1"));
+        assert!(!names_visible("o.names;", "x = { a: 1 }"));
+        assert!(!names_visible("", "Map(1) { 'a' => 1 }"));
     }
 }
