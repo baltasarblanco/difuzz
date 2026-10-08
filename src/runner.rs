@@ -243,6 +243,9 @@ pub struct Runner {
     /// M11: cwd del programa, uno por worker y la MISMA ruta para A y B; se
     /// vacia antes de cada ejecucion (sin estado compartido entre A y B).
     cwd: PathBuf,
+    /// M30 (`--stubs`): manifiesto de stubs del caso (stubs.rs), uno por
+    /// worker. `None`: sin stubs (no se pasa DIFUZZ_STUBS).
+    stubs: Option<PathBuf>,
 }
 
 impl Runner {
@@ -261,6 +264,24 @@ impl Runner {
             invocar: false,
             ctl: dir.join(format!("difuzz-{pid}-w{worker}-ctl.txt")),
             cwd: dir.join(format!("difuzz-{pid}-w{worker}-cwd")),
+            stubs: None,
+        }
+    }
+
+    /// M30: con `--stubs`, los specifiers que no resuelven pasan a stubs (ver
+    /// stubs.rs y el final de preload.js). El manifiesto lo fija `set_stubs`.
+    pub fn with_stubs(mut self, on: bool) -> Runner {
+        self.stubs = on.then(|| self.ctl.with_file_name(
+            self.ctl.file_name().map_or_else(String::new, |n| n.to_string_lossy().replace("-ctl.txt", "-stubs.json")),
+        ));
+        self
+    }
+
+    /// M30: el manifiesto del caso actual (lo calcula main del original). A y B
+    /// corren con el mismo. Sin `--stubs` no hace nada.
+    pub fn set_stubs(&self, manifest: &str) {
+        if let Some(p) = &self.stubs {
+            let _ = std::fs::write(p, manifest);
         }
     }
 
@@ -294,11 +315,22 @@ impl Runner {
             invocar: self.invocar,
             ctl: self.ctl.clone(),
             cwd: self.cwd.clone(),
+            stubs: self.stubs.clone(),
         }
     }
 
     pub fn run(&self, js: &str) -> Exec {
         self.run_inner(js, Opts::default())
+    }
+
+    /// M28: lo que distingue la ejecucion de `run` en la cache de A ademas del
+    /// texto: el envoltorio observador (y si invoca) corre otro archivo.
+    pub fn cache_tag(&self) -> &'static str {
+        match (self.observe, self.invocar) {
+            (false, _) => "",
+            (true, false) => "observar",
+            (true, true) => "observar+invocar",
+        }
     }
 
     /// Igual, pero el preload cambia el contenido de `Function.prototype.toString()`
@@ -315,6 +347,12 @@ impl Runner {
     /// M16: igual que `run` con argumentos extra para node (p. ej. `--stack-size`).
     pub fn run_with_args(&self, js: &str, node_args: &[&str]) -> Exec {
         self.run_inner(js, Opts { node_args, ..Opts::default() })
+    }
+
+    /// Re-chequeo de `global_conocido` (main.rs): igual que `run`, con esos globals
+    /// definidos como stubs inertes por el preload (DIFUZZ_GLOBALS).
+    pub fn run_with_globals(&self, js: &str, globals: &str) -> Exec {
+        self.run_inner(js, Opts { globals: Some(globals), ..Opts::default() })
     }
 
     /// El timeout de este runner (`--timeout-ms`).
@@ -363,6 +401,9 @@ impl Drop for Runner {
         let _ = std::fs::remove_file(&self.wrapper);
         let _ = std::fs::remove_file(&self.ctl);
         let _ = std::fs::remove_dir_all(&self.cwd);
+        if let Some(p) = &self.stubs {
+            let _ = std::fs::remove_file(p);
+        }
     }
 }
 
@@ -389,6 +430,8 @@ struct Opts<'a> {
     salted: bool,
     timeout: Option<Duration>,
     node_args: &'a [&'a str],
+    /// Nombres separados por coma para DIFUZZ_GLOBALS.
+    globals: Option<&'a str>,
 }
 
 fn run_file(r: &Runner, script: &Path, start: Instant, timeout: Duration, opts: Opts) -> Exec {
@@ -421,6 +464,12 @@ fn run_file(r: &Runner, script: &Path, start: Instant, timeout: Duration, opts: 
         cmd.env("DIFUZZ_SALT", "1");
     }
     cmd.env("DIFUZZ_CTL", &r.ctl);
+    if let Some(p) = &r.stubs {
+        cmd.env("DIFUZZ_STUBS", p);
+    }
+    if let Some(g) = opts.globals {
+        cmd.env("DIFUZZ_GLOBALS", g);
+    }
     // M2: grupo de procesos propio (pgid = pid de node). Al terminar, por timeout
     // o normalmente, se mata el grupo entero: un hijo que hereda el stdout ya no
     // mantiene el pipe abierto ni queda huerfano.
@@ -474,12 +523,23 @@ fn run_file(r: &Runner, script: &Path, start: Instant, timeout: Duration, opts: 
     // Riesgo aceptado: node ya fue cosechado y su pid podria reusarse, pero un
     // proceso nuevo solo tiene pgid == pid si se hace lider de grupo.
     kill_group(pid);
+    // Subreaper (huerfanos.rs): los `detached` que escaparon del grupo ya son
+    // hijos de difuzz; se matan aca. Si los pipes no cierran enseguida, una
+    // segunda pasada (un nieto que quedo huerfano al morir su padre por el kill).
+    crate::huerfanos::cosechar();
+    let mut second_pass = crate::huerfanos::activo();
 
     let deadline = Instant::now() + READ_GRACE;
     let mut closed = 0;
     while closed < 2 {
-        match rx.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
+        let left = deadline.saturating_duration_since(Instant::now());
+        let slice = if second_pass { left.min(Duration::from_millis(50)) } else { left };
+        match rx.recv_timeout(slice) {
             Ok(()) => closed += 1,
+            Err(_) if second_pass => {
+                second_pass = false;
+                crate::huerfanos::cosechar();
+            }
             Err(_) => break,
         }
     }

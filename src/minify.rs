@@ -45,6 +45,10 @@ impl Preset {
     /// La config del preset para un backend y un tipo de fuente. El carril
     /// (script o modulo) llega explicito: el backend lo recibe, no lo adivina.
     pub fn build(self, minifier: Minifier, kind: SourceKind) -> Config {
+        // M34: salvo --en-proceso, la misma config pero minificando en un hijo.
+        if crate::subproceso::activo() {
+            return Config(Box::new(crate::subproceso::Remoto::new(minifier, self, kind, false)));
+        }
         Config(minifier.build(self, kind))
     }
 }
@@ -130,7 +134,15 @@ impl Config {
     /// No es una celda: sirve para preguntar si una divergencia de core_defaults
     /// desaparece cuando los nombres no cambian (main::names_only).
     pub fn core_defaults_keep_names(minifier: Minifier, kind: SourceKind) -> Self {
+        if crate::subproceso::activo() {
+            return Config(Box::new(crate::subproceso::Remoto::new(minifier, Preset::CoreDefaults, kind, true)));
+        }
         Config(minifier.build_core_defaults_keep_names(kind))
+    }
+
+    /// M34: una config sobre un backend ya armado (el hijo de `--preparar`).
+    pub fn from_backend(backend: Box<dyn crate::backend::Backend>) -> Self {
+        Config(backend)
     }
 }
 
@@ -198,6 +210,8 @@ const MAX_OBSERVED: usize = 30;
 ///
 /// `invocar` (mejora 7, `--invocar`): el epilogo llama a `__difuzzObserveInvocar`,
 /// que imprime lo mismo y despues llama a cada funcion observada (preload.js).
+/// M31: via `globalThis[...]`, y despues `__difuzzObserveDespues` re-observa los
+/// bindings no-funcion que cambiaron.
 ///
 /// `kind` (M12): los bindings se leen parseando segun el carril; en el carril B
 /// es el epilogo de un modulo sin exports.
@@ -228,10 +242,35 @@ pub fn instrument(src: &str, invocar: bool, kind: SourceKind) -> Option<String> 
     }
     // "\n;\n": cierra un comentario de linea final y evita que ASI pegue el
     // epilogo a la ultima expresion del programa.
-    let observe = if invocar { "__difuzzObserveInvocar" } else { "__difuzzObserve" };
+    // M31 (b): si el programa declara `__difuzzObserveInvocar` top-level, se
+    // llama via `globalThis[...]`: su binding (CJS, modulo o `en_funcion`:
+    // siempre local) ya no la sombrea. Si ademas declara `globalThis`, no hay por
+    // donde llamar: sin invocar. Sin colision, el nombre suelto de siempre: la
+    // forma `globalThis[...]` cambia lo que hace el minifier (MEDIDO: con ella
+    // SWC dejaba de borrar la `function foo` de unused_keep_harmony_destructuring
+    // y se tapaba esa divergencia).
+    let declared = |n: &str| names.iter().any(|x| x == n);
+    let invocar = invocar && !(declared("__difuzzObserveInvocar") && declared("globalThis"));
+    let via_global = |f: &str| if declared(f) { format!("globalThis[\"{f}\"]") } else { f.to_string() };
+    let observe = if invocar { via_global("__difuzzObserveInvocar") } else { "__difuzzObserve".to_string() };
     let mut out = format!("{src}\n;\n");
     if !args.is_empty() {
         out.push_str(&format!("{observe}({});\n", args.join(", ")));
+        // M31 (c): los mismos bindings leidos de nuevo despues de invocar (un
+        // primitivo reasignado por una funcion se ve recien aca). Sin ella si el
+        // nombre esta tomado y `globalThis` tambien.
+        if invocar && !(declared("__difuzzObserveDespues") && declared("globalThis")) {
+            let vars = catch_unwind(AssertUnwindSafe(|| GLOBALS.set(&Globals::new(), || var_bindings(src, kind)))).unwrap_or_default();
+            let again: Vec<String> = names
+                .iter()
+                .take(MAX_OBSERVED)
+                .filter(|n| vars.contains(n))
+                .map(|n| format!("[\"{n}\", {n}]"))
+                .collect();
+            if !again.is_empty() {
+                out.push_str(&format!("{}({});\n", via_global("__difuzzObserveDespues"), again.join(", ")));
+            }
+        }
     }
     if cjs {
         out.push_str(&format!("__difuzzObserveCjs(module.exports, {invocar});\n"));
@@ -285,6 +324,45 @@ fn top_level_bindings(src: &str, kind: SourceKind) -> Option<Vec<String>> {
         }
     }
     Some(names)
+}
+
+/// M31 (c): solo los bindings `var`/`let`/`const` top-level (los que una funcion
+/// invocada puede reasignar). Las `function`/`class` no se re-observan: una
+/// segunda referencia en el epilogo le cambia al minifier lo que puede borrar
+/// (MEDIDO: tapaba la divergencia de unused_keep_harmony_destructuring).
+fn var_bindings(src: &str, kind: SourceKind) -> Vec<String> {
+    let Some(program) = crate::backend::swc::parse_for(src, kind) else {
+        return Vec::new();
+    };
+    let vars: Vec<&swc_ecma_ast::VarDecl> = match &program {
+        Program::Script(s) => s
+            .body
+            .iter()
+            .filter_map(|st| match st {
+                Stmt::Decl(Decl::Var(v)) => Some(&**v),
+                _ => None,
+            })
+            .collect(),
+        Program::Module(m) => m
+            .body
+            .iter()
+            .filter_map(|it| match it {
+                ModuleItem::Stmt(Stmt::Decl(Decl::Var(v))) => Some(&**v),
+                ModuleItem::ModuleDecl(ModuleDecl::ExportDecl(e)) => match &e.decl {
+                    Decl::Var(v) => Some(&**v),
+                    _ => None,
+                },
+                _ => None,
+            })
+            .collect(),
+    };
+    let mut names = Vec::new();
+    for v in vars {
+        for d in &v.decls {
+            collect_pat(&d.name, &mut names);
+        }
+    }
+    names
 }
 
 fn collect_pat(pat: &Pat, out: &mut Vec<String>) {

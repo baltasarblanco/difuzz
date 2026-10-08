@@ -363,6 +363,52 @@
     };
   }
 
+  // M30 / re-chequeo de `global_conocido`: stub inerte y determinista. Una funcion
+  // (ser la imprime `fn`) cuyas propiedades, llamadas y `new` devuelven otros stubs
+  // (cacheados por camino: `s.a === s.a`). `then` y `__esModule` son undefined (no es
+  // thenable ni ESM de Babel), el primitivo es 0 o "[stub <camino>]" y se itera vacio.
+  // Lo que el programa le asigna se lee de vuelta. RealProxy: no prende `proxy`.
+  const stubs = new Map();
+  const stub = (path) => {
+    const hit = stubs.get(path);
+    if (hit) return hit;
+    const target = [function () {}][0];
+    const p = new RealProxy(target, {
+      get(t, k) {
+        if (k === 'then' || k === '__esModule') return undefined;
+        if (k === Symbol.toPrimitive) return (hint) => (hint === 'number' ? 0 : `[stub ${path}]`);
+        if (k === Symbol.iterator) return function* () {};
+        if (typeof k === 'symbol') return undefined;
+        if (Object.prototype.hasOwnProperty.call(t, k)) return Reflect.get(t, k);
+        return stub(`${path}.${k}`);
+      },
+      apply() {
+        return stub(`${path}()`);
+      },
+      construct() {
+        return stub(`new ${path}`);
+      },
+    });
+    stubs.set(path, p);
+    return p;
+  };
+  // Re-chequeo de `global_conocido` (main.rs): DIFUZZ_GLOBALS=a,b define esos globals
+  // (de la lista de oxc que no existen en node) como stubs, antes de la foto de
+  // globals: si la divergencia sigue con ellos definidos, el flag no la explica.
+  {
+    const names = process.env.DIFUZZ_GLOBALS;
+    delete process.env.DIFUZZ_GLOBALS;
+    if (names) {
+      for (const n of names.split(',')) {
+        try {
+          if (n && !(n in globalThis)) {
+            Object.defineProperty(globalThis, n, { value: stub(n), writable: true, configurable: true, enumerable: false });
+          }
+        } catch {}
+      }
+    }
+  }
+
   // Globals que crea el programa (asignaciones implicitas en sloppy): el minifier no
   // puede renombrarlos, y observarlos al salir no agrega usos al fuente.
   const baseGlobals = new Set(Reflect.ownKeys(globalThis));
@@ -500,15 +546,36 @@
     }
     return `${name}() = ${serSafe(r)}`;
   };
+  // M31 (c): lo que vale cada binding no-funcion antes de invocar, para re-observarlo
+  // despues (__difuzzObserveDespues): una funcion invocada puede cambiar el estado.
+  const antes = new Map();
   Object.defineProperty(globalThis, '__difuzzObserveInvocar', {
     value: (...pairs) => {
       observe(...pairs);
+      for (const [name, value] of pairs) {
+        if (typeof value !== 'function') antes.set(String(name), serSafe(value));
+      }
       for (const [name, value] of pairs) {
         if (typeof value === 'function') write(`${invocar(name, value)}\n`);
       }
     },
     enumerable: false,
   });
+  // M31 (c): el epilogo la llama despues de __difuzzObserveInvocar con los bindings
+  // var/let/const, leidos de nuevo (un primitivo reasignado se ve). Imprime solo los
+  // no-funcion que cambiaron. Lo que cambie despues (promesas) no se ve.
+  Object.defineProperty(globalThis, '__difuzzObserveDespues', {
+    value: (...pairs) => {
+      for (const [name, value] of pairs) {
+        const prev = antes.get(String(name));
+        if (typeof value === 'function' || prev === undefined) continue;
+        const s = serSafe(value);
+        if (s !== prev) write(`${name} = ${s} (tras invocar)\n`);
+      }
+    },
+    enumerable: false,
+  });
+  baseGlobals.add('__difuzzObserveDespues');
   // M36: `module.exports` del carril A (UMD/CJS sin bindings top-level). Se imprime como
   // un binding mas (`module.exports = ...`, con ser). Con --invocar se llama a lo
   // exportado: la exportacion misma si es funcion, y sus propiedades propias que sean
@@ -520,6 +587,7 @@
       if (!inv) return;
       if (typeof ex === 'function') write(`${invocar('module.exports', ex)}\n`);
       if (ex === null || (typeof ex !== 'object' && typeof ex !== 'function')) return;
+      const antesCjs = serSafe(ex);
       let n = 0;
       for (const k of Reflect.ownKeys(ex)) {
         if (typeof k !== 'string') continue;
@@ -536,6 +604,9 @@
         }
         write(`${invocar(`module.exports.${k}`, d.value)}\n`);
       }
+      // M31 (c): el estado exportado despues de invocar, si cambio.
+      const despuesCjs = serSafe(ex);
+      if (despuesCjs !== antesCjs) write(`module.exports = ${despuesCjs} (tras invocar)\n`);
     },
     enumerable: false,
   });
@@ -571,16 +642,29 @@
   Object.defineProperty(globalThis, '__difuzzObserveExportsInvocar', {
     value: (ns) => {
       globalThis.__difuzzObserveExports(ns);
-      for (const k of Reflect.ownKeys(ns)) {
-        if (typeof k !== 'string') continue;
-        let v;
+      const leer = (k) => {
         try {
-          v = ns[k];
+          return { v: ns[k] };
         } catch {
-          continue;
+          return null;
         }
-        if (typeof v === 'function') write(`${invocar(`export ${k}`, v)}\n`);
+      };
+      const keys = Reflect.ownKeys(ns).filter((k) => typeof k === 'string');
+      const antesNs = keys.map((k) => {
+        const r = leer(k);
+        return r === null || typeof r.v === 'function' ? null : serSafe(r.v);
+      });
+      for (const k of keys) {
+        const r = leer(k);
+        if (r !== null && typeof r.v === 'function') write(`${invocar(`export ${k}`, r.v)}\n`);
       }
+      // M31 (c): los exports son bindings vivos: los no-funcion que cambiaron al invocar.
+      keys.forEach((k, i) => {
+        if (antesNs[i] === null) return;
+        const r = leer(k);
+        const s = r === null ? '[throws]' : serSafe(r.v);
+        if (s !== antesNs[i]) write(`export ${k} = ${s} (tras invocar)\n`);
+      });
     },
     enumerable: false,
   });
@@ -610,5 +694,55 @@
     };
     process.prependListener('uncaughtException', onLinkError);
     process.prependListener('unhandledRejection', onLinkError);
+
+    // M30 (`--stubs`, opt-in): un specifier que no resuelve pasa a un modulo stub en
+    // vez de cortar el enlace. DIFUZZ_STUBS es la ruta del manifiesto (src/stubs.rs):
+    // `{specifier: [nombres]}`, calculado del original y el mismo para A y B. Sin la
+    // variable no se registra nada (comportamiento de siempre).
+    const stubsPath = process.env.DIFUZZ_STUBS;
+    delete process.env.DIFUZZ_STUBS;
+    if (stubsPath) {
+      let manifest = {};
+      try {
+        manifest = JSON.parse(fs.readFileSync(stubsPath, 'utf8'));
+      } catch {}
+      const STUB = Symbol.for('difuzz.stub');
+      Object.defineProperty(globalThis, STUB, { value: stub, enumerable: false });
+      baseGlobals.add(STUB);
+      const PREFIX = 'difuzz-stub:';
+      try {
+        require('module').registerHooks({
+          resolve(spec, context, next) {
+            try {
+              return next(spec, context);
+            } catch (e) {
+              let code = null;
+              try {
+                code = e && e.code;
+              } catch {}
+              if (!LINK_CODES.includes(code)) throw e;
+              const cjs = (context.conditions || []).includes('require');
+              return { url: `${PREFIX}${cjs ? 'cjs' : 'esm'}/${encodeURIComponent(spec)}`, shortCircuit: true };
+            }
+          },
+          load(url, context, next) {
+            if (!url.startsWith(PREFIX)) return next(url, context);
+            const rest = url.slice(PREFIX.length);
+            const spec = decodeURIComponent(rest.slice(4));
+            const make = `globalThis[Symbol.for('difuzz.stub')](${JSON.stringify(spec)})`;
+            if (rest.startsWith('cjs/')) {
+              return { format: 'commonjs', source: `module.exports = ${make};\n`, shortCircuit: true };
+            }
+            const names = Array.isArray(manifest[spec]) ? manifest[spec] : [];
+            let src = `const s = ${make};\nexport default s;\n`;
+            names.forEach((n, i) => {
+              if (typeof n !== 'string' || n === 'default') return;
+              src += `const n${i} = s[${JSON.stringify(n)}];\nexport { n${i} as ${JSON.stringify(n)} };\n`;
+            });
+            return { format: 'module', source: src, shortCircuit: true };
+          },
+        });
+      } catch {}
+    }
   }
 })();

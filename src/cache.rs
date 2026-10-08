@@ -4,7 +4,9 @@
 //! el mismo original se ejecutaba 4 veces. La clave es el texto exacto que se
 //! ejecuta mas el id del oraculo (preload, timeout, version de node).
 //!
-//! Formato: un archivo por entrada, `<dir>/<hash16>.a`, texto con encabezado y
+//! Formato: un archivo por entrada, `<dir>/<oraculo16>/<hash16>.a` (M28: un
+//! subdirectorio por oraculo, para poder borrar uno entero; las entradas sueltas
+//! `<dir>/<hash16>.a` de antes ya no se leen), texto con encabezado y
 //! secciones medidas en bytes (ver `encode`). El nombre es FNV-1a de 64 bits
 //! (`known::fnv1a`), pero la entrada guarda tambien el oraculo y el texto
 //! ejecutado completos y `get` los compara: una colision del hash es un miss,
@@ -24,6 +26,9 @@
 //!   (`difuzz-<pid>-`, runner.rs:101 y :126): cambian por proceso y por
 //!   worker, y B corre en la ruta del worker actual. Un stack con la ruta
 //!   vieja seria una divergencia falsa.
+//! - M28: la pasada observada del carril B (el envoltorio de modulos,
+//!   `Runner::observing`) se cachea con el tag del runner (`Runner::cache_tag`)
+//!   sumado al oraculo: el mismo texto corrido por el envoltorio es otra entrada.
 //! - `run_salted` (runner.rs:138) y `node_accepts` (:144) no se cachean: solo
 //!   corren ante una divergencia con flags de contenido o un SyntaxError de A
 //!   (pocos casos), y la clave tendria que distinguirlos.
@@ -64,7 +69,7 @@ impl CacheA {
     }
 
     fn with_oracle(dir: Option<PathBuf>, oracle: String) -> CacheA {
-        let dir = dir.and_then(|d| match std::fs::create_dir_all(&d) {
+        let dir = dir.and_then(|d| match std::fs::create_dir_all(d.join(&oracle)) {
             Ok(()) => Some(d),
             Err(e) => {
                 eprintln!("cache: no pude crear {}: {e}; sigo sin cache", d.display());
@@ -86,21 +91,36 @@ impl CacheA {
     /// `runner.run(js)`, salvo que ya este en la cache. Suma 1 a `hits` si no
     /// hubo que ejecutar. M3: el `bool` dice si A salio de la cache (hit), para
     /// que una divergencia se confirme corriendo A en fresco.
+    /// M28: el tag del runner (pasada observada del carril B) entra en la clave.
     pub fn run(&self, runner: &Runner, js: &str, hits: &mut usize) -> (Exec, bool) {
-        if let Some(a) = self.get(js) {
+        let tag = runner.cache_tag();
+        if let Some(a) = self.get_tagged(tag, js) {
             *hits += 1;
             return (a, true);
         }
         let a = runner.run(js);
-        self.put(js, &a);
+        self.put_tagged(tag, js, &a);
         (a, false)
+    }
+
+    /// M28: el oraculo de las entradas con `tag` ("" = la ejecucion cruda).
+    fn oracle_for(&self, tag: &str) -> String {
+        if tag.is_empty() {
+            self.oracle.clone()
+        } else {
+            format!("{} {tag}", self.oracle)
+        }
     }
 
     /// M3: lapida. La entrada de `js` dio una salida que una ejecucion fresca no
     /// reproduce (depende de ppid, worker, cwd, otra corrida...): desde ahora es
     /// un miss para `get` y `put` no la pisa.
-    pub fn tombstone(&self, js: &str) {
-        let Some(path) = self.entry(js) else {
+    pub fn tombstone(&self, runner: &Runner, js: &str) {
+        self.tombstone_tagged(runner.cache_tag(), js);
+    }
+
+    fn tombstone_tagged(&self, tag: &str, js: &str) {
+        let Some(path) = self.entry(tag, js) else {
             return;
         };
         let tmp = path.with_file_name(format!(
@@ -108,38 +128,49 @@ impl CacheA {
             std::process::id(),
             self.tmp_seq.fetch_add(1, Ordering::Relaxed)
         ));
-        let text = format!("{MAGIC}\noraculo {}\n{TOMBSTONE}\n", self.oracle);
+        let text = format!("{MAGIC}\noraculo {}\n{TOMBSTONE}\n", self.oracle_for(tag));
         let ok = std::fs::write(&tmp, text).is_ok() && std::fs::rename(&tmp, &path).is_ok();
         if !ok {
             let _ = std::fs::remove_file(&tmp);
         }
     }
 
-    fn is_tombstone(&self, path: &Path) -> bool {
+    fn is_tombstone(&self, tag: &str, path: &Path) -> bool {
+        let oracle = self.oracle_for(tag);
         std::fs::read_to_string(path).is_ok_and(|t| {
-            t.lines().nth(1).and_then(|l| l.strip_prefix("oraculo ")) == Some(self.oracle.as_str())
+            t.lines().nth(1).and_then(|l| l.strip_prefix("oraculo ")) == Some(oracle.as_str())
                 && t.lines().nth(2) == Some(TOMBSTONE)
         })
     }
 
-    fn entry(&self, js: &str) -> Option<PathBuf> {
-        let h = fnv1a(&[self.oracle.as_str(), js]);
-        self.dir.as_ref().map(|d| d.join(format!("{h:016x}.a")))
+    fn entry(&self, tag: &str, js: &str) -> Option<PathBuf> {
+        let h = fnv1a(&[self.oracle_for(tag).as_str(), js]);
+        self.dir.as_ref().map(|d| d.join(&self.oracle).join(format!("{h:016x}.a")))
     }
 
+    #[cfg(test)]
     pub fn get(&self, js: &str) -> Option<Exec> {
-        let text = std::fs::read_to_string(self.entry(js)?).ok()?;
-        decode(&text, &self.oracle, js)
+        self.get_tagged("", js)
     }
 
+    fn get_tagged(&self, tag: &str, js: &str) -> Option<Exec> {
+        let text = std::fs::read_to_string(self.entry(tag, js)?).ok()?;
+        decode(&text, &self.oracle_for(tag), js)
+    }
+
+    #[cfg(test)]
     pub fn put(&self, js: &str, a: &Exec) {
-        let Some(path) = self.entry(js) else {
+        self.put_tagged("", js, a)
+    }
+
+    fn put_tagged(&self, tag: &str, js: &str, a: &Exec) {
+        let Some(path) = self.entry(tag, js) else {
             return;
         };
         if !matches!(a.status, Status::Exited(_))
             || a.stdout.contains(&self.own_paths)
             || a.stderr.contains(&self.own_paths)
-            || self.is_tombstone(&path)
+            || self.is_tombstone(tag, &path)
         {
             return;
         }
@@ -148,7 +179,7 @@ impl CacheA {
             std::process::id(),
             self.tmp_seq.fetch_add(1, Ordering::Relaxed)
         ));
-        let ok = std::fs::write(&tmp, encode(&self.oracle, js, a)).is_ok()
+        let ok = std::fs::write(&tmp, encode(&self.oracle_for(tag), js, a)).is_ok()
             && std::fs::rename(&tmp, &path).is_ok();
         if !ok {
             let _ = std::fs::remove_file(&tmp);
@@ -311,7 +342,7 @@ mod tests {
         let c = CacheA::with_oracle(Some(d.clone()), "o".into());
         c.put("js", &exec("1\n"));
         assert!(c.get("js").is_some());
-        c.tombstone("js");
+        c.tombstone_tagged("", "js");
         assert!(c.get("js").is_none());
         c.put("js", &exec("2\n"));
         assert!(c.get("js").is_none());
@@ -321,13 +352,51 @@ mod tests {
         std::fs::remove_dir_all(&d).unwrap();
     }
 
+    /// M28: la pasada observada del carril B se cachea aparte de la cruda (mismo
+    /// texto, otro tag) y la segunda vez es hit.
+    #[test]
+    fn pasada_observada_cacheada_con_su_tag() {
+        use crate::minify::SourceKind;
+        use crate::runner::Preload;
+        if Command::new("node").arg("--version").output().is_err() {
+            eprintln!("sin node en PATH: test omitido");
+            return;
+        }
+        let d = tmp("observar");
+        let c = CacheA::with_oracle(Some(d.clone()), "o".into());
+        let preload = Preload::write_tagged("m28").unwrap();
+        let r = Runner::new(&preload, 9990, Duration::from_secs(20)).with_kind(SourceKind::Module);
+        let obs = r.observing();
+        let js = "export const a = 1;\n";
+        let mut hits = 0;
+        let (cruda, hit) = c.run(&r, js, &mut hits);
+        assert!(!hit && cruda.ok_silent(), "{}", cruda.stdout);
+        let (o1, hit) = c.run(&obs, js, &mut hits);
+        assert!(!hit, "la cruda no puede servir de observada");
+        assert_eq!(o1.stdout, "export a = 1\n");
+        let (o2, hit) = c.run(&obs, js, &mut hits);
+        assert!(hit && o2.stdout == o1.stdout);
+        assert_eq!(hits, 1);
+        // Con --invocar el envoltorio cambia: otra entrada.
+        let inv = Runner::new(&preload, 9989, Duration::from_secs(20)).with_kind(SourceKind::Module).with_invocar(true);
+        assert!(!c.run(&inv.observing(), js, &mut hits).1);
+        // La lapida de la observada no toca la cruda.
+        c.tombstone(&obs, js);
+        assert!(!c.run(&obs, js, &mut hits).1);
+        assert!(c.run(&r, js, &mut hits).1);
+        // Subdirectorio por oraculo.
+        assert!(std::fs::read_dir(d.join("o")).unwrap().count() >= 3);
+        drop((r, inv));
+        std::fs::remove_dir_all(&d).unwrap();
+    }
+
     #[test]
     fn colision_del_nombre_es_miss() {
         let d = tmp("colision");
         let c = CacheA::with_oracle(Some(d.clone()), "o".into());
         c.put("uno", &exec("1\n"));
         // Simula una colision: la entrada de "dos" contiene la de "uno".
-        std::fs::copy(c.entry("uno").unwrap(), c.entry("dos").unwrap()).unwrap();
+        std::fs::copy(c.entry("", "uno").unwrap(), c.entry("", "dos").unwrap()).unwrap();
         assert!(c.get("dos").is_none());
         assert!(c.get("uno").is_some());
         std::fs::remove_dir_all(&d).unwrap();
@@ -357,7 +426,7 @@ mod tests {
             assert!(c.get(&format!("caso{i}")).is_some());
         }
         // No quedan temporales.
-        let left: Vec<_> = std::fs::read_dir(&d)
+        let left: Vec<_> = std::fs::read_dir(d.join("o"))
             .unwrap()
             .flatten()
             .filter(|e| e.file_name().to_string_lossy().starts_with(".tmp-"))

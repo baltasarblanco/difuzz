@@ -1,34 +1,62 @@
 #!/bin/bash
-# Mide cada commit de la serie "confianza" (HEAD~5..HEAD de ~/difuzz) en
-# ~/difuzz-main2, contra ~/swc-main (42e4f7e98b) y corpus-4b42.
-# Base de comparacion: ~/difuzz-main2/out-main (8 div, 5 conocidas, 524 observados).
-# Escribe out-c1..out-c6, build-c*.log, run-c*.log y stats-c*.txt en ~/difuzz-main2.
+# Mide una serie de commits de ESTE repo: para cada commit del rango compila su
+# propio binario y lo corre sobre el mismo corpus, una salida por commit.
+#
+# Por que cambio (07-oct-2026): la version anterior hacia `cd ~/difuzz-main2` y
+# copiaba el [patch.crates-io] de ~/difuzz-main para medir cada commit de difuzz
+# contra SWC main (~/swc-main). Esas carpetas ya no estan en ~/ (viven en
+# versiones-intermedias/, que no se toca) y SWC dejo de ser el objetivo: el
+# minifier sale de las versiones fijas de Cargo.toml de cada commit. Lo que queda
+# con sentido es comparar commits de difuzz entre si (la serie de mejoras).
+# Como scripts/matriz.sh (M7): sin `cd` ni rutas fijas; todo por variable.
+#
+# Cada commit se extrae con `git archive` a <salida>/src-<commit> (el arbol del
+# commit, sin el indice ni lo no commiteado) y se compila con
+# `cargo build --release`. El target es compartido (TARGET): las dependencias
+# con la misma version se reusan; difuzz se recompila siempre porque cada commit
+# tiene su propia ruta.
+#
+# uso: [REPO=.] [CORPUS=...] [TARGET=<salida>/target] [ARGS="..."] medir-serie.sh RANGO [dir_salida]
+#   RANGO       rango de git (p. ej. 9ac4db5..HEAD o HEAD~5..HEAD), en orden cronologico
+#   ARGS        argumentos extra para cada binario (p. ej. "--jobs 6 --no-cache"). Los
+#               commits viejos no conocen las opciones nuevas (--minifier, --carril...)
+#   dir_salida  default: out-serie
+# Escribe en dir_salida: bin-<c>, build-<c>.log, run-<c>.log, stats-<c>.txt, out-<c>/.
 set -u
-cd ~/difuzz-main2 || exit 1
-[ -f Cargo.toml.antes-serie ] || cp Cargo.toml Cargo.toml.antes-serie
-for n in 1 2 3 4 5 6; do
-  c=$(git -C ~/difuzz rev-parse --short "HEAD~$((6 - n))")
-  echo "=== commit $n ($c) $(git -C ~/difuzz log -1 --format=%s "$c")"
-  rm -rf src && git -C ~/difuzz archive "$c" src | tar -x
-  # git archive pone la fecha del commit: sin esto cargo puede no ver el cambio.
-  find src -type f -exec touch {} +
-  # Cargo.toml de ese commit + el [patch] hacia ~/swc-main (+ swc_ecma_visit desde el 3)
-  git -C ~/difuzz show "$c:Cargo.toml" > Cargo.toml
-  printf '\n' >> Cargo.toml
-  sed -n '/^\[patch.crates-io\]/,/^$/p' ~/difuzz-main/Cargo.toml >> Cargo.toml
-  if grep -q '^swc_ecma_visit' Cargo.toml; then
-    echo 'swc_ecma_visit           = { path = "/home/baltasarblanco/swc-main/crates/swc_ecma_visit" }' >> Cargo.toml
+RANGO=${1:?uso: medir-serie.sh RANGO [dir_salida]}
+OUT=${2:-out-serie}
+REPO=${REPO:-$(dirname "$0")/..}
+CORPUS=${CORPUS:-$HOME/swc-main/crates/swc_ecma_minifier/tests}
+ARGS=${ARGS:-}
+mkdir -p "$OUT"
+OUT=$(cd "$OUT" && pwd)
+TARGET=${TARGET:-$OUT/target}
+
+commits=$(git -C "$REPO" rev-list --reverse "$RANGO") || exit 1
+[ -n "$commits" ] || { echo "rango vacio: $RANGO"; exit 1; }
+for c in $commits; do
+  c=$(git -C "$REPO" rev-parse --short "$c")
+  echo "=== $c $(git -C "$REPO" log -1 --format=%s "$c")"
+  src="$OUT/src-$c"
+  rm -rf "$src" && mkdir -p "$src"
+  # -m: mtime de ahora, no la del commit (si no, cargo puede dar por fresco un
+  # src-<c> re-extraido y no recompilar).
+  git -C "$REPO" archive "$c" | tar -x -m -C "$src" || { echo "  git archive fallo"; break; }
+  if ! CARGO_TARGET_DIR="$TARGET" cargo build --release --manifest-path "$src/Cargo.toml" > "$OUT/build-$c.log" 2>&1; then
+    echo "  NO COMPILA: ver $OUT/build-$c.log"; tail -20 "$OUT/build-$c.log"; break
   fi
-  if ! cargo build --release > "build-c$n.log" 2>&1; then
-    echo "  NO COMPILA: ver ~/difuzz-main2/build-c$n.log"; tail -20 "build-c$n.log"; break
+  if [[ $(< "$OUT/build-$c.log") != *"Compiling difuzz"* ]]; then
+    echo "  NO RECOMPILO difuzz: el binario seria el de otro commit"; break
   fi
-  if ! grep -q 'Compiling difuzz' "build-c$n.log"; then
-    echo "  NO RECOMPILO difuzz: el binario seria el del commit anterior"; break
+  cp "$TARGET/release/difuzz" "$OUT/bin-$c"
+  # ARGS sin comillas a proposito: se parte en palabras.
+  # shellcheck disable=SC2086
+  "$OUT/bin-$c" "$CORPUS" --out "$OUT/out-$c" $ARGS 2> "$OUT/run-$c.log" > "$OUT/stats-$c.txt"
+  rc=$?
+  if [ "$rc" -ne 0 ]; then
+    echo "  el binario salio con $rc (opcion que ese commit no conoce?): ver $OUT/run-$c.log"
+    tail -3 "$OUT/run-$c.log"
+    continue
   fi
-  if grep -qi 'not used' "build-c$n.log"; then
-    echo "  PATCH NO USADO:"; grep -i 'not used' "build-c$n.log"; break
-  fi
-  rm -rf "out-c$n"
-  ./target/release/difuzz corpus-4b42 --out "out-c$n" 2> "run-c$n.log" > "stats-c$n.txt"
-  cat "stats-c$n.txt"
+  printf '%s\n' "$(< "$OUT/stats-$c.txt")"
 done

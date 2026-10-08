@@ -42,6 +42,21 @@ pub fn static_flags(program: &Program) -> Vec<&'static str> {
     out
 }
 
+/// Re-chequeo de `global_conocido` (recheck.rs): los globals de oxc que no existen
+/// en node y que el programa lee sin declararlos, ordenados.
+pub fn known_globals_used(program: &Program) -> Vec<String> {
+    let mut v = StaticFlags::default();
+    program.visit_with(&mut v);
+    let mut out: Vec<String> = v
+        .refs
+        .iter()
+        .filter(|r| !v.declared.contains(*r) && NODE_MISSING_OXC_GLOBALS.binary_search(&r.as_str()).is_ok())
+        .cloned()
+        .collect();
+    out.sort();
+    out
+}
+
 #[derive(Default)]
 struct StaticFlags {
     callee: bool,

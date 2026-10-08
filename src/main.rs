@@ -9,6 +9,8 @@ mod backend;
 mod cache;
 mod checks;
 mod corpus;
+mod emitir;
+mod huerfanos;
 mod indice;
 #[cfg(test)]
 mod invocar_tests;
@@ -16,7 +18,10 @@ mod known;
 mod minify;
 mod mutate;
 mod oracle;
+mod recheck;
 mod runner;
+mod stubs;
+mod subproceso;
 mod triage;
 
 use std::path::{Path, PathBuf};
@@ -27,8 +32,9 @@ use runner::Status;
 
 const USAGE: &str = "\
 uso: difuzz <corpus_dir> [--out DIR] [--minifier M] [--config C] [--forma F] [--carril K] [--timeout-ms N] [--limit N] [--jobs N] [--no-observe]
-             [--invocar] [--mutaciones N] [--cache DIR | --no-cache] [--indice DIR]
+             [--invocar] [--mutaciones N] [--cache DIR | --no-cache] [--indice DIR] [--en-proceso]
        difuzz --cruce DIR
+       difuzz --emitir ARCHIVO [--minifier M] [--config C] [--forma F] [--carril K]
 
   corpus_dir     raiz con archivos input.js (p. ej. crates/swc_ecma_minifier/tests)
   --out DIR      donde guardar hallazgos          (default: ./difuzz-out)
@@ -43,10 +49,21 @@ uso: difuzz <corpus_dir> [--out DIR] [--minifier M] [--config C] [--forma F] [--
   --invocar      el epilogo observador ademas llama a las funciones observadas
   --mutaciones N variantes por caso (borrar sentencias, perturbar literales), solo
                  por la pasada cruda + lint                (default: 0)
+  --mutaciones-extra N  M33: ademas, N variantes de los operadores nuevos (literal a
+                 negativo, envolver, duplicar, if, var/let/const, \"use strict\"),
+                 numeradas despues de las clasicas         (default: 0)
+  --stubs        M30: un import/require que no resuelve pasa a un modulo stub inerte
+                 (igual en A y B) en vez de descartar el caso como enlace (default: off)
   --cache DIR    cache de la ejecucion del original, compartible entre celdas (default: <out>/cache-a)
   --no-cache     no leer ni escribir la cache
+                 (cache_a_hits no es determinista: con la cache en frio depende de --jobs y del
+                 orden en que los workers toman los casos; los resultados no cambian)
   --indice DIR   anotar cada hallazgo en DIR/index-<celda>.tsv (directorio compartido por las celdas)
-  --cruce DIR    imprimir la tabla de cruce de DIR/index-*.tsv, sin correr nada";
+  --cruce DIR    imprimir la tabla de cruce de DIR/index-*.tsv, sin correr nada
+  --emitir ARCH  imprimir el original y el minificado de ARCH (sin correr node)
+  --en-proceso   minificar en el proceso de difuzz. Por defecto se minifica en un hijo
+                 persistente por worker: un abort, un desborde de pila o un cuelgue del
+                 minifier queda en panic/ (con la senal) y la corrida sigue";
 
 struct Cli {
     corpus: PathBuf,
@@ -65,9 +82,17 @@ struct Cli {
     invocar: bool,
     /// Mejora 10: variantes por caso (mutate.rs).
     mutaciones: usize,
+    /// M33: variantes de los operadores nuevos, despues de las clasicas.
+    mutaciones_extra: usize,
+    /// M30: stubs para los specifiers que no resuelven (stubs.rs).
+    stubs: bool,
     kind: minify::SourceKind,
     /// M24: `--cruce DIR`: solo imprimir la tabla de cruce, sin correr nada.
     cruce: Option<PathBuf>,
+    /// M34: minificar en un hijo (subproceso.rs). Por defecto; `--en-proceso` lo apaga.
+    subproceso: bool,
+    /// M29: `--emitir ARCHIVO`: imprimir original y minificado, sin correr nada.
+    emitir: Option<PathBuf>,
 }
 
 impl Cli {
@@ -84,6 +109,12 @@ impl Cli {
         }
         if self.mutaciones > 0 {
             cell.push_str(&format!("+mut{}", self.mutaciones));
+        }
+        if self.mutaciones_extra > 0 {
+            cell.push_str(&format!("+mutx{}", self.mutaciones_extra));
+        }
+        if self.stubs {
+            cell.push_str("+stubs");
         }
         cell
     }
@@ -106,7 +137,11 @@ impl Cli {
         let mut indice = None;
         let mut invocar = false;
         let mut mutaciones = 0;
+        let mut mutaciones_extra = 0;
+        let mut stubs = false;
         let mut cruce = None;
+        let mut subproceso = true;
+        let mut emitir = None;
 
         let mut it = args.into_iter();
         while let Some(arg) = it.next() {
@@ -143,11 +178,18 @@ impl Cli {
                 "--no-cache" => no_cache = true,
                 "--indice" => indice = Some(PathBuf::from(it.next().ok_or("--indice necesita un valor")?)),
                 "--invocar" => invocar = true,
+                "--en-proceso" => subproceso = false,
+                "--emitir" => emitir = Some(PathBuf::from(it.next().ok_or("--emitir necesita un archivo")?)),
                 "--cruce" => cruce = Some(PathBuf::from(it.next().ok_or("--cruce necesita un directorio")?)),
                 "--mutaciones" => {
                     let v = it.next().ok_or("--mutaciones necesita un valor")?;
                     mutaciones = v.parse().map_err(|_| format!("--mutaciones invalido: {v}"))?;
                 }
+                "--mutaciones-extra" => {
+                    let v = it.next().ok_or("--mutaciones-extra necesita un valor")?;
+                    mutaciones_extra = v.parse().map_err(|_| format!("--mutaciones-extra invalido: {v}"))?;
+                }
+                "--stubs" => stubs = true,
                 "--config" => {
                     let v = it.next().ok_or("--config necesita un valor")?;
                     preset = minify::Preset::parse(&v)
@@ -179,6 +221,13 @@ impl Cli {
             corpus = Some(PathBuf::new());
             cruce = Some(dir);
         }
+        // M29: --emitir toma un archivo, no un corpus.
+        if emitir.is_some() {
+            if corpus.is_some() || cruce.is_some() {
+                return Err("--emitir no corre nada: sin <corpus_dir> ni --cruce".into());
+            }
+            corpus = Some(PathBuf::new());
+        }
         if no_cache && cache.is_some() {
             return Err("--cache y --no-cache se excluyen".into());
         }
@@ -200,8 +249,12 @@ impl Cli {
             indice,
             invocar,
             mutaciones,
+            mutaciones_extra,
+            stubs,
             kind,
             cruce,
+            subproceso,
+            emitir,
         })
     }
 }
@@ -224,7 +277,10 @@ struct Stats {
     parse_esm: usize,
     parse_other: usize,
     codegen_error: usize,
+    /// Fallas del runner (error de difuzz, no del programa): A + B.
     runner_failed: usize,
+    /// M32: las de A (antes de comparar). Las de B son `runner_failed - runner_a`.
+    runner_a: usize,
     panics: usize,
     /// Sospechosos del lint de escrituras sobre literales (independiente del veredicto).
     lint: usize,
@@ -270,6 +326,9 @@ struct Stats {
     /// con el mismo kind no se reporta (`inherited`). No se suma en `merge`.
     skip_kind: Option<oracle::Kind>,
     inherited: usize,
+    /// M31 (a): observaciones con `--invocar` que no terminaron y se repitieron
+    /// sin invocar. Va en una linea aparte (solo con `--invocar`).
+    invocar_retry: usize,
 }
 
 impl Stats {
@@ -286,6 +345,7 @@ impl Stats {
         self.parse_other += o.parse_other;
         self.codegen_error += o.codegen_error;
         self.runner_failed += o.runner_failed;
+        self.runner_a += o.runner_a;
         self.panics += o.panics;
         self.lint += o.lint;
         self.same += o.same;
@@ -304,6 +364,7 @@ impl Stats {
         self.parse_script += o.parse_script;
         self.a_link += o.a_link;
         self.a_nondet += o.a_nondet;
+        self.invocar_retry += o.invocar_retry;
     }
 
     /// Devuelve la causa (M26: descartes.tsv).
@@ -326,7 +387,7 @@ impl Stats {
 
     fn line(&self) -> String {
         format!(
-            "total={} iguales={} DIVERGENCIAS={} conocidas={} conocidas_sintoma_nuevo={} PANICS={} LINT={} observados={} observados_por_globals={} lanzaron={} | descartados: original={} (exit={} timeout={} senal={} invalido={} observado_sin_salida={} mudo_sin_observar={} enlace={} no_determinista={}) mudos_sin_bindings={} parse={} (esm={} otro={} script={}) codegen={} runner={} ilegibles={} panics_del_fuzzer={} | identicos={} lint_equivalentes={} cache_a_hits={}",
+            "total={} iguales={} DIVERGENCIAS={} conocidas={} conocidas_sintoma_nuevo={} PANICS={} LINT={} observados={} observados_por_globals={} lanzaron={} | descartados: original={} (exit={} timeout={} senal={} invalido={} observado_sin_salida={} mudo_sin_observar={} enlace={} no_determinista={}) mudos_sin_bindings={} parse={} (esm={} otro={} script={}) codegen={} runner={} (a={} b={}) ilegibles={} panics_del_fuzzer={} | identicos={} lint_equivalentes={} cache_a_hits={}",
             self.total,
             self.same,
             self.divergences,
@@ -360,6 +421,8 @@ impl Stats {
             self.parse_script,
             self.codegen_error,
             self.runner_failed,
+            self.runner_a,
+            self.runner_failed - self.runner_a,
             self.unreadable,
             self.fuzzer_panics,
             self.identical,
@@ -371,6 +434,10 @@ impl Stats {
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
+    // M34: subcomando oculto, el hijo que minifica (subproceso.rs).
+    if args.first().map(String::as_str) == Some("--preparar") {
+        std::process::exit(subproceso::serve(&args[1..]));
+    }
     let cli = match Cli::parse(args) {
         Ok(c) => c,
         Err(e) => {
@@ -390,6 +457,18 @@ fn main() {
         return;
     }
 
+    if let Some(f) = &cli.emitir {
+        std::panic::set_hook(Box::new(minify::record_panic_location));
+        match emitir::emitir(f, cli.minifier, cli.preset, cli.forma, cli.kind) {
+            Ok(t) => print!("{t}"),
+            Err(e) => {
+                eprintln!("{e}");
+                std::process::exit(1);
+            }
+        }
+        return;
+    }
+
     // Un panic del minifier es un hallazgo, no ruido: se captura en minify::prepare
     // y se guarda. El hook default lo imprimiria en stderr por cada caso.
     // M22: el hook guarda donde fue el panic (archivo:linea:col del crate) para
@@ -397,6 +476,12 @@ fn main() {
     std::panic::set_hook(Box::new(minify::record_panic_location));
 
     install_signal_handlers();
+    // Subreaper (Linux): los hijos `detached` de los programas no sobreviven a su
+    // ejecucion (huerfanos.rs).
+    huerfanos::activar();
+    if cli.subproceso {
+        subproceso::activar();
+    }
     let stale = runner::clean_stale();
     if stale > 0 {
         eprintln!("borre {stale} temporales de corridas anteriores cortadas (pid muerto)");
@@ -442,10 +527,12 @@ fn main() {
     let timeout_ms = cli.timeout.as_millis().to_string();
     let kind_tag = format!("carril_{} .{}", cli.kind.carril(), cli.kind.ext());
     // M11: "entorno v2" (cwd/env/TMPDIR/HOME aislados): lo que ve el programa cambio.
-    let cache = cache::CacheA::new(
-        cli.cache.clone(),
-        &[runner::PRELOAD, timeout_ms.as_str(), kind_tag.as_str(), "entorno v2"],
-    );
+    // M30: con stubs, A no es la misma ejecucion (lo que no enlazaba ahora corre).
+    let mut cache_parts = vec![runner::PRELOAD, timeout_ms.as_str(), kind_tag.as_str(), "entorno v2"];
+    if cli.stubs {
+        cache_parts.push("stubs v1");
+    }
+    let cache = cache::CacheA::new(cli.cache.clone(), &cache_parts);
     // M27 (a): si --out no se puede escribir, no hay hallazgos que guardar.
     if oracle::write_errors() > errors_before {
         eprintln!("no puedo escribir en --out {}", cli.out.display());
@@ -511,7 +598,8 @@ fn main() {
                         .then(|| minify::Config::core_defaults_keep_names(cli.minifier, cli.kind));
                     let runner = runner::Runner::new(preload, w, cli.timeout)
                         .with_kind(cli.kind)
-                        .with_invocar(cli.invocar);
+                        .with_invocar(cli.invocar)
+                        .with_stubs(cli.stubs);
                     let mut stats = Stats::default();
                     loop {
                         if CANCEL.load(Ordering::SeqCst) {
@@ -559,6 +647,10 @@ fn main() {
     });
 
     let cancelled = CANCEL.load(Ordering::SeqCst);
+    let late = huerfanos::cosechar();
+    if late > 0 {
+        eprintln!("subreaper: mate {late} procesos huerfanos al final de la corrida");
+    }
     reporter.finish(!cancelled);
     if let Err(e) = known.save() {
         eprintln!("no pude guardar known-sintomas.tsv: {e}");
@@ -568,8 +660,14 @@ fn main() {
     }
     print_hint(&cli.out, &stats);
     println!("{}", stats.line());
-    if cli.mutaciones > 0 {
+    if cli.mutaciones + cli.mutaciones_extra > 0 {
         println!("{}", stats.mutaciones.line());
+    }
+    if cli.mutaciones_extra > 0 {
+        println!("{}", stats.mutaciones.line_extra());
+    }
+    if cli.invocar {
+        println!("invocar (M31): reintentos_sin_invocar={}", stats.invocar_retry);
     }
     // M27 (a): una escritura perdida del reporter es un hallazgo perdido.
     let lost = oracle::write_errors() - errors_before;
@@ -686,6 +784,10 @@ fn process_case(
         }
     }
 
+    // M30: el manifiesto de stubs sale del original y vale para todo el caso.
+    if cli.stubs {
+        runner.set_stubs(&stubs::manifest(&original, cli.kind));
+    }
     // Precondicion del oraculo: el original termina solo (exit 0 o lanzando).
     let (a, a_cached) = ctx.cache.run(runner, &original, &mut stats.cache_hits);
     // Un SyntaxError antes de imprimir nada puede ser que node no acepta el
@@ -697,6 +799,7 @@ fn process_case(
     }
     if let Status::Failed(e) = &a.status {
         stats.runner_failed += 1;
+        stats.runner_a += 1;
         ctx.reporter.discard(rel, "runner", a.elapsed);
         eprintln!("runner: {e}");
         return;
@@ -707,7 +810,7 @@ fn process_case(
     // si es mudo sin globals (las variantes se comparan solo por la pasada
     // cruda: serian mudas), y DESPUES de comparar el base, para no reportar una
     // variante que diverge igual que su base (dedup por kind).
-    let mutate = cli.mutaciones > 0 && a.completed() && !(a.ok_silent() && !a.has_globals());
+    let mutate = cli.mutaciones + cli.mutaciones_extra > 0 && a.completed() && !(a.ok_silent() && !a.has_globals());
     let base_lint = dead_writes.1 > dead_writes.0;
     stats.last_div = None;
     compare_base(ctx, runner, cfg, names_cfg, cli, stats, rel, &raw, &original, &minified, &static_flags, a, a_cached);
@@ -758,11 +861,11 @@ fn compare_base(
         // M12: en el carril B, primero el envoltorio que serializa los exports;
         // un modulo sin exports cae al mismo epilogo que el carril A.
         if cli.kind == minify::SourceKind::Module
-            && observe_module(ctx, runner, stats, rel, original, minified, static_flags, names_cfg)
+            && observe_module(ctx, runner, stats, rel, original, minified, static_flags, names_cfg, cli.invocar)
         {
             return;
         }
-        observe_epilogue(ctx, runner, cfg, names_cfg, cli, stats, rel, raw, had_globals);
+        observe_epilogue(ctx, runner, cfg, names_cfg, cli, stats, rel, raw, had_globals, cli.invocar);
     } else if a.link_failed() {
         // M9: en los dos carriles (en A, un require de algo que no existe).
         stats.a_link += 1;
@@ -787,11 +890,12 @@ fn observe_epilogue(
     rel: &Path,
     raw: &str,
     had_globals: bool,
+    invocar: bool,
 ) {
     // Segunda pasada con el epilogo observador.
     // El epilogo se agrega al fuente crudo y despues se aplica la forma: asi
     // queda dentro de la funcion y ve los bindings.
-    let Some(instrumented) = minify::instrument(raw, cli.invocar, cli.kind).map(|s| cli.forma.apply(&s)) else {
+    let Some(instrumented) = minify::instrument(raw, invocar, cli.kind).map(|s| cli.forma.apply(&s)) else {
         if had_globals {
             stats.observed_globals += 1;
             stats.same += 1;
@@ -821,6 +925,12 @@ fn observe_epilogue(
     };
     let (a, a_cached) = ctx.cache.run(runner, &original, &mut stats.cache_hits);
     if !a.ok_with_output() {
+        // M31 (a): una funcion invocada que no termina o sale con otro codigo
+        // no tiene que llevarse la observacion: se reintenta sin invocar.
+        if invocar {
+            stats.invocar_retry += 1;
+            return observe_epilogue(ctx, runner, cfg, names_cfg, cli, stats, rel, raw, had_globals, false);
+        }
         stats.observed_not_ok += 1;
         ctx.reporter.discard(rel, "observado_sin_salida", a.elapsed);
         return;
@@ -847,9 +957,17 @@ fn observe_module(
     minified: &str,
     static_flags: &[&'static str],
     names_cfg: Option<&minify::Config>,
+    invocar: bool,
 ) -> bool {
-    let obs = runner.observing();
-    let a = obs.run(original);
+    let mut obs = runner.observing();
+    // M28: cacheada con el tag del envoltorio (cache.rs).
+    let (mut a, mut a_cached) = ctx.cache.run(&obs, original, &mut stats.cache_hits);
+    // M31 (a): si invocar los exports no termina, la observacion sin invocar.
+    if invocar && !a.completed() {
+        stats.invocar_retry += 1;
+        obs = runner.observing().with_invocar(false);
+        (a, a_cached) = ctx.cache.run(&obs, original, &mut stats.cache_hits);
+    }
     // Sin exports el envoltorio no imprime nada. M12: el llamador sigue con el
     // epilogo (antes el caso quedaba en mudos_sin_bindings: 585 en B contra 84 en A).
     if a.ok_silent() {
@@ -864,7 +982,7 @@ fn observe_module(
     if a.threw() {
         stats.threw += 1;
     }
-    if !compare_and_report(ctx, &obs, stats, rel, original, minified, a, false, true, static_flags, names_cfg) {
+    if !compare_and_report(ctx, &obs, stats, rel, original, minified, a, a_cached, true, static_flags, names_cfg) {
         stats.same += 1;
     }
     true
@@ -1045,6 +1163,18 @@ fn compare_and_report(
                     }
                 }
             }
+            // Pendiente del fuego: `global_conocido` y `with` tambien se
+            // re-chequean (recheck.rs), como `extends`. Solo oxc los clasifica.
+            if let Some(rc) = ctx.oxc_recheck {
+                if flags.contains(&"global_conocido") && !recheck::globals_matter(runner, rc.1, original, minified) {
+                    flags.retain(|f| *f != "global_conocido");
+                    flags.push("global_conocido_irrelevante");
+                }
+                if flags.contains(&"with") && !recheck::with_matters(runner, rc, original) {
+                    flags.retain(|f| *f != "with");
+                    flags.push("with_irrelevante");
+                }
+            }
             let mut why = ctx.known.classify(rel, &flags);
             let mut strict_note = None;
             if let (None, Some(preset)) = (&why, ctx.strict_recheck) {
@@ -1151,7 +1281,7 @@ fn confirm(
             a = a1;
             fresh_ok = true;
         } else if !matches!(a1.status, Status::Failed(_)) {
-            ctx.cache.tombstone(original);
+            ctx.cache.tombstone(runner, original);
             a = a1;
             if !diverges(&a, &b) {
                 return Confirmed::Same;
@@ -1187,10 +1317,17 @@ struct MutStats {
     /// La variante no pasa por el minifier (parse o codegen).
     parse: usize,
     runner: usize,
+    /// M32: las de A de la variante. Las de B son `runner - runner_a`.
+    runner_a: usize,
     /// M15: casos cuyo base no parsea en el carril de la corrida: 0 variantes.
     no_parsea: usize,
     /// M18: variantes que divergen con el mismo kind que su base: no se reportan.
     heredadas: usize,
+    /// M33: variantes de los operadores nuevos (incluidas en `variantes`).
+    extra: usize,
+    /// M33: variantes `var` <-> `let`/`const` cuyo original prende `tdz`: ruido del
+    /// operador, se descartan sin comparar.
+    tdz: usize,
 }
 
 impl MutStats {
@@ -1206,13 +1343,21 @@ impl MutStats {
         self.original += o.original;
         self.parse += o.parse;
         self.runner += o.runner;
+        self.runner_a += o.runner_a;
         self.no_parsea += o.no_parsea;
         self.heredadas += o.heredadas;
+        self.extra += o.extra;
+        self.tdz += o.tdz;
+    }
+
+    /// M33: aparte, para no cambiar la linea de siempre.
+    fn line_extra(&self) -> String {
+        format!("mutaciones extra (M33): variantes={} | descartadas: tdz={}", self.extra, self.tdz)
     }
 
     fn line(&self) -> String {
         format!(
-            "mutaciones: variantes={} comparadas={} iguales={} DIVERGENCIAS={} conocidas={} heredadas={} PANICS={} LINT={} | descartadas: mudas={} original={} parse={} runner={} | bases_sin_parse={}",
+            "mutaciones: variantes={} comparadas={} iguales={} DIVERGENCIAS={} conocidas={} heredadas={} PANICS={} LINT={} | descartadas: mudas={} original={} parse={} runner={} (a={} b={}) | bases_sin_parse={}",
             self.variantes,
             self.comparadas,
             self.iguales,
@@ -1225,6 +1370,8 @@ impl MutStats {
             self.original,
             self.parse,
             self.runner,
+            self.runner_a,
+            self.runner - self.runner_a,
             self.no_parsea,
         )
     }
@@ -1248,13 +1395,24 @@ fn process_mutants(
     base_lint: bool,
 ) {
     // M15: segun el carril. Un base que no parsea queda contado (no_parsea).
-    let Some(vs) = mutate::variants_for(raw, cli.mutaciones, known::fnv1a(&[raw]), cli.kind) else {
+    // M33: las extra van despues de las clasicas y se numeran desde
+    // `--mutaciones` + 1 (el pedido, no lo generado): una clasica `__mutK` es
+    // la misma con o sin extras.
+    let Some(vs) = mutate::variants_ext(raw, cli.mutaciones, cli.mutaciones_extra, known::fnv1a(&[raw]), cli.kind) else {
         m.no_parsea += 1;
         return;
     };
+    let mut extras = 0;
     for (k, v) in vs.into_iter().enumerate() {
         m.variantes += 1;
-        let rel = mutate::rel_variante(rel, k + 1);
+        let idx = if v.extra {
+            m.extra += 1;
+            extras += 1;
+            cli.mutaciones + extras
+        } else {
+            k + 1
+        };
+        let rel = mutate::rel_variante(rel, idx);
         let desc = format!("{}\n", v.desc);
         let files = [("variante.js", v.src.as_str()), ("mutacion.txt", desc.as_str())];
         let src = cli.forma.apply(&v.src);
@@ -1292,10 +1450,18 @@ fn process_mutants(
                 ctx.reporter.attach(&rel, &files);
             }
         }
+        if cli.stubs {
+            runner.set_stubs(&stubs::manifest(&original, cli.kind));
+        }
         let a = runner.run(&original);
         if let Status::Failed(e) = &a.status {
             m.runner += 1;
+            m.runner_a += 1;
             eprintln!("runner: {e}");
+            continue;
+        }
+        if v.tdz_filter && a.flags.iter().any(|f| f == "tdz") {
+            m.tdz += 1;
             continue;
         }
         if a.ok_silent() {
@@ -1440,6 +1606,41 @@ mod tests {
         assert_eq!(sloppy_only(&r, Preset::CoreDefaults, o1, &r.run(o1)), Ok(false));
     }
 
+    /// M31 (a): si invocar no termina (cuelgue, exit propio), la observacion se
+    /// repite sin invocar en vez de perder el caso.
+    #[test]
+    fn invocar_que_no_termina_reintenta_sin_invocar() {
+        use super::{backend::Minifier, cache, known, minify, observe_epilogue, oracle, runner, triage, Cli, Ctx, Stats};
+        use std::path::Path;
+        if std::process::Command::new("node").arg("--version").output().is_err() {
+            eprintln!("sin node en PATH: test omitido");
+            return;
+        }
+        let d = std::env::temp_dir().join(format!("difuzz-test-m31a-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        let reporter = oracle::Reporter::new(&d, "test".into(), runner::PRELOAD);
+        let known = known::Known::load(&d, &d, 0);
+        let cache = cache::CacheA::new(None, &[]);
+        let triage = triage::Triage::load(&d);
+        let ctx = Ctx { reporter: &reporter, known: &known, cache: &cache, triage: &triage, strict_recheck: None, oxc_recheck: None };
+        let cli = Cli::parse(["c", "--invocar", "--no-cache"].iter().map(|s| s.to_string()).collect()).unwrap();
+        let cfg = minify::Preset::CarrilA.build(Minifier::Swc, minify::SourceKind::Script);
+        let preload = runner::Preload::write_tagged("m31a").unwrap();
+        let r = runner::Runner::new(&preload, 990, std::time::Duration::from_millis(1500));
+        let rel = Path::new("x/input.js");
+        for raw in ["var k = 1;\nfunction f() { while (true) {} }\n", "var k = 1;\nfunction f() { process.exit(3); }\n"] {
+            let mut st = Stats::default();
+            observe_epilogue(&ctx, &r, &cfg, None, &cli, &mut st, rel, raw, false, true);
+            assert_eq!((st.invocar_retry, st.observed, st.observed_not_ok, st.same), (1, 1, 0, 1), "{raw}");
+        }
+        // Una que termina no se repite.
+        let mut st = Stats::default();
+        observe_epilogue(&ctx, &r, &cfg, None, &cli, &mut st, rel, "var k = 1;\nfunction f() { return k; }\n", false, true);
+        assert_eq!((st.invocar_retry, st.observed), (0, 1));
+        std::fs::remove_dir_all(&d).unwrap();
+    }
+
     /// M24: --cruce pasa por Cli::parse.
     #[test]
     fn cruce_en_la_cli() {
@@ -1460,6 +1661,40 @@ mod tests {
         assert!(p(&["c", "--timeout-ms", "0"]).err().is_some_and(|e| e.contains(">= 1")));
         assert!(p(&["c", "--timeout-ms", "1"]).is_ok());
         assert!(p(&["c1", "c2"]).err().is_some_and(|e| e.contains("sobra c2")));
+    }
+
+    /// M32: `runner=` sigue siendo el total y se desglosa en A y B.
+    #[test]
+    fn contador_runner_separado() {
+        let st = super::Stats { runner_failed: 3, runner_a: 1, ..super::Stats::default() };
+        assert!(st.line().contains(" runner=3 (a=1 b=2) "), "{}", st.line());
+        let mut t = super::Stats::default();
+        t.merge(&st);
+        t.merge(&st);
+        assert!(t.line().contains(" runner=6 (a=2 b=4) "));
+        let m = super::MutStats { runner: 2, runner_a: 2, ..super::MutStats::default() };
+        assert!(m.line().contains(" runner=2 (a=2 b=0) "), "{}", m.line());
+    }
+
+    /// M29: --emitir excluye corpus y --cruce.
+    #[test]
+    fn emitir_en_la_cli() {
+        use super::Cli;
+        let p = |v: &[&str]| Cli::parse(v.iter().map(|s| s.to_string()).collect());
+        let c = p(&["--emitir", "x.js", "--minifier", "oxc", "--carril", "b"]).unwrap();
+        assert_eq!(c.emitir.as_deref(), Some(std::path::Path::new("x.js")));
+        assert!(p(&["--emitir", "x.js", "corpus"]).is_err());
+        assert!(p(&["--emitir", "x.js", "--cruce", "ix"]).is_err());
+        assert!(p(&["--emitir"]).is_err());
+    }
+
+    /// M34: minificar en un hijo es el default; `--en-proceso` lo apaga.
+    #[test]
+    fn subproceso_por_defecto() {
+        use super::Cli;
+        let p = |v: &[&str]| Cli::parse(v.iter().map(|s| s.to_string()).collect()).unwrap();
+        assert!(p(&["c"]).subproceso);
+        assert!(!p(&["c", "--en-proceso"]).subproceso);
     }
 
     #[test]
