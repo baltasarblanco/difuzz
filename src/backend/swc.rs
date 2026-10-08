@@ -1,0 +1,349 @@
+//! Backend SWC: la cadena parse → resolver → optimize → fixer → codegen.
+//!
+//! Una divergencia solo puede venir de `optimize` (mas resolver/fixer, que
+//! corren en los dos lados). Es el codigo que antes vivia en minify.rs, sin
+//! cambios de comportamiento.
+
+use std::panic::{catch_unwind, AssertUnwindSafe};
+
+use swc_common::{sync::Lrc, FileName, Globals, Mark, SourceFile, SourceMap, GLOBALS};
+use swc_ecma_ast::{EsVersion, Program};
+use swc_ecma_codegen::{text_writer::JsWriter, Emitter};
+use swc_ecma_minifier::{
+    optimize,
+    option::{
+        terser::TerserCompressorOptions, ExtraOptions, MangleOptions, MinifyOptions,
+        TopLevelOptions,
+    },
+};
+use swc_ecma_parser::{parse_file_as_module, parse_file_as_script, Syntax};
+use swc_ecma_transforms_base::{
+    fixer::{fixer, paren_remover},
+    resolver,
+};
+
+use super::Backend;
+use crate::minify::{Outcome, SourceKind};
+
+pub struct Swc {
+    pub minify: MinifyOptions,
+    /// Carril: script (`.cjs`, sloppy) o modulo ES. Ver `with_kind`.
+    pub kind: SourceKind,
+}
+
+impl Swc {
+    /// Carril A: script + CommonJS (delta v1.2, decision #1).
+    ///
+    /// La base de compresion se construye por el mismo camino que @swc/core:
+    /// `TerserCompressorOptions` vacio → `into_config`. Asi los defaults son los
+    /// del producto por construccion (`CompressOptions::default()` de Rust no:
+    /// deja `reduce_vars: false`, y desde JS hereda `defaults = true`). Encima
+    /// van solo las decisiones del carril.
+    ///
+    /// - `compress.module = false`: el minifier asume sloppy, igual que Node
+    ///   al ejecutar un `.cjs`.
+    /// - `compress.top_level = Some(..)`: sin esto `top_level()` da false y el
+    ///   DCE top-level no corre; swc#12029 y swc#11963 son invisibles
+    ///   (lecciones-pr-12029 §5).
+    /// - `mangle.eval` queda en su default `false`: en el codigo es
+    ///   `ignore_eval`, un opt-in que asume que ningun eval referencia
+    ///   nombres locales. Prenderlo fabrica divergencias esperadas.
+    /// - `mangle.props` queda en `None` en F1: el corpus imprime objetos
+    ///   libremente y el mangling de propiedades es observable via reflexion.
+    ///   Se prende en F3, cuando el generador controla la salida.
+    /// - `keep_fnames`/`keep_classnames` (compress) y `keep_fn_names`/
+    ///   `keep_class_names` (mangle) en `true`: sin eso, `console.log(f)` imprime
+    ///   `[Function: f]` contra `[Function: n]` y es divergencia esperada. En la
+    ///   primera corrida fueron 14 de las 32 divergencias en main.
+    pub fn carril_a() -> Self {
+        // into_config solo usa el SourceMap para parsear pure_funcs / global_defs,
+        // que aca vienen vacios.
+        let cm: Lrc<SourceMap> = Default::default();
+        let mut compress = TerserCompressorOptions::default().into_config(cm);
+        compress.module = false;
+        compress.top_level = Some(TopLevelOptions { functions: true });
+        compress.keep_fnames = true;
+        compress.keep_classnames = true;
+
+        Swc {
+            kind: SourceKind::Script,
+            minify: MinifyOptions {
+                compress: Some(compress),
+                mangle: Some(MangleOptions {
+                    top_level: Some(true),
+                    keep_fn_names: true,
+                    keep_class_names: true,
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+        }
+    }
+
+    /// Lo que corre `minifySync(src, { compress: {}, mangle: {} })` de @swc/core:
+    /// la compresion por el mismo camino (`into_config`) sin tocar nada, y
+    /// `MangleOptions` por defecto (sin `top_level`, sin `keep_*`). Una
+    /// divergencia aca es de uso comun por construccion (policy de AGENTS.md).
+    ///
+    /// Sin `keep_*`, `console.log(f)` cambia de nombre: lo absorbe
+    /// oracle::normalize_names. Un `f.name` impreso como string no: es
+    /// divergencia esperada de esta config.
+    pub fn core_defaults() -> Self {
+        let cm: Lrc<SourceMap> = Default::default();
+        Swc {
+            kind: SourceKind::Script,
+            minify: MinifyOptions {
+                compress: Some(TerserCompressorOptions::default().into_config(cm)),
+                mangle: Some(MangleOptions::default()),
+                ..Default::default()
+            },
+        }
+    }
+
+    /// core_defaults con los nombres preservados (keep_* en compress y mangle).
+    /// No es una celda: sirve para preguntar si una divergencia de core_defaults
+    /// desaparece cuando los nombres no cambian (main::names_only).
+    pub fn core_defaults_keep_names() -> Self {
+        let mut c = Swc::core_defaults();
+        if let Some(compress) = c.minify.compress.as_mut() {
+            compress.keep_fnames = true;
+            compress.keep_classnames = true;
+        }
+        if let Some(mangle) = c.minify.mangle.as_mut() {
+            mangle.keep_fn_names = true;
+            mangle.keep_class_names = true;
+        }
+        c
+    }
+}
+
+impl Swc {
+    /// El tipo de fuente que se parsea y las opciones que cambian con el.
+    ///
+    /// En modulo, lo que hace `@swc/core` en `minify` con un programa que parsea
+    /// como modulo (crates/swc/src/lib.rs, `opts.toplevel == Some(true) ||
+    /// program.is_module()`): `compress.top_level` y `mangle.top_level` se
+    /// prenden si vienen en `None`. `compress.module` NO lo toca @swc/core (es
+    /// `TerserCompressorOptions::module`, default `false`): por eso core_defaults
+    /// lo deja en `false`, para seguir siendo lo que corre el producto.
+    /// `estricto` (carril_a) describe el programa con precision y lo prende: un
+    /// modulo ES siempre es estricto (`compress.module` → `in_strict` en
+    /// optimize/pure, y `top_level()` true). En script no cambia nada.
+    pub fn with_kind(mut self, kind: SourceKind, estricto: bool) -> Self {
+        self.kind = kind;
+        if kind == SourceKind::Module {
+            if let Some(compress) = self.minify.compress.as_mut() {
+                if compress.top_level.is_none() {
+                    compress.top_level = Some(TopLevelOptions { functions: true });
+                }
+                if estricto {
+                    compress.module = true;
+                }
+            }
+            if let Some(mangle) = self.minify.mangle.as_mut() {
+                if mangle.top_level.is_none() {
+                    mangle.top_level = Some(true);
+                }
+            }
+        }
+        self
+    }
+}
+
+impl Backend for Swc {
+    fn prepare(&self, src: &str) -> Outcome {
+        // Globals nuevo por llamada: Mark::fresh() hace push sobre un Vec que vive
+        // adentro y nunca se vacia (delta v1.2 §2.2).
+        GLOBALS.set(&Globals::new(), || prepare_inner(src, self))
+    }
+}
+
+fn prepare_inner(src: &str, cfg: &Swc) -> Outcome {
+    let cm: Lrc<SourceMap> = Default::default();
+    let fm = cm.new_source_file(FileName::Anon.into(), src.to_string());
+
+    let Some(parsed) = parse_program(&fm, cfg.kind) else {
+        return match cfg.kind {
+            SourceKind::Script => Outcome::ParseError { esm: parses_as_module(&fm), script: false },
+            SourceKind::Module => Outcome::ParseError {
+                esm: false,
+                script: parse_program(&fm, SourceKind::Script).is_some(),
+            },
+        };
+    };
+
+    let unresolved_mark = Mark::new();
+    let top_level_mark = Mark::new();
+
+    // paren_remover va ANTES del resolver, como en @swc/core. Sin el, los nodos
+    // Paren del parser llegan al optimizador y algunas reglas no los ven: con
+    // `delete (1 ? undefined : x)` el conditional se simplificaba adentro del
+    // delete y quedaba `delete undefined` (los cuatro casos delete_* del corpus).
+    let program = parsed
+        .apply(paren_remover(None))
+        .apply(resolver(unresolved_mark, top_level_mark, false));
+    let static_flags = crate::checks::static_flags(&program);
+
+    let original = program.clone().apply(fixer(None));
+    let dead_original = crate::checks::dead_writes(&original);
+    let original = match emit(cm.clone(), &original) {
+        Ok(s) => s,
+        Err(_) => return Outcome::CodegenError,
+    };
+
+    let minified = optimize(
+        program,
+        cm.clone(),
+        None,
+        None,
+        &cfg.minify,
+        &ExtraOptions {
+            unresolved_mark,
+            top_level_mark,
+            mangle_name_cache: None,
+        },
+    )
+    .apply(fixer(None));
+    let dead_minified = crate::checks::dead_writes(&minified);
+    let minified = match emit(cm, &minified) {
+        Ok(s) => s,
+        Err(_) => return Outcome::CodegenError,
+    };
+
+    Outcome::Ok {
+        original,
+        minified,
+        static_flags,
+        dead_writes: (dead_original, dead_minified),
+    }
+}
+
+/// Parse sin errores recuperados, como script o como modulo segun el carril.
+/// `None` si el parser rechaza el fuente o lo acepta recuperando errores.
+fn parse_program(fm: &SourceFile, kind: SourceKind) -> Option<Program> {
+    let mut recovered = Vec::new();
+    let program = match kind {
+        SourceKind::Script => {
+            parse_file_as_script(fm, Syntax::default(), EsVersion::latest(), None, &mut recovered)
+                .ok()
+                .map(Program::Script)
+        }
+        SourceKind::Module => {
+            parse_file_as_module(fm, Syntax::default(), EsVersion::latest(), None, &mut recovered)
+                .ok()
+                .map(Program::Module)
+        }
+    };
+    program.filter(|_| recovered.is_empty())
+}
+
+/// Solo para el desglose de descartes: distingue ESM de sintaxis rechazada.
+fn parses_as_module(fm: &SourceFile) -> bool {
+    let mut recovered = Vec::new();
+    parse_file_as_module(fm, Syntax::default(), EsVersion::latest(), None, &mut recovered).is_ok()
+        && recovered.is_empty()
+}
+
+/// Un solo printer, una sola config, para los dos lados.
+fn emit(cm: Lrc<SourceMap>, program: &Program) -> Result<String, String> {
+    let mut buf = Vec::new();
+    {
+        let mut emitter = Emitter {
+            cfg: swc_ecma_codegen::Config::default().with_minify(true),
+            cm: cm.clone(),
+            comments: None,
+            wr: JsWriter::new(cm, "\n", &mut buf, None),
+        };
+        emitter.emit_program(program).map_err(|e| e.to_string())?;
+    }
+    String::from_utf8(buf).map_err(|e| e.to_string())
+}
+
+/// Los chequeos de checks.rs para un backend que no es SWC: el parser de SWC
+/// solo analiza, no minifica. `src` da los flags estaticos; `original` y
+/// `minified` (los textos que imprimio el otro backend) dan dead_writes. Un
+/// texto que SWC no acepta (o un panic de SWC) cuenta como sin flags y 0
+/// escrituras: un panic aca no es un hallazgo del backend medido.
+pub fn checks_on_text(
+    src: &str,
+    original: &str,
+    minified: &str,
+) -> (Vec<&'static str>, (usize, usize)) {
+    catch_unwind(AssertUnwindSafe(|| {
+        GLOBALS.set(&Globals::new(), || {
+            let static_flags =
+                parse_script(src).map_or_else(Vec::new, |p| crate::checks::static_flags(&p));
+            let dead =
+                |text: &str| parse_script(text).map_or(0, |p| crate::checks::dead_writes(&p));
+            (static_flags, (dead(original), dead(minified)))
+        })
+    }))
+    .unwrap_or_default()
+}
+
+fn parse_script(src: &str) -> Option<Program> {
+    let cm: Lrc<SourceMap> = Default::default();
+    let fm = cm.new_source_file(FileName::Anon.into(), src.to_string());
+    let mut recovered = Vec::new();
+    match parse_file_as_script(
+        &fm,
+        Syntax::default(),
+        EsVersion::latest(),
+        None,
+        &mut recovered,
+    ) {
+        Ok(s) if recovered.is_empty() => Some(Program::Script(s)),
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Swc;
+    use crate::backend::Backend;
+    use crate::minify::{Outcome, SourceKind};
+
+    #[test]
+    fn carril_b_parsea_como_modulo() {
+        let esm = "import { x } from './y.mjs';\nexport const a = x + 1;\nexport default function f() { return a; }\n";
+        let cfg = Swc::carril_a().with_kind(SourceKind::Module, true);
+        let Outcome::Ok { original, minified, .. } = cfg.prepare(esm) else {
+            panic!("un modulo tiene que parsear en carril B");
+        };
+        assert!(original.contains("import") && original.contains("export"));
+        // Los exports son usados por definicion: el minifier no los puede borrar.
+        assert!(minified.contains("export"));
+        // El mismo fuente en carril A es el descarte de siempre (esm).
+        assert!(matches!(
+            Swc::carril_a().prepare(esm),
+            Outcome::ParseError { esm: true, script: false }
+        ));
+        // El espejo: `with` es solo de script (modulo = estricto).
+        assert!(matches!(
+            cfg.prepare("with (o) { x; }"),
+            Outcome::ParseError { esm: false, script: true }
+        ));
+        assert!(matches!(
+            cfg.prepare("let = ;"),
+            Outcome::ParseError { esm: false, script: false }
+        ));
+    }
+
+    #[test]
+    fn opciones_de_modulo() {
+        // carril_a en modulo: compress.module (estricto) ademas de top_level.
+        let c = Swc::carril_a().with_kind(SourceKind::Module, true).minify;
+        assert!(c.compress.as_ref().unwrap().module);
+        assert_eq!(c.mangle.as_ref().unwrap().top_level, Some(true));
+        // En script no cambia nada respecto de carril_a().
+        assert!(!Swc::carril_a().with_kind(SourceKind::Script, true).minify.compress.unwrap().module);
+        // core_defaults en modulo: lo de @swc/core (top_level si, compress.module no).
+        let d = Swc::core_defaults().with_kind(SourceKind::Module, false).minify;
+        let dc = d.compress.unwrap();
+        assert!(!dc.module);
+        assert!(dc.top_level.is_some_and(|t| t.functions));
+        assert_eq!(d.mangle.unwrap().top_level, Some(true));
+        let s = Swc::core_defaults().with_kind(SourceKind::Script, false).minify;
+        assert_ne!(s.mangle.unwrap().top_level, Some(true));
+    }
+}

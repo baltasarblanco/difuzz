@@ -290,4 +290,123 @@
     }
     writeErr(`\n__DIFUZZ_FLAGS__ ${[...flags].sort().join(',')}\n`);
   });
+
+  // --- Mejora 7: invocar las funciones observadas (`--invocar`) ---------------
+  // Con --invocar el epilogo llama a __difuzzObserveInvocar en vez de __difuzzObserve.
+  // Primero imprime exactamente lo mismo que __difuzzObserve; despues llama a cada
+  // funcion observada, en orden, y escribe `<nombre>() = <resultado>` o
+  // `<nombre>() throws <tipo>`. Es solido porque las funciones ya escapan: el epilogo
+  // se las pasa a un global desconocido, asi que el minifier no puede asumir como se
+  // las llama.
+  //   - Sin argumentos y con this undefined: lo unico que no inventa nada. En sloppy
+  //     this pasa a ser globalThis, igual en A y en B.
+  //   - Sin `new`: una clase lanza TypeError al llamarla (determinista).
+  //   - El resultado pasa por `ser`: una funcion devuelta es 'fn', sin nombre ni length.
+  //     El tipo de una excepcion sale de thrownType: sin mensaje (trae nombres).
+  //   - Promesa nativa: se imprime `promesa` y su resultado sale al terminar
+  //     (`!dz promesa <nombre>() ...`), en orden de observacion y no de resolucion: el
+  //     minifier puede cambiar cuantos ticks tarda (un await de mas o de menos) y eso
+  //     no es observable por contrato. El handler ademas evita que un rechazo mate el
+  //     proceso como unhandledRejection.
+  //   - Generadores: el objeto se serializa sin iterar (su cuerpo no corre).
+  //   - Efectos (timers, I/O, process.exit): no se suprimen; son parte del programa y
+  //     corren igual en A y en B. Un loop infinito lo corta el timeout del runner
+  //     (el caso cae en observado_sin_salida).
+  //   - TDZ al llamar: mismo flag que un throw no atrapado (onThrow).
+  const observe = globalThis.__difuzzObserve;
+  const promiseThen = Promise.prototype.then;
+  const RealPromise = Promise;
+  const promesas = [];
+  const serSafe = (v) => {
+    try {
+      return ser(v, 0, new Set());
+    } catch (e) {
+      return `[throws ${thrownType(e)}]`;
+    }
+  };
+  const invocar = (name, f) => {
+    let r;
+    try {
+      r = Reflect.apply(f, undefined, []);
+    } catch (e) {
+      try {
+        if (e instanceof ReferenceError && / before initialization/.test(e.message)) flags.add('tdz');
+      } catch {}
+      return `${name}() throws ${thrownType(e)}`;
+    }
+    let isPromise = false;
+    try {
+      isPromise = r instanceof RealPromise;
+    } catch {}
+    if (isPromise) {
+      const p = { name, s: 'pendiente' };
+      promesas.push(p);
+      promiseThen.call(
+        r,
+        (v) => {
+          p.s = `= ${serSafe(v)}`;
+        },
+        (e) => {
+          p.s = `throws ${thrownType(e)}`;
+        },
+      );
+      return `${name}() = promesa`;
+    }
+    return `${name}() = ${serSafe(r)}`;
+  };
+  Object.defineProperty(globalThis, '__difuzzObserveInvocar', {
+    value: (...pairs) => {
+      observe(...pairs);
+      for (const [name, value] of pairs) {
+        if (typeof value === 'function') write(`${invocar(name, value)}\n`);
+      }
+    },
+    enumerable: false,
+  });
+  // --- Carril B: modulos ES (.mjs) -------------------------------------------
+  // Observador de modulos: los bindings top-level de un modulo no son globales. El runner
+  // corre un envoltorio que importa el programa y pasa su namespace de exports aca. El
+  // fuente no cambia (sin efecto observador): los exports ya son usados por ser exports.
+  // El namespace trae los nombres ordenados; un binding en TDZ se lee como [throws ...].
+  Object.defineProperty(globalThis, '__difuzzObserveExports', {
+    value: (ns) => {
+      for (const k of Reflect.ownKeys(ns)) {
+        if (typeof k !== 'string') continue;
+        let s;
+        try {
+          s = ser(ns[k], 0, new Set());
+        } catch (e) {
+          s = `[throws ${e && e.name}]`;
+        }
+        write(`export ${k} = ${s}\n`);
+      }
+    },
+    enumerable: false,
+  });
+  // No es un global del programa (observeNewGlobals).
+  baseGlobals.add('__difuzzObserveInvocar');
+  process.on('exit', () => {
+    for (const p of promesas) write(`!dz promesa ${p.name}() ${p.s}\n`);
+  });
+  // Definido despues de la foto de globals: no es un global del programa.
+  baseGlobals.add('__difuzzObserveExports');
+
+  // Un modulo que no enlaza (import que no resuelve, export pedido que no existe) falla
+  // antes de ejecutar nada: no es un caso, y no es un throw comparable. Sale con 71
+  // (runner::LINK_EXIT). Solo en .mjs: el carril A queda como estaba.
+  if (/\.mjs$/.test(process.argv[1] || '')) {
+    const LINK_CODES = ['ERR_MODULE_NOT_FOUND', 'ERR_UNSUPPORTED_DIR_IMPORT', 'ERR_UNSUPPORTED_ESM_URL_SCHEME'];
+    const onLinkError = (e) => {
+      let link = null;
+      try {
+        if (e !== null && typeof e === 'object' && LINK_CODES.includes(e.code)) link = e.code;
+        else if (e instanceof SyntaxError && / does not provide an export named /.test(e.message)) link = 'export';
+      } catch {}
+      if (link === null) return;
+      write(`!dz link ${link}\n`);
+      process.exit(71);
+    };
+    process.prependListener('uncaughtException', onLinkError);
+    process.prependListener('unhandledRejection', onLinkError);
+  }
 })();

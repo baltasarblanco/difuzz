@@ -16,6 +16,13 @@ swc_ecma_parser          = "45.1.4"
 swc_ecma_transforms_base = "49.0.1"
 swc_ecma_visit           = "29.0.0"
 
+# Backend oxc (src/backend/oxc.rs). Mismas versiones en todos los crates oxc_*.
+oxc_allocator = "=0.153.0"
+oxc_codegen   = "=0.153.0"
+oxc_minifier  = "=0.153.0"
+oxc_parser    = "=0.153.0"
+oxc_span      = "=0.153.0"
+
 # Los ganchos de diagnostico del minifier (debug_assert_valid, SWC_CHECK, SWC_RUN)
 # solo existen con debug_assertions. Release por velocidad, asserts por senal (delta v1.2 §2.3).
 [profile.release]

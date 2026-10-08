@@ -4,6 +4,7 @@
 //!
 //! Carril A: el programa se escribe a un `.cjs` y se corre con `node archivo`.
 //! Node lo envuelve en la funcion de CommonJS: sloppy mode, top-level privado.
+//! Carril B: `.mjs`, modulo ES (estricto, `this` top-level `undefined`).
 //!
 //! A y B corren con el mismo path, el mismo preload y TZ=UTC: cualquier cosa
 //! que el programa pueda leer del entorno es identica en los dos lados.
@@ -12,6 +13,8 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
+
+use crate::minify::SourceKind;
 
 /// Determinismo + observador + excepciones. Ver `preload.js`.
 pub const PRELOAD: &str = include_str!("preload.js");
@@ -25,6 +28,11 @@ pub const DZ: &str = "!dz ";
 
 /// Linea de stderr donde el preload deja los flags del sensor de asunciones.
 pub const FLAGS_TAG: &str = "__DIFUZZ_FLAGS__";
+
+/// Exit code del preload cuando un modulo no enlaza (import que no resuelve,
+/// export pedido que no existe). Carril B: el programa no es un caso. No es
+/// THROW_EXIT porque no es un throw comparable.
+pub const LINK_EXIT: i32 = 71;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Status {
@@ -117,6 +125,13 @@ pub struct Runner {
     script: PathBuf,
     preload: PathBuf,
     timeout: Duration,
+    /// Carril B: `.mjs` en vez de `.cjs` (ver `with_kind`).
+    kind: SourceKind,
+    /// Carril B, pasada observada: el envoltorio que importa `script` y
+    /// serializa su namespace. Al lado de `script`, en el mismo directorio.
+    wrapper: PathBuf,
+    /// Corre `wrapper` en vez de `script` (ver `observing`).
+    observe: bool,
 }
 
 impl Runner {
@@ -126,6 +141,34 @@ impl Runner {
                 .join(format!("difuzz-{}-w{worker}.cjs", std::process::id())),
             preload: preload.path.clone(),
             timeout,
+            kind: SourceKind::Script,
+            wrapper: std::env::temp_dir()
+                .join(format!("difuzz-{}-w{worker}-observar.mjs", std::process::id())),
+            observe: false,
+        }
+    }
+
+    /// Carril B: el programa se escribe a un `.mjs` y node lo corre como modulo
+    /// ES. `--require` con el preload `.cjs` sigue andando (verificado con node
+    /// 24): el preload corre antes de cargar el modulo.
+    pub fn with_kind(mut self, kind: SourceKind) -> Runner {
+        self.script.set_extension(kind.ext());
+        self.kind = kind;
+        self
+    }
+
+    /// Un runner que, en vez del programa, ejecuta el envoltorio observador de
+    /// modulos: mismo `script` (A y B siguen viendo el mismo path), mismo
+    /// preload. Lo que se compara es la salida del programa mas su namespace de
+    /// exports. No borra nada al soltarse: los archivos son del runner original.
+    pub fn observing(&self) -> Runner {
+        Runner {
+            script: self.script.clone(),
+            preload: self.preload.clone(),
+            timeout: self.timeout,
+            kind: self.kind,
+            wrapper: self.wrapper.clone(),
+            observe: true,
         }
     }
 
@@ -160,14 +203,38 @@ impl Runner {
         if let Err(e) = std::fs::write(&self.script, js) {
             return Exec::failed(format!("escribir {}: {e}", self.script.display()), start);
         }
+        if self.observe {
+            let name = self.script.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+            if let Err(e) = std::fs::write(&self.wrapper, module_wrapper(&name)) {
+                return Exec::failed(format!("escribir {}: {e}", self.wrapper.display()), start);
+            }
+            return run_file(&self.preload, &self.wrapper, self.timeout, start, salted);
+        }
         run_file(&self.preload, &self.script, self.timeout, start, salted)
     }
 }
 
 impl Drop for Runner {
     fn drop(&mut self) {
+        if self.observe {
+            return;
+        }
         let _ = std::fs::remove_file(&self.script);
+        let _ = std::fs::remove_file(&self.wrapper);
     }
+}
+
+/// Envoltorio observador de modulos (carril B). Importa el programa (la misma
+/// instancia que evalua node: un solo modulo por URL) y, cuando termino de
+/// evaluarse (top-level await incluido), le pasa el namespace al preload.
+///
+/// Sin efecto observador: el fuente que se minifica no cambia, y los exports ya
+/// son usados por ser exports. Si el programa lanza, el envoltorio no llega a
+/// correr y el throw sale como siempre (onThrow del preload).
+pub fn module_wrapper(program_file: &str) -> String {
+    // El nombre lo arma el runner (difuzz-<pid>-w<n>.mjs), pero igual va escapado.
+    let spec = program_file.replace('\\', "\\\\").replace('"', "\\\"");
+    format!("import * as ns from \"./{spec}\";\nglobalThis.__difuzzObserveExports(ns);\n")
 }
 
 fn run_file(preload: &Path, script: &Path, timeout: Duration, start: Instant, salted: bool) -> Exec {
@@ -265,6 +332,58 @@ fn split_flags(stderr: String) -> (String, Vec<String>) {
 #[cfg(test)]
 mod tests {
     use super::split_flags;
+
+    #[test]
+    fn envoltorio_de_modulos() {
+        assert_eq!(
+            super::module_wrapper("difuzz-7-w0.mjs"),
+            "import * as ns from \"./difuzz-7-w0.mjs\";\nglobalThis.__difuzzObserveExports(ns);\n"
+        );
+        assert!(super::module_wrapper("a\"b.mjs").contains("\"./a\\\"b.mjs\""));
+    }
+
+    /// Node de verdad sobre un `.mjs` con el preload `.cjs` por `--require`. Si
+    /// no hay `node` en PATH, no prueba nada (y lo dice).
+    #[test]
+    fn modulo_con_preload_en_node() {
+        use super::{Preload, Runner, Status, LINK_EXIT};
+        use crate::minify::SourceKind;
+        use std::time::Duration;
+
+        if std::process::Command::new("node").arg("--version").output().is_err() {
+            eprintln!("sin node en PATH: test omitido");
+            return;
+        }
+        let path = std::env::temp_dir().join(format!("difuzz-test-{}-preload.cjs", std::process::id()));
+        std::fs::write(&path, super::PRELOAD).unwrap();
+        let preload = Preload { path };
+        let runner = Runner::new(&preload, 9999, Duration::from_secs(20)).with_kind(SourceKind::Module);
+
+        // Top-level await, `this` de modulo, un flag del sensor y un export en TDZ.
+        let js = "export const a = [1, 2];\nexport let t;\nawait new Promise((r) => setTimeout(r, 10));\nt = typeof this;\nnew Proxy({}, {});\n";
+        let crudo = runner.run(js);
+        assert_eq!(crudo.status, Status::Exited(0), "stderr: {}", crudo.stderr);
+        assert!(crudo.ok_silent(), "stdout: {}", crudo.stdout);
+        assert_eq!(crudo.flags, ["proxy"]);
+
+        let obs = runner.observing().run(js);
+        assert_eq!(obs.status, Status::Exited(0), "stderr: {}", obs.stderr);
+        assert_eq!(obs.stdout, "export a = [1, 2]\nexport t = \"undefined\"\n");
+        assert_eq!(obs.flags, ["proxy"]);
+
+        // El namespace sale en orden de nombre, no de declaracion.
+        let orden = runner.observing().run("export { x };\nlet y = 1;\nexport { y as b };\nlet x = 2;\n");
+        assert_eq!(orden.stdout, "export b = 1\nexport x = 2\n");
+
+        // Un import que no resuelve no es un throw comparable: es LINK_EXIT.
+        let link = runner.run("import { z } from './no-existe-difuzz.mjs';\nconsole.log(z);\n");
+        assert_eq!(link.status, Status::Exited(LINK_EXIT), "stdout: {}", link.stdout);
+        assert!(!link.completed());
+        // Un throw comun sigue siendo THROW_EXIT, con flags.
+        let thr = runner.run("throw new TypeError('x');\n");
+        assert!(thr.threw());
+        assert_eq!(thr.stdout, "!dz throw TypeError\n");
+    }
 
     #[test]
     fn separa_los_flags_del_stderr() {

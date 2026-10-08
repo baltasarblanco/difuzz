@@ -9,6 +9,7 @@
 
 use std::path::{Path, PathBuf};
 
+use crate::minify::SourceKind;
 use crate::runner::{Exec, Status, DZ, THROW_EXIT};
 
 #[derive(Debug, Clone, Copy)]
@@ -107,6 +108,10 @@ pub fn normalize_names(s: &str) -> String {
 pub struct Reporter {
     root: PathBuf,
     config_name: String,
+    /// Indice compartido entre celdas (`--indice DIR`), si se pidio.
+    index: Option<crate::indice::Index>,
+    /// Extension de los programas guardados: `cjs` (carril A) o `mjs` (carril B).
+    ext: &'static str,
 }
 
 impl Reporter {
@@ -124,7 +129,29 @@ impl Reporter {
         Reporter {
             root: root.to_path_buf(),
             config_name,
+            ext: SourceKind::Script.ext(),
+            index: None,
         }
+    }
+
+    pub fn with_index(mut self, index: crate::indice::Index) -> Reporter {
+        self.index = Some(index);
+        self
+    }
+
+    /// Una linea en el indice (si hay): el caso es el nombre de `dir`.
+    fn index(&self, dir: &Path, dest: &str, kind: &str, hash: u64) {
+        if let Some(ix) = &self.index {
+            let case = dir.file_name().map(|n| n.to_string_lossy()).unwrap_or_default();
+            ix.record(&case, dest, kind, hash);
+        }
+    }
+
+    /// Carril B: los programas se guardan como `.mjs` (un `.cjs` con `import`
+    /// no se puede reproducir).
+    pub fn with_kind(mut self, kind: SourceKind) -> Reporter {
+        self.ext = kind.ext();
+        self
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -143,9 +170,22 @@ impl Reporter {
         flags_b: &[&str],
     ) {
         let list = |f: &[&str]| if f.is_empty() { "-".to_string() } else { f.join(",") };
-        let dir = self.case_dir(if known.is_some() { "known" } else { "div" }, case);
+        let dest = if known.is_some() { "known" } else { "div" };
+        let dir = self.case_dir(dest, case);
+        // Mismo sintoma que known-sintomas.tsv (main::compare_and_report).
+        let symptom = crate::known::fnv1a(&[
+            format!("{kind:?}").as_str(),
+            normalize_names(&a.stdout).as_str(),
+            normalize_names(&b.stdout).as_str(),
+        ]);
+        self.index(&dir, dest, &format!("{kind:?}"), symptom);
+        let (orig_file, min_file) = (format!("original.{}", self.ext), format!("minified.{}", self.ext));
+        // Carril B observado: lo que se comparo es la salida del envoltorio que
+        // serializa el namespace. Se guarda uno por lado, para reproducir igual.
+        let module_observed = observed && self.ext == SourceKind::Module.ext();
+        let repro = if module_observed { "observar-original.mjs" } else { orig_file.as_str() };
         let meta = format!(
-            "case: {}\nkind: {kind:?}\nconfig: {}\nobserved: {observed}\nknown: {}\nnota: {}\nflags_a: {}\nflags_b: {}\n\noriginal: {:?} en {:?}\nminificado: {:?} en {:?}\n\nrepro: TZ=UTC node --require {}/preload.cjs original.cjs\n",
+            "case: {}\nkind: {kind:?}\nconfig: {}\nobserved: {observed}\nknown: {}\nnota: {}\nflags_a: {}\nflags_b: {}\n\noriginal: {:?} en {:?}\nminificado: {:?} en {:?}\n\nrepro: TZ=UTC node --require {}/preload.cjs {repro}\n",
             case.display(),
             self.config_name,
             known.unwrap_or("no"),
@@ -162,22 +202,33 @@ impl Reporter {
             &dir,
             &[
                 ("meta.txt", meta.as_str()),
-                ("original.cjs", original),
-                ("minified.cjs", minified),
+                (orig_file.as_str(), original),
+                (min_file.as_str(), minified),
                 ("a.stdout", a.stdout.as_str()),
                 ("a.stderr", a.stderr.as_str()),
                 ("b.stdout", b.stdout.as_str()),
                 ("b.stderr", b.stderr.as_str()),
             ],
         );
+        if module_observed {
+            write_all(
+                &dir,
+                &[
+                    ("observar-original.mjs", crate::runner::module_wrapper(&orig_file).as_str()),
+                    ("observar-minified.mjs", crate::runner::module_wrapper(&min_file).as_str()),
+                ],
+            );
+        }
     }
 
     /// Sospechoso, no veredicto: el minificado escribe sobre literales frescos
-    /// mas veces que el original (checks::dead_writes). Se triagea a mano.
-    pub fn lint(&self, case: &Path, original: &str, minified: &str, counts: (usize, usize)) {
+    /// mas veces que el original (checks::dead_writes). Se triagea a mano en
+    /// lint-triage.tsv (triage.rs); `triage` es la nota de ahi.
+    pub fn lint(&self, case: &Path, original: &str, minified: &str, counts: (usize, usize), triage: &str) {
         let dir = self.case_dir("lint", case);
+        self.index(&dir, "lint", "EscriturasSobreLiterales", crate::known::fnv1a(&[minified]));
         let meta = format!(
-            "case: {}\nkind: EscriturasSobreLiterales\nconfig: {}\nen original: {}\nen minificado: {}\n\nsospechoso, no veredicto: buscar en minified.cjs una asignacion cuyo destino es [...] o {{...}}\n",
+            "case: {}\nkind: EscriturasSobreLiterales\nconfig: {}\nen original: {}\nen minificado: {}\ntriage: {triage}\n\nsospechoso, no veredicto: buscar en minified.cjs una asignacion cuyo destino es [...] o {{...}}\n",
             case.display(),
             self.config_name,
             counts.0,
@@ -187,20 +238,32 @@ impl Reporter {
             &dir,
             &[
                 ("meta.txt", meta.as_str()),
-                ("original.cjs", original),
-                ("minified.cjs", minified),
+                (format!("original.{}", self.ext).as_str(), original),
+                (format!("minified.{}", self.ext).as_str(), minified),
             ],
         );
     }
 
     pub fn panic(&self, case: &Path, src: &str, message: &str) {
         let dir = self.case_dir("panic", case);
+        self.index(&dir, "panic", "Panic", crate::known::fnv1a(&[message]));
         let meta = format!(
             "case: {}\nkind: Panic\nconfig: {}\n\n{message}\n",
             case.display(),
             self.config_name
         );
         write_all(&dir, &[("meta.txt", meta.as_str()), ("input.js", src)]);
+    }
+
+    /// Agrega archivos a los directorios que ya existen para el caso (div, known,
+    /// panic, lint). Lo usan las mutaciones: la variante va tal cual junto al hallazgo.
+    pub fn attach(&self, case: &Path, files: &[(&str, &str)]) {
+        for prefix in ["div", "known", "panic", "lint"] {
+            let dir = self.case_dir(prefix, case);
+            if dir.is_dir() {
+                write_all(&dir, files);
+            }
+        }
     }
 
     /// `<root>/<prefijo>/<ruta del caso con '/' → '__'>`. Si el corpus es el

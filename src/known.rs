@@ -29,6 +29,28 @@ const FLAG_REASONS: &[(&str, &str)] = &[
     ("nombres", "core_defaults no preserva nombres de funciones/clases (keep_* apagado)"),
 ];
 
+/// Lo mismo para oxc, contra crates/oxc_minifier/docs/ASSUMPTIONS.md (tag
+/// crates_v0.153.0). Asunciones de oxc SIN flag todavia (sus divergencias caen
+/// en div/): `document.all`, `with`, longitud maxima de Array/String/TypedArray,
+/// coercion que lanza con Symbol (`Math.abs(Symbol())`), `extends` que lanza,
+/// `var` de un eval directo usada afuera, globals conocidos que existen y se
+/// leen sin efectos (`window`, `document` no existen en node), `arguments`
+/// global, y escrituras de propiedades sobre bindings no usados (setters en
+/// prototipos: solo cubierto si el preload ve `builtins`).
+/// Flags de SWC que oxc NO declara como asuncion y por eso no van aca:
+/// `proxy` (property_read_side_effects es All por defecto), `callee`,
+/// `redefine_global`.
+const FLAG_REASONS_OXC: &[(&str, &str)] = &[
+    ("fn_tostring", "oxc: Function.prototype.toString is not relied on"),
+    ("builtins", "oxc: No Monkey-Patching Built-ins"),
+    ("tdz", "oxc: No TDZ Violation"),
+    ("coercion", "oxc: Coercion Methods Are Pure"),
+    ("nombres", "oxc: No Reliance on Function.prototype.name (keep_names apagado en core_defaults)"),
+    // No es asuncion documentada de oxc: el contenido de .stack (posiciones,
+    // nombres) cambia con cualquier minificacion. Decision de difuzz, VERIFICAR.
+    ("stack", "difuzz: el contenido de Error.prototype.stack cambia al minificar (oxc no lo documenta)"),
+];
+
 /// (prefijo de ruta relativa al corpus, asuncion que el caso viola). Solo lo que
 /// el sensor no puede ver: 2719 arma `"call" + "er"` en runtime, y V8 le da a
 /// cada funcion sloppy su propio `caller` no configurable (no hay donde engancharse).
@@ -42,6 +64,10 @@ const ASSUMPTIONS: &[(&str, &str)] = &[
 pub struct Known {
     backlog: HashSet<String>,
     symptoms: Symptoms,
+    /// Tabla de razones del backend medido (SWC por defecto).
+    reasons: &'static [(&'static str, &'static str)],
+    /// Asunciones por ruta: son de SWC.
+    paths: &'static [(&'static str, &'static str)],
 }
 
 impl Known {
@@ -61,7 +87,20 @@ impl Known {
         Known {
             backlog,
             symptoms: Symptoms::load(out, oracle_id),
+            reasons: FLAG_REASONS,
+            paths: ASSUMPTIONS,
         }
+    }
+
+    /// Las razones conocidas dependen del backend: el backlog (TODO.txt,
+    /// postponed.txt) y las asunciones por ruta son de SWC; oxc tiene su tabla.
+    pub fn with_backend(mut self, minifier: crate::backend::Minifier) -> Known {
+        if minifier == crate::backend::Minifier::Oxc {
+            self.backlog.clear();
+            self.reasons = FLAG_REASONS_OXC;
+            self.paths = &[];
+        }
+        self
     }
 
     pub fn backlog_len(&self) -> usize {
@@ -69,14 +108,15 @@ impl Known {
     }
 
     pub fn classify(&self, rel: &Path, flags: &[&str]) -> Option<String> {
-        if let Some((_, why)) = FLAG_REASONS.iter().find(|(f, _)| flags.contains(f)) {
+        if let Some((_, why)) = self.reasons.iter().find(|(f, _)| flags.contains(f)) {
             return Some(format!("sensor, asuncion: {why}"));
         }
-        let rel = rel.to_string_lossy();
-        if let Some((_, why)) = ASSUMPTIONS.iter().find(|(p, _)| rel.starts_with(p)) {
+        // Una variante (mutate.rs, `caso__mutK`) hereda el backlog de su caso.
+        let rel = crate::mutate::rel_base(&rel.to_string_lossy());
+        if let Some((_, why)) = self.paths.iter().find(|(p, _)| rel.starts_with(p)) {
             return Some(format!("ruta, {why}"));
         }
-        if self.backlog.contains(rel.as_ref()) {
+        if self.backlog.contains(&rel) {
             return Some("backlog de SWC (tests/TODO.txt o tests/postponed.txt)".into());
         }
         None
@@ -179,6 +219,7 @@ mod tests {
 
         assert_eq!(k.backlog_len(), 2);
         assert!(k.classify(Path::new("terser/compress/dead_code/global_fns/input.js"), &[]).is_some());
+        assert!(k.classify(Path::new("terser/compress/dead_code/global_fns__mut2/input.js"), &[]).is_some());
         assert!(k
             .classify(Path::new("terser/compress/reduce_vars/unsafe_evaluate_object_2/input.js"), &[])
             .is_some());
@@ -194,6 +235,25 @@ mod tests {
         assert!(k.classify(Path::new("fixture/issues/8953/input.js"), &[]).is_none());
         let by_flag = k.classify(Path::new("fixture/issues/8953/input.js"), &["tdz"]);
         assert!(by_flag.is_some_and(|w| w.starts_with("sensor")));
+    }
+
+    #[test]
+    fn razones_dependen_del_backend() {
+        use crate::backend::Minifier;
+        let dir = std::env::temp_dir().join(format!("difuzz-known-oxc-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("TODO.txt"), "dead_code/global_fns/input.js\n").unwrap();
+        let k = Known::load(&dir, &dir, 0).with_backend(Minifier::Oxc);
+        std::fs::remove_dir_all(&dir).unwrap();
+
+        // El backlog y las rutas son de SWC.
+        assert_eq!(k.backlog_len(), 0);
+        assert!(k.classify(Path::new("terser/compress/dead_code/global_fns/input.js"), &[]).is_none());
+        assert!(k.classify(Path::new("terser/compress/issue_2719/warn/input.js"), &[]).is_none());
+        // Asuncion de oxc con flag; asunciones de SWC que oxc no declara.
+        assert!(k.classify(Path::new("x/input.js"), &["tdz"]).is_some_and(|w| w.contains("oxc")));
+        assert!(k.classify(Path::new("x/input.js"), &["proxy"]).is_none());
+        assert!(k.classify(Path::new("x/input.js"), &["redefine_global"]).is_none());
     }
 
     #[test]
