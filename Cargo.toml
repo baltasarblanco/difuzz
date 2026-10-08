@@ -34,3 +34,14 @@ libc = "0.2"
 # solo existen con debug_assertions. Release por velocidad, asserts por senal (delta v1.2 §2.3).
 [profile.release]
 debug-assertions = true
+
+# R1-H05: el oraculo. El mismo codigo SIN debug assertions, como el paquete npm.
+# Un debug_assert! de oxc (p. ej. compression_pass.rs:167-190) puede tapar un
+# miscompile que npm si produce. Si el hijo minificador hace panic, difuzz
+# re-minifica el caso con este binario (subproceso.rs, "oraculo"):
+#   cargo build --release && cargo build --profile oraculo
+# deja target/release/difuzz y target/oraculo/difuzz; el primero encuentra al
+# segundo solo (o con DIFUZZ_ORACULO=<ruta>).
+[profile.oraculo]
+inherits = "release"
+debug-assertions = false

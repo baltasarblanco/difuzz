@@ -23,12 +23,30 @@
 //! mata: si no, cada SIGINT seria un "abort" falso), con un limite de memoria
 //! virtual (`LIMITE_MEMORIA`) y, en Linux, `PR_SET_PDEATHSIG` para que no
 //! sobreviva a difuzz. Si el padre muere sin mas, el hijo lee EOF y sale.
+//!
+//! R1-H05, el oraculo sin debug assertions. El binario de difuzz lleva
+//! `debug-assertions = true` (Cargo.toml: los ganchos de diagnostico de SWC solo
+//! existen asi), pero el paquete npm del minifier no: un `debug_assert!` de oxc
+//! (p. ej. `compression_pass.rs:167-190`, eval indirecto) hace panic donde npm
+//! devuelve codigo mal compilado. Por eso, ante un `Outcome::Panic`,
+//! `minify::prepare` re-minifica el caso con un segundo `Remoto` cuyo ejecutable
+//! es el mismo codigo compilado SIN debug assertions:
+//!
+//!     cargo build --release && cargo build --profile oraculo
+//!
+//! deja `target/release/difuzz` y `target/oraculo/difuzz` (Cargo.toml,
+//! `[profile.oraculo]`). `configurar_oraculo` (una vez, al arrancar) lo busca en
+//! `<exe>-oraculo` y `<dir del exe>/../oraculo/<nombre del exe>`, o solo en
+//! `DIFUZZ_ORACULO` si esta definida (`DIFUZZ_ORACULO=ninguno` lo apaga), y lo valida con `<oraculo> --preparar --info` (mismo protocolo, mismas
+//! versiones de los minifiers, debug_assertions=off). Si no esta o no sirve:
+//! una advertencia y el comportamiento de antes (el panic va a `panic/`). El
+//! hijo del oraculo es perezoso: se lanza recien con el primer panic del worker.
 
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::PathBuf;
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{mpsc, Arc, Mutex};
+use std::sync::{mpsc, Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use crate::backend::{Backend, Minifier};
@@ -119,6 +137,20 @@ impl Remoto {
         }
     }
 
+    /// R1-H05: el mismo hijo, pero con el ejecutable del oraculo (sin debug
+    /// assertions). Si no se puede lanzar NO se minifica en proceso (este proceso
+    /// lleva los asserts): el caso queda como panic, con el motivo.
+    fn oraculo(exe: PathBuf, minifier: Minifier, preset: Preset, kind: SourceKind, keep_names: bool) -> Remoto {
+        let mut args = vec!["--preparar".to_string()];
+        args.extend(args_config(minifier, preset, kind, keep_names));
+        Remoto {
+            lanzador: Lanzador { exe, args, env: Vec::new() },
+            local: Box::new(|| Box::new(SinOraculo)),
+            hijo: Mutex::new(None),
+            timeout: TIMEOUT_MINIFICAR,
+        }
+    }
+
     fn lanzar(&self) -> std::io::Result<Hijo> {
         let mut cmd = Command::new(&self.lanzador.exe);
         cmd.args(&self.lanzador.args)
@@ -138,6 +170,129 @@ impl Remoto {
         let stderr_hilo = std::thread::spawn(move || juntar_cola(stderr_pipe, buf));
         Ok(Hijo { child, stdin, rx, stderr, stderr_hilo: Some(stderr_hilo) })
     }
+}
+
+/// R1-H05: lo que contesta el oraculo si su ejecutable no se pudo lanzar.
+struct SinOraculo;
+
+impl Backend for SinOraculo {
+    fn prepare(&self, _src: &str) -> Outcome {
+        Outcome::Panic("subproceso: no pude lanzar el oraculo sin debug assertions".into())
+    }
+}
+
+/// R1-H05: ruta del oraculo validado, o `None`. La fija `configurar_oraculo`
+/// (main, al arrancar); sin llamarla (tests, `--emitir`) no hay oraculo.
+static ORACULO: OnceLock<Option<PathBuf>> = OnceLock::new();
+
+/// R1-H05: si `configurar_oraculo` encontro uno.
+pub fn hay_oraculo() -> bool {
+    ORACULO.get().is_some_and(Option::is_some)
+}
+
+/// R1-H05: el backend de respaldo para una config, si hay oraculo.
+pub fn oraculo(minifier: Minifier, preset: Preset, kind: SourceKind, keep_names: bool) -> Option<Box<dyn Backend>> {
+    let exe = ORACULO.get()?.clone()?;
+    Some(Box::new(Remoto::oraculo(exe, minifier, preset, kind, keep_names)))
+}
+
+/// R1-H05: lo que imprime `difuzz --preparar --info`. El padre exige la misma
+/// linea con `debug_assertions=off`: mismo protocolo y mismos minifiers.
+pub fn info(debug_assertions: bool) -> String {
+    format!(
+        "{SALUDO}; difuzz {}; {}; {}; debug_assertions={}",
+        env!("CARGO_PKG_VERSION"),
+        Minifier::Swc.version(),
+        Minifier::Oxc.version(),
+        if debug_assertions { "on" } else { "off" }
+    )
+}
+
+/// R1-H05: donde buscar el oraculo, en orden. `DIFUZZ_ORACULO` (no vacio) es
+/// el unico candidato: si no sirve, aviso y sin oraculo (asi tambien se apaga,
+/// p. ej. `DIFUZZ_ORACULO=ninguno`), nunca otro en silencio.
+fn candidatos_oraculo(exe: &std::path::Path, env: Option<std::ffi::OsString>) -> Vec<PathBuf> {
+    let mut v = Vec::new();
+    if let Some(e) = env.filter(|e| !e.is_empty()) {
+        v.push(PathBuf::from(e));
+        return v;
+    }
+    let mut hermano = exe.as_os_str().to_owned();
+    hermano.push("-oraculo");
+    v.push(PathBuf::from(hermano));
+    if let (Some(dir), Some(nombre)) = (exe.parent().and_then(|d| d.parent()), exe.file_name()) {
+        v.push(dir.join("oraculo").join(nombre));
+    }
+    v
+}
+
+/// R1-H05: corre `<exe> --preparar --info` y compara con lo esperado.
+fn validar_oraculo(exe: &std::path::Path) -> Result<(), String> {
+    let out = Command::new(exe)
+        .args(["--preparar", "--info"])
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+        .map_err(|e| format!("no pude correrlo: {e}"))?;
+    let dice = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    let espera = info(false);
+    if out.status.success() && dice == espera {
+        Ok(())
+    } else if dice == info(true) {
+        Err("tiene debug assertions (compilalo con --profile oraculo)".into())
+    } else {
+        Err(format!("no es el mismo difuzz: dice {dice:?}, espero {espera:?} (recompilalo)"))
+    }
+}
+
+/// R1-H05: busca y valida el oraculo una vez. `Ok(Some(ruta))`: se usa;
+/// `Ok(None)`: este binario ya no tiene debug assertions (no hace falta);
+/// `Err(aviso)`: no hay oraculo usable y los panics van a `panic/` como antes
+/// (main imprime el aviso, una vez). Un oraculo mas viejo que este binario se
+/// usa igual, con el aviso en `Ok` via `aviso_viejo`.
+pub fn configurar_oraculo() -> Result<Option<PathBuf>, String> {
+    if !cfg!(debug_assertions) {
+        let _ = ORACULO.set(None);
+        return Ok(None);
+    }
+    let exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("difuzz"));
+    let r = elegir_oraculo(&exe, std::env::var_os("DIFUZZ_ORACULO"));
+    let _ = ORACULO.set(r.as_ref().ok().cloned());
+    r.map(Some)
+}
+
+fn elegir_oraculo(exe: &std::path::Path, env: Option<std::ffi::OsString>) -> Result<PathBuf, String> {
+    let explicito = env.as_ref().is_some_and(|e| !e.is_empty());
+    let mut motivos = Vec::new();
+    for c in candidatos_oraculo(exe, env) {
+        if !c.is_file() {
+            // El de DIFUZZ_ORACULO tiene que existir: el aviso lo nombra.
+            if explicito {
+                motivos.push(format!("DIFUZZ_ORACULO={}: no existe", c.display()));
+            }
+            continue;
+        }
+        match validar_oraculo(&c) {
+            Ok(()) => return Ok(c),
+            Err(e) => motivos.push(format!("{}: {e}", c.display())),
+        }
+    }
+    let probe = candidatos_oraculo(exe, None).iter().map(|c| c.display().to_string()).collect::<Vec<_>>().join(", ");
+    Err(format!(
+        "no hay oraculo sin debug assertions{}: un panic del minifier va a panic/ aunque sea solo un debug_assert \
+         (npm no los tiene). Compilalo con `cargo build --profile oraculo` (busco en DIFUZZ_ORACULO, {probe})",
+        if motivos.is_empty() { String::new() } else { format!(" ({})", motivos.join("; ")) }
+    ))
+}
+
+/// R1-H05: aviso si el oraculo es mas viejo que este binario (puede ser de
+/// otro codigo con las mismas versiones de los minifiers).
+pub fn aviso_viejo(oraculo: &std::path::Path) -> Option<String> {
+    let mtime = |p: &std::path::Path| std::fs::metadata(p).and_then(|m| m.modified()).ok();
+    let exe = std::env::current_exe().ok()?;
+    (mtime(oraculo)? < mtime(&exe)?).then(|| {
+        format!("el oraculo {} es mas viejo que este binario: si cambio el codigo, recompilalo (cargo build --profile oraculo)", oraculo.display())
+    })
 }
 
 /// La config del worker, en proceso (lo que el hijo arma en `serve`).
@@ -194,31 +349,47 @@ impl Backend for Remoto {
         };
         match r {
             Ok(Ok(o)) => o,
+            // R1-H07: una respuesta ilegible no es una muerte del hijo (antes salia
+            // como "murio por senal 9": la senal la mandaba muerte() al matarlo).
+            Ok(Err(e)) if e.kind() == std::io::ErrorKind::InvalidData => {
+                let h = slot.take().expect("hijo presente");
+                Outcome::Panic(h.muerte(Causa::Protocolo(e.to_string())))
+            }
             Ok(Err(_)) | Err(mpsc::RecvTimeoutError::Disconnected) => {
                 let h = slot.take().expect("hijo presente");
-                Outcome::Panic(h.muerte(None))
+                Outcome::Panic(h.muerte(Causa::Murio))
             }
             Err(mpsc::RecvTimeoutError::Timeout) => {
                 let h = slot.take().expect("hijo presente");
-                Outcome::Panic(h.muerte(Some(self.timeout)))
+                Outcome::Panic(h.muerte(Causa::Timeout(self.timeout)))
             }
         }
     }
 }
 
+/// Por que se da por perdido al hijo (el mensaje del hallazgo lo dice).
+enum Causa {
+    /// EOF o pipe roto: murio solo (senal o exit).
+    Murio,
+    Timeout(Duration),
+    /// R1-H07: contesto algo ilegible; lo mata difuzz.
+    Protocolo(String),
+}
+
 impl Hijo {
     /// Mata (si sigue vivo), cosecha y arma el mensaje del hallazgo.
-    fn muerte(mut self, timeout: Option<Duration>) -> String {
+    fn muerte(mut self, causa: Causa) -> String {
         let _ = self.child.kill();
         let st = self.child.wait();
         if let Some(t) = self.stderr_hilo.take() {
             let _ = t.join();
         }
         let cola = String::from_utf8_lossy(&self.stderr.lock().unwrap_or_else(|e| e.into_inner())).into_owned();
-        let mut msg = match (timeout, st) {
-            (Some(t), _) => format!("subproceso: el minifier no termino en {} s (lento o colgado; hijo matado)", t.as_secs()),
-            (None, Ok(st)) => describir(st),
-            (None, Err(e)) => format!("subproceso: el hijo murio y no pude cosecharlo: {e}"),
+        let mut msg = match (causa, st) {
+            (Causa::Timeout(t), _) => format!("subproceso: el minifier no termino en {} s (lento o colgado; hijo matado)", t.as_secs()),
+            (Causa::Protocolo(e), _) => format!("subproceso: error de protocolo con el hijo ({e}); hijo matado"),
+            (Causa::Murio, Ok(st)) => describir(st),
+            (Causa::Murio, Err(e)) => format!("subproceso: el hijo murio y no pude cosecharlo: {e}"),
         };
         if !cola.trim().is_empty() {
             msg.push_str("\nstderr del hijo:\n");
@@ -373,6 +544,11 @@ fn intern_flag(s: &str) -> &'static str {
 /// El subcomando oculto `difuzz --preparar --minifier M --config C --carril K
 /// [--keep-names]`. Devuelve el exit code.
 pub fn serve(args: &[String]) -> i32 {
+    // R1-H05: `--preparar --info`, la identidad que valida `configurar_oraculo`.
+    if args == ["--info"] {
+        println!("{}", info(cfg!(debug_assertions)));
+        return 0;
+    }
     // El hook de main no llega aca (el subcomando sale antes): sin esto cada
     // panic del minifier se imprimiria en stderr, y se pierde la ubicacion (M22).
     std::panic::set_hook(Box::new(crate::minify::record_panic_location));
@@ -563,6 +739,42 @@ mod tests {
         assert!(msg.contains("overflowed its stack"), "{msg}");
         // El hijo se re-lanza solo.
         assert!(ok(crate::minify::prepare("console.log(3);\n", &cfg)));
+    }
+
+    /// R1-H05: sin oraculo, `configurar_oraculo` devuelve el aviso (main lo
+    /// imprime una vez) con como compilarlo, y las configs quedan sin respaldo:
+    /// un panic sigue siendo panic, como antes.
+    #[test]
+    fn sin_oraculo_avisa_y_todo_sigue_como_antes() {
+        let tmp = std::env::temp_dir().join(format!("difuzz-test-oraculo-falta-{}", std::process::id()));
+        let exe = tmp.join("release").join("difuzz");
+        let aviso = elegir_oraculo(&exe, None).unwrap_err();
+        assert!(aviso.contains("cargo build --profile oraculo") && aviso.contains("panic/"), "{aviso}");
+        assert!(aviso.contains("release/difuzz-oraculo") && aviso.contains("oraculo/difuzz"), "{aviso}");
+        // DIFUZZ_ORACULO que no existe: el aviso lo nombra.
+        let aviso = elegir_oraculo(&exe, Some("/no/existe/difuzz".into())).unwrap_err();
+        assert!(aviso.contains("DIFUZZ_ORACULO=/no/existe/difuzz: no existe"), "{aviso}");
+        // Explicito: es el unico candidato (no cae en silencio a otro).
+        assert_eq!(candidatos_oraculo(&exe, Some("/x".into())), [PathBuf::from("/x")]);
+        // Un ejecutable que no es un difuzz oraculo no se acepta (no el binario de
+        // tests: libtest con argumentos raros podria correr la suite de nuevo).
+        if std::path::Path::new("/usr/bin/true").is_file() {
+            let aviso = elegir_oraculo(&exe, Some("/usr/bin/true".into())).unwrap_err();
+            assert!(aviso.contains("no es el mismo difuzz"), "{aviso}");
+        }
+        // En el binario de tests (con debug assertions y sin hermanos) no hay oraculo.
+        // (Sin debug assertions no hace falta oraculo: Ok(None).)
+        assert_eq!(configurar_oraculo().is_err(), cfg!(debug_assertions));
+        assert!(!hay_oraculo() && oraculo(Minifier::Oxc, Preset::CoreDefaults, SourceKind::Script, false).is_none());
+        assert_eq!(candidatos_oraculo(&exe, Some("".into())).len(), 2, "DIFUZZ_ORACULO vacio no cuenta");
+    }
+
+    /// R1-H05: la identidad que valida el padre.
+    #[test]
+    fn info_del_oraculo() {
+        assert!(info(false).starts_with(SALUDO) && info(false).ends_with("debug_assertions=off"));
+        assert!(info(false).contains("oxc_minifier 0.153.0"));
+        assert_ne!(info(true), info(false));
     }
 
     #[test]

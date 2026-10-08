@@ -18,6 +18,8 @@ mod known;
 mod minify;
 mod mutate;
 mod oracle;
+#[cfg(test)]
+mod oraculo_tests;
 mod recheck;
 mod runner;
 mod stubs;
@@ -63,7 +65,16 @@ uso: difuzz <corpus_dir> [--out DIR] [--minifier M] [--config C] [--forma F] [--
   --emitir ARCH  imprimir el original y el minificado de ARCH (sin correr node)
   --en-proceso   minificar en el proceso de difuzz. Por defecto se minifica en un hijo
                  persistente por worker: un abort, un desborde de pila o un cuelgue del
-                 minifier queda en panic/ (con la senal) y la corrida sigue";
+                 minifier queda en panic/ (con la senal) y la corrida sigue
+
+  oraculo sin debug assertions (R1-H05): este binario lleva debug assertions (Cargo.toml) y el
+  paquete npm del minifier no. Ante un panic, el caso se re-minifica con el mismo difuzz compilado
+  sin ellas; si ese minifica, el caso se compara con su minificado (div/ con la nota
+  solo_debug_assertions, o asserts/ si no diverge); si tambien falla, va a panic/.
+  Se compila con:  cargo build --release && cargo build --profile oraculo
+  y se busca en <este binario>-oraculo y <dir>/../oraculo/difuzz, o solo en DIFUZZ_ORACULO=RUTA si
+  esta (DIFUZZ_ORACULO=ninguno lo apaga). Si no hay, un aviso al arrancar y los panics van a
+  panic/ como siempre";
 
 struct Cli {
     corpus: PathBuf,
@@ -331,6 +342,12 @@ struct Stats {
     /// en el envoltorio de modulos, la que se repitio sin invocar. Va en una
     /// linea aparte (solo con `--invocar`).
     invocar_retry: usize,
+    /// R1-H05: casos cuyo minificado salio del oraculo sin debug assertions (el
+    /// binario con asserts hizo panic). Ortogonal, como LINT: el caso cuenta
+    /// tambien donde termino (iguales, DIVERGENCIAS, conocidas, descartes).
+    solo_asserts: usize,
+    /// R1-H05: de esos, los que no terminaron en div/ ni known/ (van a asserts/).
+    solo_asserts_sin_div: usize,
 }
 
 impl Stats {
@@ -367,6 +384,8 @@ impl Stats {
         self.a_link += o.a_link;
         self.a_nondet += o.a_nondet;
         self.invocar_retry += o.invocar_retry;
+        self.solo_asserts += o.solo_asserts;
+        self.solo_asserts_sin_div += o.solo_asserts_sin_div;
     }
 
     /// Devuelve la causa (M26: descartes.tsv).
@@ -483,6 +502,18 @@ fn main() {
     huerfanos::activar();
     if cli.subproceso {
         subproceso::activar();
+    }
+    // R1-H05: el oraculo sin debug assertions. Sin el, los panics van a panic/
+    // como antes, con el aviso una sola vez aca.
+    match subproceso::configurar_oraculo() {
+        Ok(Some(p)) => {
+            eprintln!("oraculo sin debug assertions: {}", p.display());
+            if let Some(aviso) = subproceso::aviso_viejo(&p) {
+                eprintln!("aviso: {aviso}");
+            }
+        }
+        Ok(None) => {}
+        Err(aviso) => eprintln!("aviso: {aviso}"),
     }
     let stale = runner::clean_stale();
     if stale > 0 {
@@ -671,6 +702,9 @@ fn main() {
     if cli.invocar {
         println!("invocar (M31): reintentos_sin_invocar={}", stats.invocar_retry);
     }
+    if subproceso::hay_oraculo() || stats.solo_asserts > 0 {
+        println!("oraculo (R1-H05): solo_asserts={} sin_divergencia={}", stats.solo_asserts, stats.solo_asserts_sin_div);
+    }
     // M27 (a): una escritura perdida del reporter es un hallazgo perdido.
     let lost = oracle::write_errors() - errors_before;
     if lost > 0 && !cancelled {
@@ -735,6 +769,8 @@ fn process_case(
     };
     let src = cli.forma.apply(&raw);
 
+    // R1-H05: la nota del oraculo es por caso (minify::nota_asserts).
+    minify::tomar_nota_asserts();
     let (original, minified, static_flags, dead_writes) = match minify::prepare(&src, cfg) {
         minify::Outcome::Ok {
             original,
@@ -822,6 +858,15 @@ fn process_case(
     let base_lint = dead_writes.1 > dead_writes.0;
     stats.last_div = None;
     compare_base(ctx, runner, cfg, names_cfg, cli, stats, rel, &raw, &original, &minified, &static_flags, a, a_cached);
+    // R1-H05: con debug assertions hubo panic y el oraculo minifico. Si diverge,
+    // ya esta en div/ (o known/) con la nota; si no, va a asserts/, no a panic/.
+    if let Some(nota) = minify::tomar_nota_asserts() {
+        stats.solo_asserts += 1;
+        if stats.last_div.is_none() {
+            stats.solo_asserts_sin_div += 1;
+            ctx.reporter.solo_asserts(rel, &src, &original, &minified, &nota);
+        }
+    }
     if mutate {
         let base_div = stats.last_div.take();
         process_mutants(ctx, runner, cfg, names_cfg, cli, &mut stats.mutaciones, rel, &raw, base_div, base_lint);
@@ -1571,6 +1616,7 @@ fn process_mutants(
         let desc = format!("{}\n", v.desc);
         let files = [("variante.js", v.src.as_str()), ("mutacion.txt", desc.as_str())];
         let src = cli.forma.apply(&v.src);
+        minify::tomar_nota_asserts();
         let (original, minified, static_flags, dead_writes) = match minify::prepare(&src, cfg) {
             minify::Outcome::Ok {
                 original,
@@ -1656,6 +1702,9 @@ fn print_hint(out: &Path, stats: &Stats) {
     }
     if stats.lint > 0 {
         eprintln!("sospechosos del lint (triage a mano) en {}/lint", out.display());
+    }
+    if stats.solo_asserts_sin_div > 0 {
+        eprintln!("panics solo de debug assertions, sin divergencia, en {}/asserts", out.display());
     }
 }
 

@@ -14,8 +14,10 @@ use swc_ecma_ast::{Decl, ModuleDecl, ModuleItem, ObjectPatProp, Pat, Program, St
 
 use crate::backend::{Backend, Minifier};
 
-/// Un minifier ya configurado: backend + preset.
-pub struct Config(Box<dyn Backend>);
+/// Un minifier ya configurado: backend + preset. El segundo campo (R1-H05) es
+/// el oraculo sin debug assertions (subproceso.rs): si el primero hace panic,
+/// `prepare` re-minifica con el.
+pub struct Config(Box<dyn Backend>, Option<Box<dyn Backend>>);
 
 /// Primer eje de la matriz: con que opciones se minifica.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -45,11 +47,12 @@ impl Preset {
     /// La config del preset para un backend y un tipo de fuente. El carril
     /// (script o modulo) llega explicito: el backend lo recibe, no lo adivina.
     pub fn build(self, minifier: Minifier, kind: SourceKind) -> Config {
+        let oraculo = crate::subproceso::oraculo(minifier, self, kind, false);
         // M34: salvo --en-proceso, la misma config pero minificando en un hijo.
         if crate::subproceso::activo() {
-            return Config(Box::new(crate::subproceso::Remoto::new(minifier, self, kind, false)));
+            return Config(Box::new(crate::subproceso::Remoto::new(minifier, self, kind, false)), oraculo);
         }
-        Config(minifier.build(self, kind))
+        Config(minifier.build(self, kind), oraculo)
     }
 }
 
@@ -134,15 +137,23 @@ impl Config {
     /// No es una celda: sirve para preguntar si una divergencia de core_defaults
     /// desaparece cuando los nombres no cambian (main::names_only).
     pub fn core_defaults_keep_names(minifier: Minifier, kind: SourceKind) -> Self {
+        let oraculo = crate::subproceso::oraculo(minifier, Preset::CoreDefaults, kind, true);
         if crate::subproceso::activo() {
-            return Config(Box::new(crate::subproceso::Remoto::new(minifier, Preset::CoreDefaults, kind, true)));
+            return Config(Box::new(crate::subproceso::Remoto::new(minifier, Preset::CoreDefaults, kind, true)), oraculo);
         }
-        Config(minifier.build_core_defaults_keep_names(kind))
+        Config(minifier.build_core_defaults_keep_names(kind), oraculo)
     }
 
     /// M34: una config sobre un backend ya armado (el hijo de `--preparar`).
+    /// Sin oraculo: el hijo no re-minifica.
     pub fn from_backend(backend: Box<dyn crate::backend::Backend>) -> Self {
-        Config(backend)
+        Config(backend, None)
+    }
+
+    /// R1-H05, tests: una config con un oraculo a mano.
+    #[cfg(test)]
+    pub fn con_oraculo(backend: Box<dyn Backend>, oraculo: Box<dyn Backend>) -> Self {
+        Config(backend, Some(oraculo))
     }
 }
 
@@ -165,8 +176,15 @@ pub enum Outcome {
 }
 
 pub fn prepare(src: &str, cfg: &Config) -> Outcome {
+    match (prepare_con(&*cfg.0, src), &cfg.1) {
+        (Outcome::Panic(msg), Some(oraculo)) => respaldo(src, msg, &**oraculo),
+        (o, _) => o,
+    }
+}
+
+fn prepare_con(backend: &dyn Backend, src: &str) -> Outcome {
     PANIC_LOCATION.with(|l| l.borrow_mut().take());
-    let result = catch_unwind(AssertUnwindSafe(|| cfg.0.prepare(src)));
+    let result = catch_unwind(AssertUnwindSafe(|| backend.prepare(src)));
     match result {
         Ok(outcome) => outcome,
         Err(payload) => {
@@ -180,9 +198,57 @@ pub fn prepare(src: &str, cfg: &Config) -> Outcome {
     }
 }
 
+/// R1-H05: el backend con debug assertions hizo panic (`msg`); se minifica de
+/// nuevo con el oraculo sin debug assertions (lo que corre npm).
+/// - Devuelve codigo: el panic era solo de los asserts. Se usa ese minificado
+///   (el caso se compara como cualquiera) y el panic queda en `NOTA_ASSERTS`.
+/// - Tambien falla: es un panic real; el mensaje lo dice.
+/// - No parsea / no imprime: raro (el assert salto antes); se conserva el panic
+///   con la nota, para no esconder nada.
+fn respaldo(src: &str, msg: String, oraculo: &dyn Backend) -> Outcome {
+    match prepare_con(oraculo, src) {
+        Outcome::Ok { original, minified, static_flags, dead_writes } => {
+            NOTA_ASSERTS.with(|n| {
+                n.borrow_mut().get_or_insert(NotaAsserts { panic: msg, minificado: minified.clone() });
+            });
+            Outcome::Ok { original, minified, static_flags, dead_writes }
+        }
+        Outcome::Panic(m2) if m2 == msg => {
+            Outcome::Panic(format!("{msg}\noraculo sin debug assertions: el mismo panic (es real, no solo de un debug_assert)"))
+        }
+        Outcome::Panic(m2) => Outcome::Panic(format!("{msg}\noraculo sin debug assertions: tambien falla (es real):\n{m2}")),
+        Outcome::ParseError { .. } => Outcome::Panic(format!("{msg}\noraculo sin debug assertions: no parsea el fuente")),
+        Outcome::CodegenError => Outcome::Panic(format!("{msg}\noraculo sin debug assertions: error de codegen")),
+    }
+}
+
+/// R1-H05: la primera vez en el caso en curso que el binario con debug
+/// assertions hizo panic y el oraculo minifico. La escribe `prepare`; main la
+/// limpia al empezar cada caso (`tomar_nota_asserts`) y el Reporter la lee al
+/// escribir div/known. Puede venir de otra pasada del mismo caso (observador,
+/// re-chequeo): por eso guarda el minificado, para saber a que programa aplica.
+#[derive(Clone, Debug)]
+pub struct NotaAsserts {
+    /// El mensaje del panic con debug assertions (con la ubicacion).
+    pub panic: String,
+    /// Lo que devolvio el oraculo.
+    pub minificado: String,
+}
+
+pub fn nota_asserts() -> Option<NotaAsserts> {
+    NOTA_ASSERTS.with(|n| n.borrow().clone())
+}
+
+/// R1-H05: devuelve la nota y la borra.
+pub fn tomar_nota_asserts() -> Option<NotaAsserts> {
+    NOTA_ASSERTS.with(|n| n.borrow_mut().take())
+}
+
 thread_local! {
     /// M22: ubicacion del ultimo panic en este hilo (la escribe el hook de main).
     static PANIC_LOCATION: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
+    /// R1-H05: ver `nota_asserts`. Por hilo: cada worker procesa un caso a la vez.
+    static NOTA_ASSERTS: std::cell::RefCell<Option<NotaAsserts>> = const { std::cell::RefCell::new(None) };
 }
 
 /// M22: llamado desde el panic hook. Corre en el hilo que entro en panico.
@@ -424,10 +490,59 @@ mod tests {
         }
         let prev = std::panic::take_hook();
         std::panic::set_hook(Box::new(record_panic_location));
-        let out = prepare("x", &Config(Box::new(Revienta)));
+        let out = prepare("x", &Config(Box::new(Revienta), None));
         std::panic::set_hook(prev);
         let Outcome::Panic(msg) = out else { panic!("tenia que ser Panic") };
         assert!(msg.starts_with("adentro del backend\nubicacion: src/minify.rs:"), "{msg}");
+    }
+
+    /// R1-H05: ante un panic, el oraculo decide. Si minifica, el caso sigue con
+    /// su minificado y el panic queda en la nota; si tambien falla, es panic real
+    /// y el mensaje lo dice; sin panic, el oraculo ni se consulta.
+    #[test]
+    fn oraculo_decide_ante_un_panic() {
+        use super::{nota_asserts, prepare, tomar_nota_asserts, Config, Outcome};
+        use crate::backend::Backend;
+        struct Assert;
+        impl Backend for Assert {
+            fn prepare(&self, src: &str) -> Outcome {
+                if src.contains("eval") {
+                    panic!("assertion failed: solo con debug assertions")
+                }
+                Outcome::Ok { original: src.into(), minified: src.into(), static_flags: Vec::new(), dead_writes: (0, 0) }
+            }
+        }
+        struct Npm;
+        impl Backend for Npm {
+            fn prepare(&self, src: &str) -> Outcome {
+                Outcome::Ok { original: src.into(), minified: "npm".into(), static_flags: vec!["with"], dead_writes: (1, 2) }
+            }
+        }
+        struct Real;
+        impl Backend for Real {
+            fn prepare(&self, _: &str) -> Outcome {
+                Outcome::Panic("byte index 1 is out of range".into())
+            }
+        }
+        tomar_nota_asserts();
+        let cfg = Config::con_oraculo(Box::new(Assert), Box::new(Npm));
+        let Outcome::Ok { minified, static_flags, dead_writes, .. } = prepare("x", &cfg) else { panic!() };
+        assert_eq!((minified.as_str(), dead_writes), ("x", (0, 0)), "sin panic no se consulta al oraculo");
+        assert!(static_flags.is_empty() && nota_asserts().is_none());
+        let Outcome::Ok { minified, static_flags, dead_writes, .. } = prepare("var e = eval;", &cfg) else { panic!() };
+        assert_eq!((minified.as_str(), static_flags, dead_writes), ("npm", vec!["with"], (1, 2)));
+        let nota = tomar_nota_asserts().expect("nota del assert");
+        assert!(nota.panic.starts_with("assertion failed: solo con debug assertions"), "{nota:?}");
+        assert_eq!(nota.minificado, "npm");
+        assert!(nota_asserts().is_none());
+        // Panic real: el oraculo tambien falla.
+        let cfg = Config::con_oraculo(Box::new(Assert), Box::new(Real));
+        let Outcome::Panic(msg) = prepare("eval", &cfg) else { panic!() };
+        assert!(msg.starts_with("assertion failed") && msg.contains("\noraculo sin debug assertions: tambien falla (es real):\nbyte index"), "{msg}");
+        let cfg = Config::con_oraculo(Box::new(Real), Box::new(Real));
+        let Outcome::Panic(msg) = prepare("x", &cfg) else { panic!() };
+        assert_eq!(msg, "byte index 1 is out of range\noraculo sin debug assertions: el mismo panic (es real, no solo de un debug_assert)");
+        assert!(nota_asserts().is_none());
     }
 
     #[test]

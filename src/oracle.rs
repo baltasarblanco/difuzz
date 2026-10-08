@@ -183,7 +183,7 @@ impl Reporter {
     /// hallazgos viejos se mezclan con los nuevos y el `ls` miente (paso en la
     /// corrida del 21-sep, con 8 directorios de sobra).
     pub fn new(root: &Path, config_name: String, preload: &str) -> Reporter {
-        for sub in ["div", "known", "panic", "lint"] {
+        for sub in ["div", "known", "panic", "lint", "asserts"] {
             let _ = std::fs::remove_dir_all(root.join(sub));
         }
         write_all(root, &[("preload.cjs", preload)]);
@@ -322,6 +322,17 @@ impl Reporter {
             cmd(repro_a),
             cmd(repro_b),
         );
+        // R1-H05: el minificado salio del oraculo sin debug assertions (el binario
+        // con asserts hizo panic). Al final del meta: el resto sigue igual. Si el
+        // oraculo se uso en otra pasada del caso (re-chequeo), se dice eso.
+        let meta = match crate::minify::nota_asserts() {
+            Some(n) if n.minificado == minified => format!("{meta}{}", nota_solo_asserts(&n.panic)),
+            Some(n) => format!(
+                "{meta}\notra_pasada_con_oraculo: si (este minificado no; un re-chequeo u otra pasada del caso hizo panic con debug assertions y uso el oraculo)\npanic_con_debug_assertions:\n{}\n",
+                n.panic.trim_end()
+            ),
+            None => meta,
+        };
         write_all(
             &dir,
             &[
@@ -388,6 +399,30 @@ impl Reporter {
         write_all(&dir, &[("meta.txt", meta.as_str()), ("input.js", src)]);
     }
 
+    /// R1-H05: el binario con debug assertions hizo panic, el oraculo sin ellos
+    /// minifico y el caso NO divergio (o se descarto). No es un hallazgo de
+    /// panic/ ni de div/: queda en `asserts/` como senal para los asserts.
+    /// `original` y `minified` son los de la pasada cruda del caso; `minified.*`
+    /// guarda lo que devolvio el oraculo (si fue en otra pasada, el meta lo dice
+    /// y `original.*` no se guarda: seria de otro programa).
+    pub fn solo_asserts(&self, case: &Path, src: &str, original: &str, minified: &str, nota: &crate::minify::NotaAsserts) {
+        let dir = self.case_dir("asserts", case);
+        let misma = nota.minificado == minified;
+        let meta = format!(
+            "case: {}\nkind: SoloDebugAssertions\nconfig: {}\n{}sin divergencia con el minificado del oraculo (o el caso se descarto: ver descartes.tsv)\n{}{}",
+            case.display(),
+            self.config_name,
+            if self.versions.is_empty() { format!("debug_assertions: {}\n", debug_assertions()) } else { self.versions.clone() },
+            if misma { "" } else { "pasada: no la cruda (observador o re-chequeo); minified.* es de ese programa\n" },
+            nota_solo_asserts(&nota.panic),
+        );
+        let (orig_file, min_file) = (format!("original.{}", self.ext), format!("minified.{}", self.ext));
+        write_all(&dir, &[("meta.txt", meta.as_str()), ("input.js", src), (min_file.as_str(), nota.minificado.as_str())]);
+        if misma {
+            write_all(&dir, &[(orig_file.as_str(), original)]);
+        }
+    }
+
     /// Agrega archivos a los directorios que ya existen para el caso (div, known,
     /// panic, lint). Lo usan las mutaciones: la variante va tal cual junto al hallazgo.
     pub fn attach(&self, case: &Path, files: &[(&str, &str)]) {
@@ -412,6 +447,14 @@ impl Reporter {
         let name = if slug.is_empty() { "_root".to_string() } else { slug.join("__") };
         self.root.join(prefix).join(name)
     }
+}
+
+/// R1-H05: el bloque del meta para un caso minificado por el oraculo.
+fn nota_solo_asserts(panic: &str) -> String {
+    format!(
+        "\nsolo_debug_assertions: si (con debug assertions el minifier hizo panic; el minificado es del oraculo sin debug assertions, como npm)\npanic_con_debug_assertions:\n{}\n",
+        panic.trim_end()
+    )
 }
 
 fn debug_assertions() -> &'static str {
