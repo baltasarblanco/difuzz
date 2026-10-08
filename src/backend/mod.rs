@@ -36,6 +36,15 @@ impl Minifier {
         }
     }
 
+    /// M21: crate y version del minifier medido, para el meta de los hallazgos.
+    /// Mantener igual a Cargo.toml.
+    pub fn version(self) -> &'static str {
+        match self {
+            Minifier::Swc => "swc_ecma_minifier 61.0.8",
+            Minifier::Oxc => "oxc_minifier 0.153.0",
+        }
+    }
+
     pub fn parse(s: &str) -> Option<Minifier> {
         match s {
             "swc" => Some(Minifier::Swc),

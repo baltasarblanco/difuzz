@@ -10,8 +10,8 @@
 //! - No hay `top_level` en compress: el DCE top-level depende del tipo de
 //!   fuente (corre para modulo y CommonJS, no para script).
 //! - `ParseError` sin errores recuperados: oxc deja algunos errores tempranos
-//!   a la semantica (`SemanticBuilder::with_check_syntax_error`), que aca no
-//!   corre; esos casos los descarta node (`a_invalid`).
+//!   a la semantica (`SemanticBuilder::with_check_syntax_error`). Desde M19
+//!   corre despues del parse y sus errores tambien son `ParseError`.
 //! - `CodegenError` no existe: `Codegen::build` no falla.
 
 use oxc_allocator::Allocator;
@@ -24,7 +24,7 @@ use oxc_parser::Parser;
 pub use oxc_span::SourceType;
 
 use super::Backend;
-use crate::minify::{Outcome, Preset};
+use crate::minify::{Outcome, Preset, SourceKind};
 
 pub struct Oxc {
     options: MinifierOptions,
@@ -41,10 +41,20 @@ impl Oxc {
     /// - `carril_a`: lo mismo con los nombres preservados en compress y en
     ///   mangle, y `top_level` explicito. Es la intencion del carril A de SWC
     ///   (DCE top-level + keep_*). En oxc coincide con core_defaults_keep_names.
+    ///
+    /// M35 (decision del usuario, opcion a): en los tres presets
+    /// `treeshake.annotations = false`. `core_defaults` se aparta de `minifySync`
+    /// SOLO en eso: oxc honra `/*@__PURE__*/` y `/*#__NO_SIDE_EFFECTS__*/` por
+    /// contrato y borra llamadas anotadas con efectos (7 falsos positivos por
+    /// celda); SWC no las ve (emite y parsea sin comentarios). Se pierde la
+    /// cobertura del camino de anotaciones.
     pub fn new(preset: Preset, source_type: SourceType) -> Self {
         match preset {
             Preset::CoreDefaults => Oxc {
-                options: MinifierOptions::default(),
+                options: MinifierOptions {
+                    compress: Some(sin_anotaciones(CompressOptions::default())),
+                    ..MinifierOptions::default()
+                },
                 source_type,
             },
             Preset::CarrilA => {
@@ -61,10 +71,10 @@ impl Oxc {
     pub fn core_defaults_keep_names(source_type: SourceType) -> Self {
         Oxc {
             options: MinifierOptions {
-                compress: Some(CompressOptions {
+                compress: Some(sin_anotaciones(CompressOptions {
                     keep_names: CompressOptionsKeepNames::all_true(),
                     ..CompressOptions::default()
-                }),
+                })),
                 mangle: Some(MangleOptions {
                     keep_names: MangleOptionsKeepNames::all_true(),
                     ..MangleOptions::default()
@@ -74,6 +84,12 @@ impl Oxc {
             source_type,
         }
     }
+}
+
+/// M35: no honrar las anotaciones PURE / NO_SIDE_EFFECTS (ver `Oxc::new`).
+fn sin_anotaciones(mut c: CompressOptions) -> CompressOptions {
+    c.treeshake.annotations = false;
+    c
 }
 
 impl Backend for Oxc {
@@ -89,6 +105,21 @@ impl Backend for Oxc {
             };
         }
         let mut program = parsed.program;
+        // M19: los errores tempranos que el parser de oxc deja a la semantica
+        // (octal legacy en estricto, etc.). Sin esto, su codegen "arreglaba" un
+        // modulo invalido y node corria el original impreso como si fuera valido.
+        let semantic_errors = !oxc_semantic::SemanticBuilder::new()
+            .with_check_syntax_error(true)
+            .build(&program)
+            .diagnostics
+            .is_empty();
+        if semantic_errors {
+            return if self.source_type.is_module() {
+                Outcome::ParseError { esm: false, script: parses_as(src, SourceType::cjs()) }
+            } else {
+                Outcome::ParseError { esm: parses_as(src, SourceType::mjs()), script: false }
+            };
+        }
 
         let original = Codegen::new()
             .with_options(CodegenOptions::minify())
@@ -104,7 +135,8 @@ impl Backend for Oxc {
             .code;
 
         // checks.rs es analisis sobre el AST de SWC: se reparsean los textos.
-        let (static_flags, dead_writes) = super::swc::checks_on_text(src, &original, &minified);
+        let kind = if self.source_type.is_module() { SourceKind::Module } else { SourceKind::Script };
+        let (static_flags, dead_writes) = super::swc::checks_on_text(src, &original, &minified, kind);
         Outcome::Ok {
             original,
             minified,
@@ -185,14 +217,38 @@ mod tests {
             b.prepare("var = ;"),
             Outcome::ParseError { esm: false, script: false }
         ));
-        // Carril B: un modulo parsea. (`with` en modulo NO es error de parse en
-        // oxc: lo deja a la semantica, que aca no corre; lo descarta node.)
+        // Carril B: un modulo parsea. M19: lo que el parser deja a la semantica
+        // (`with`, octal legacy en estricto) ahora tambien es ParseError.
         let m = Oxc::new(Preset::CoreDefaults, SourceType::mjs());
         assert!(matches!(m.prepare("export const a = 1;"), Outcome::Ok { .. }));
+        assert!(matches!(m.prepare("with (o) { x; }"), Outcome::ParseError { esm: false, script: true }));
+        assert!(matches!(m.prepare("console.log(010);"), Outcome::ParseError { esm: false, script: true }));
+        assert!(matches!(m.prepare("console.log(\"\\101\");"), Outcome::ParseError { .. }));
+        assert!(matches!(b.prepare("console.log(010);"), Outcome::Ok { .. }));
         assert!(matches!(
             m.prepare("var = ;"),
             Outcome::ParseError { esm: false, script: false }
         ));
+    }
+
+    /// M35: una llamada anotada con efectos se conserva en los tres presets.
+    #[test]
+    fn oxc_no_honra_anotaciones_pure() {
+        let src = "/*@__PURE__*/ console.log(\"efecto\");\n";
+        for preset in [Preset::CoreDefaults, Preset::CarrilA] {
+            let (_, minified, _, _) = prepare(preset, src);
+            assert!(minified.contains("efecto"), "{preset:?}: {minified}");
+        }
+        let Outcome::Ok { minified, .. } = Oxc::core_defaults_keep_names(SourceType::cjs()).prepare(src) else {
+            panic!("no preparo");
+        };
+        assert!(minified.contains("efecto"), "{minified}");
+        // Control: con las opciones de minifySync (annotations = true) se borra.
+        let npm = Oxc { options: oxc_minifier::MinifierOptions::default(), source_type: SourceType::cjs() };
+        let Outcome::Ok { minified, .. } = npm.prepare(src) else {
+            panic!("no preparo");
+        };
+        assert!(!minified.contains("efecto"), "{minified}");
     }
 
     #[test]
@@ -203,5 +259,18 @@ mod tests {
         );
         assert_eq!(flags, ["coercion"]);
         assert_eq!(dead.0, 1);
+    }
+
+    /// M14: en el carril B los chequeos parsean como modulo.
+    #[test]
+    fn oxc_chequeos_estaticos_en_modulo() {
+        let m = Oxc::new(Preset::CoreDefaults, SourceType::mjs());
+        let Outcome::Ok { static_flags, dead_writes, .. } =
+            m.prepare("export const o = { valueOf() { return 1 } };\n[1, 2][0] = 3;\nconsole.log(+o);\n")
+        else {
+            panic!("un modulo tiene que preparar");
+        };
+        assert_eq!(static_flags, ["coercion"]);
+        assert_eq!(dead_writes.0, 1);
     }
 }

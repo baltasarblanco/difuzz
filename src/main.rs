@@ -20,7 +20,7 @@ mod runner;
 mod triage;
 
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
 
 use runner::Status;
@@ -66,6 +66,8 @@ struct Cli {
     /// Mejora 10: variantes por caso (mutate.rs).
     mutaciones: usize,
     kind: minify::SourceKind,
+    /// M24: `--cruce DIR`: solo imprimir la tabla de cruce, sin correr nada.
+    cruce: Option<PathBuf>,
 }
 
 impl Cli {
@@ -104,6 +106,7 @@ impl Cli {
         let mut indice = None;
         let mut invocar = false;
         let mut mutaciones = 0;
+        let mut cruce = None;
 
         let mut it = args.into_iter();
         while let Some(arg) = it.next() {
@@ -114,6 +117,10 @@ impl Cli {
                     timeout = Duration::from_millis(
                         v.parse().map_err(|_| format!("--timeout-ms invalido: {v}"))?,
                     );
+                    // M27 (b): 0 haria de todo un timeout.
+                    if timeout.is_zero() {
+                        return Err("--timeout-ms tiene que ser >= 1".into());
+                    }
                 }
                 "--limit" => {
                     let v = it.next().ok_or("--limit necesita un valor")?;
@@ -136,6 +143,7 @@ impl Cli {
                 "--no-cache" => no_cache = true,
                 "--indice" => indice = Some(PathBuf::from(it.next().ok_or("--indice necesita un valor")?)),
                 "--invocar" => invocar = true,
+                "--cruce" => cruce = Some(PathBuf::from(it.next().ok_or("--cruce necesita un directorio")?)),
                 "--mutaciones" => {
                     let v = it.next().ok_or("--mutaciones necesita un valor")?;
                     mutaciones = v.parse().map_err(|_| format!("--mutaciones invalido: {v}"))?;
@@ -156,10 +164,21 @@ impl Cli {
                         .ok_or_else(|| format!("--carril invalido: {v} ({})", minify::SourceKind::ALL))?;
                 }
                 other if other.starts_with("--") => return Err(format!("opcion desconocida: {other}")),
+                // M27 (c): antes ganaba el ultimo en silencio.
+                other if corpus.is_some() => return Err(format!("un solo <corpus_dir>: sobra {other}")),
                 other => corpus = Some(PathBuf::from(other)),
             }
         }
 
+        // M24: --cruce solo lee indices. Las demas opciones se aceptan y no
+        // cambian nada; un corpus no tiene sentido.
+        if let Some(dir) = cruce {
+            if corpus.is_some() {
+                return Err("--cruce no corre nada: sin <corpus_dir>".into());
+            }
+            corpus = Some(PathBuf::new());
+            cruce = Some(dir);
+        }
         if no_cache && cache.is_some() {
             return Err("--cache y --no-cache se excluyen".into());
         }
@@ -182,6 +201,7 @@ impl Cli {
             invocar,
             mutaciones,
             kind,
+            cruce,
         })
     }
 }
@@ -237,8 +257,19 @@ struct Stats {
     mutaciones: MutStats,
     /// Carril B: no parsea como modulo pero si como script (espejo de `parse_esm`).
     parse_script: usize,
-    /// Carril B: el original no enlaza (import que no resuelve; runner::LINK_EXIT).
+    /// El original no enlaza (import/require que no resuelve; runner::LINK_EXIT
+    /// con `link` en el canal de control). Los dos carriles desde M9.
     a_link: usize,
+    /// M3: divergencia que no se confirma: A corrido otra vez en fresco da otra
+    /// salida. No se reporta; cuenta dentro de `original=`.
+    a_nondet: usize,
+    /// M18: kind de la ultima divergencia (reportada o conocida) del caso; la
+    /// usa process_mutants para el dedup. No se suma en `merge`.
+    last_div: Option<oracle::Kind>,
+    /// M18: en las variantes, el kind con que ya divergio el base: una variante
+    /// con el mismo kind no se reporta (`inherited`). No se suma en `merge`.
+    skip_kind: Option<oracle::Kind>,
+    inherited: usize,
 }
 
 impl Stats {
@@ -272,19 +303,30 @@ impl Stats {
         self.mutaciones.merge(&o.mutaciones);
         self.parse_script += o.parse_script;
         self.a_link += o.a_link;
+        self.a_nondet += o.a_nondet;
     }
 
-    fn discard_original(&mut self, st: &Status) {
+    /// Devuelve la causa (M26: descartes.tsv).
+    fn discard_original(&mut self, st: &Status) -> &'static str {
         match st {
-            Status::Timeout => self.a_timeout += 1,
-            Status::Signal => self.a_signal += 1,
-            _ => self.a_exit += 1,
+            Status::Timeout => {
+                self.a_timeout += 1;
+                "timeout"
+            }
+            Status::Signal => {
+                self.a_signal += 1;
+                "senal"
+            }
+            _ => {
+                self.a_exit += 1;
+                "exit"
+            }
         }
     }
 
     fn line(&self) -> String {
         format!(
-            "total={} iguales={} DIVERGENCIAS={} conocidas={} conocidas_sintoma_nuevo={} PANICS={} LINT={} observados={} observados_por_globals={} lanzaron={} | descartados: original={} (exit={} timeout={} senal={} invalido={} observado_sin_salida={} mudo_sin_observar={} enlace={}) mudos_sin_bindings={} parse={} (esm={} otro={} script={}) codegen={} runner={} ilegibles={} panics_del_fuzzer={} | identicos={} lint_equivalentes={} cache_a_hits={}",
+            "total={} iguales={} DIVERGENCIAS={} conocidas={} conocidas_sintoma_nuevo={} PANICS={} LINT={} observados={} observados_por_globals={} lanzaron={} | descartados: original={} (exit={} timeout={} senal={} invalido={} observado_sin_salida={} mudo_sin_observar={} enlace={} no_determinista={}) mudos_sin_bindings={} parse={} (esm={} otro={} script={}) codegen={} runner={} ilegibles={} panics_del_fuzzer={} | identicos={} lint_equivalentes={} cache_a_hits={}",
             self.total,
             self.same,
             self.divergences,
@@ -301,7 +343,8 @@ impl Stats {
                 + self.a_invalid
                 + self.observed_not_ok
                 + self.silent_no_observe
-                + self.a_link,
+                + self.a_link
+                + self.a_nondet,
             self.a_exit,
             self.a_timeout,
             self.a_signal,
@@ -309,6 +352,7 @@ impl Stats {
             self.observed_not_ok,
             self.silent_no_observe,
             self.a_link,
+            self.a_nondet,
             self.silent_unobservable,
             self.parse_esm + self.parse_other + self.parse_script,
             self.parse_esm,
@@ -326,20 +370,7 @@ impl Stats {
 }
 
 fn main() {
-    // `--cruce DIR`: solo lee los indices, no corre nada.
     let args: Vec<String> = std::env::args().skip(1).collect();
-    if let [flag, dir] = &args[..] {
-        if flag == "--cruce" {
-            match indice::cruce(Path::new(dir)) {
-                Ok(t) => print!("{t}"),
-                Err(e) => {
-                    eprintln!("no pude leer los indices en {dir}: {e}");
-                    std::process::exit(1);
-                }
-            }
-            return;
-        }
-    }
     let cli = match Cli::parse(args) {
         Ok(c) => c,
         Err(e) => {
@@ -347,11 +378,35 @@ fn main() {
             std::process::exit(2);
         }
     };
+    // `--cruce DIR`: solo lee los indices, no corre nada. Sin index-*.tsv: exit 1.
+    if let Some(dir) = &cli.cruce {
+        match indice::cruce(dir) {
+            Ok(t) => print!("{t}"),
+            Err(e) => {
+                eprintln!("no pude leer los indices en {}: {e}", dir.display());
+                std::process::exit(1);
+            }
+        }
+        return;
+    }
 
     // Un panic del minifier es un hallazgo, no ruido: se captura en minify::prepare
     // y se guarda. El hook default lo imprimiria en stderr por cada caso.
-    std::panic::set_hook(Box::new(|_| {}));
+    // M22: el hook guarda donde fue el panic (archivo:linea:col del crate) para
+    // que minify::prepare lo agregue al mensaje.
+    std::panic::set_hook(Box::new(minify::record_panic_location));
 
+    install_signal_handlers();
+    let stale = runner::clean_stale();
+    if stale > 0 {
+        eprintln!("borre {stale} temporales de corridas anteriores cortadas (pid muerto)");
+    }
+
+    // M27 (d): "no existe", "no es directorio" y "sin input.js" son distintos.
+    if let Err(e) = corpus::check_root(&cli.corpus) {
+        eprintln!("{e}");
+        std::process::exit(1);
+    }
     let files = corpus::collect(&cli.corpus);
     if files.is_empty() {
         eprintln!("no encontre ningun input.js bajo {}", cli.corpus.display());
@@ -370,7 +425,11 @@ fn main() {
         }
     };
     let cell = cli.cell();
-    let mut reporter = oracle::Reporter::new(&cli.out, cell.clone(), runner::PRELOAD).with_kind(cli.kind);
+    let errors_before = oracle::write_errors();
+    let mut reporter = oracle::Reporter::new(&cli.out, cell.clone(), runner::PRELOAD)
+        .with_kind(cli.kind)
+        .with_invocar(cli.invocar)
+        .with_versions(&cache::node_version(), cli.minifier.version());
     if let Some(dir) = &cli.indice {
         match indice::Index::create(dir, &cell) {
             Ok(ix) => reporter = reporter.with_index(ix),
@@ -382,12 +441,25 @@ fn main() {
     // cambia como node ejecuta el archivo (.cjs o .mjs).
     let timeout_ms = cli.timeout.as_millis().to_string();
     let kind_tag = format!("carril_{} .{}", cli.kind.carril(), cli.kind.ext());
-    let cache = cache::CacheA::new(cli.cache.clone(), &[runner::PRELOAD, timeout_ms.as_str(), kind_tag.as_str()]);
+    // M11: "entorno v2" (cwd/env/TMPDIR/HOME aislados): lo que ve el programa cambio.
+    let cache = cache::CacheA::new(
+        cli.cache.clone(),
+        &[runner::PRELOAD, timeout_ms.as_str(), kind_tag.as_str(), "entorno v2"],
+    );
+    // M27 (a): si --out no se puede escribir, no hay hallazgos que guardar.
+    if oracle::write_errors() > errors_before {
+        eprintln!("no puedo escribir en --out {}", cli.out.display());
+        // exit no corre los Drop: el preload (y su directorio) se sueltan a mano.
+        drop(preload);
+        std::process::exit(1);
+    }
     let triage = triage::Triage::load(&cli.out);
     let known = known::Known::load(
         &cli.corpus,
         &cli.out,
-        known::fnv1a(&[runner::PRELOAD, cell.as_str()]),
+        // M4: "sintoma v2" (sin rutas por proceso): las tablas viejas se
+        // descartan por el encabezado en vez de dar drift masivo.
+        known::fnv1a(&[runner::PRELOAD, cell.as_str(), "sintoma v2"]),
     )
     .with_backend(cli.minifier);
     let ctx = Ctx {
@@ -395,6 +467,9 @@ fn main() {
         known: &known,
         cache: &cache,
         triage: &triage,
+        strict_recheck: (cli.minifier == backend::Minifier::Oxc && cli.kind == minify::SourceKind::Script)
+            .then_some(cli.preset),
+        oxc_recheck: (cli.minifier == backend::Minifier::Oxc).then_some((cli.preset, cli.kind)),
     };
     let jobs = cli.jobs.min(files.len());
 
@@ -419,18 +494,29 @@ fn main() {
 
     std::thread::scope(|scope| {
         let workers: Vec<_> = (0..jobs)
-            .map(|w| {
+            .filter_map(|w| {
                 let (files, next, done, ctx, cli, preload) =
                     (&files, &next, &done, &ctx, &cli, &preload);
-                scope.spawn(move || {
+                // M1: un desborde de pila no se atrapa con catch_unwind (aborta el
+                // proceso entero). 256 MiB alcanzan para los 9 casos anidados
+                // conocidos; es reserva virtual, no RSS.
+                let spawned = std::thread::Builder::new()
+                    .name(format!("worker-{w}"))
+                    .stack_size(WORKER_STACK)
+                    .spawn_scoped(scope, move || {
                     let cfg = cli.preset.build(cli.minifier, cli.kind);
                     // Solo core_defaults cambia nombres: ahi cada divergencia se
                     // vuelve a probar con los nombres preservados (names_only).
                     let names_cfg = (cli.preset == minify::Preset::CoreDefaults)
                         .then(|| minify::Config::core_defaults_keep_names(cli.minifier, cli.kind));
-                    let runner = runner::Runner::new(preload, w, cli.timeout).with_kind(cli.kind);
+                    let runner = runner::Runner::new(preload, w, cli.timeout)
+                        .with_kind(cli.kind)
+                        .with_invocar(cli.invocar);
                     let mut stats = Stats::default();
                     loop {
+                        if CANCEL.load(Ordering::SeqCst) {
+                            break;
+                        }
                         let i = next.fetch_add(1, Ordering::Relaxed);
                         let Some(path) = files.get(i) else {
                             break;
@@ -450,9 +536,20 @@ fn main() {
                         }
                     }
                     stats
-                })
+                });
+                match spawned {
+                    Ok(h) => Some(h),
+                    Err(e) => {
+                        eprintln!("no pude crear el worker {w}: {e}");
+                        None
+                    }
+                }
             })
             .collect();
+        if workers.is_empty() {
+            eprintln!("no hay workers: nada que correr");
+            std::process::exit(1);
+        }
         for w in workers {
             match w.join() {
                 Ok(s) => stats.merge(&s),
@@ -461,6 +558,8 @@ fn main() {
         }
     });
 
+    let cancelled = CANCEL.load(Ordering::SeqCst);
+    reporter.finish(!cancelled);
     if let Err(e) = known.save() {
         eprintln!("no pude guardar known-sintomas.tsv: {e}");
     }
@@ -472,7 +571,47 @@ fn main() {
     if cli.mutaciones > 0 {
         println!("{}", stats.mutaciones.line());
     }
+    // M27 (a): una escritura perdida del reporter es un hallazgo perdido.
+    let lost = oracle::write_errors() - errors_before;
+    if lost > 0 && !cancelled {
+        eprintln!("el reporter no pudo escribir {lost} archivos en {}: la corrida no es confiable", cli.out.display());
+        drop(preload);
+        std::process::exit(1);
+    }
+    if cancelled {
+        eprintln!("corrida interrumpida: {} de {total} casos; el indice anterior quedo intacto", stats.total);
+        drop(preload);
+        std::process::exit(130);
+    }
 }
+
+/// M23: SIGINT/SIGTERM piden cortar: los workers terminan el caso actual (el
+/// runner mata el grupo de cada ejecucion, M2) y no toman otro; despues se
+/// guardan known-sintomas.tsv y lint-triage.tsv y se descarta el indice a
+/// medias. Una segunda senal sale en el acto (los restos los borra la proxima
+/// corrida, runner::clean_stale).
+static CANCEL: AtomicBool = AtomicBool::new(false);
+
+extern "C" fn on_signal(_: libc::c_int) {
+    if CANCEL.swap(true, Ordering::SeqCst) {
+        // SAFETY: _exit es async-signal-safe.
+        unsafe { libc::_exit(130) };
+    }
+}
+
+fn install_signal_handlers() {
+    let handler: extern "C" fn(libc::c_int) = on_signal;
+    for sig in [libc::SIGINT, libc::SIGTERM] {
+        // SAFETY: el handler solo toca un AtomicBool y llama a _exit.
+        unsafe {
+            libc::signal(sig, handler as libc::sighandler_t);
+        }
+    }
+}
+
+/// M1: pila de cada worker. Un fuente muy anidado (parse, minify, codegen o el
+/// reparseo de checks) desborda la pila por defecto (2 MiB) y aborta la corrida.
+const WORKER_STACK: usize = 256 << 20;
 
 /// Un caso del corpus, de punta a punta. Corre en el worker que lo tomo.
 fn process_case(
@@ -504,17 +643,22 @@ fn process_case(
             dead_writes,
         } => (original, minified, static_flags, dead_writes),
         minify::Outcome::ParseError { esm, script } => {
-            if esm {
+            let cause = if esm {
                 stats.parse_esm += 1;
+                "parse_esm"
             } else if script {
                 stats.parse_script += 1;
+                "parse_script"
             } else {
                 stats.parse_other += 1;
-            }
+                "parse_otro"
+            };
+            ctx.reporter.discard(rel, cause, Duration::ZERO);
             return;
         }
         minify::Outcome::CodegenError => {
             stats.codegen_error += 1;
+            ctx.reporter.discard(rel, "codegen", Duration::ZERO);
             return;
         }
         minify::Outcome::Panic(msg) => {
@@ -543,30 +687,58 @@ fn process_case(
     }
 
     // Precondicion del oraculo: el original termina solo (exit 0 o lanzando).
-    let a = ctx.cache.run(runner, &original, &mut stats.cache_hits);
+    let (a, a_cached) = ctx.cache.run(runner, &original, &mut stats.cache_hits);
     // Un SyntaxError antes de imprimir nada puede ser que node no acepta el
     // original como script: entonces no es un caso.
     if a.threw() && a.stdout.starts_with("!dz throw SyntaxError") && !runner.node_accepts(&original) {
         stats.a_invalid += 1;
+        ctx.reporter.discard(rel, "invalido", a.elapsed);
         return;
     }
     if let Status::Failed(e) = &a.status {
         stats.runner_failed += 1;
+        ctx.reporter.discard(rel, "runner", a.elapsed);
         eprintln!("runner: {e}");
         return;
     }
 
     // Mejora 10: variantes, solo si el original termina solo (si no, las
-    // variantes casi seguro tampoco, y cada una costaria un timeout).
-    if cli.mutaciones > 0 && a.completed() {
-        process_mutants(ctx, runner, cfg, names_cfg, cli, &mut stats.mutaciones, rel, &raw);
+    // variantes casi seguro tampoco, y cada una costaria un timeout). M18: y no
+    // si es mudo sin globals (las variantes se comparan solo por la pasada
+    // cruda: serian mudas), y DESPUES de comparar el base, para no reportar una
+    // variante que diverge igual que su base (dedup por kind).
+    let mutate = cli.mutaciones > 0 && a.completed() && !(a.ok_silent() && !a.has_globals());
+    let base_lint = dead_writes.1 > dead_writes.0;
+    stats.last_div = None;
+    compare_base(ctx, runner, cfg, names_cfg, cli, stats, rel, &raw, &original, &minified, &static_flags, a, a_cached);
+    if mutate {
+        let base_div = stats.last_div.take();
+        process_mutants(ctx, runner, cfg, names_cfg, cli, &mut stats.mutaciones, rel, &raw, base_div, base_lint);
     }
+}
 
+/// La comparacion del caso base (pasada cruda y, si es mudo, la observada).
+#[allow(clippy::too_many_arguments)]
+fn compare_base(
+    ctx: &Ctx,
+    runner: &runner::Runner,
+    cfg: &minify::Config,
+    names_cfg: Option<&minify::Config>,
+    cli: &Cli,
+    stats: &mut Stats,
+    rel: &Path,
+    raw: &str,
+    original: &str,
+    minified: &str,
+    static_flags: &[&'static str],
+    a: runner::Exec,
+    a_cached: bool,
+) {
     if a.ok_with_output() {
         if a.threw() {
             stats.threw += 1;
         }
-        if !compare_and_report(ctx, runner, stats, rel, &original, &minified, a, false, &static_flags, names_cfg) {
+        if !compare_and_report(ctx, runner, stats, rel, original, minified, a, a_cached, false, static_flags, names_cfg) {
             stats.same += 1;
         }
     } else if a.ok_silent() {
@@ -575,64 +747,90 @@ fn process_case(
         // como el de swc#12397 en un programa que no imprime). Los globals que
         // creo (lineas `!dz global`) entran en esta comparacion.
         let had_globals = a.has_globals();
-        if compare_and_report(ctx, runner, stats, rel, &original, &minified, a, false, &static_flags, names_cfg) {
+        if compare_and_report(ctx, runner, stats, rel, original, minified, a, a_cached, false, static_flags, names_cfg) {
             return;
         }
         if !cli.observe {
             stats.silent_no_observe += 1;
+            ctx.reporter.discard(rel, "mudo_sin_observar", Duration::ZERO);
             return;
         }
-        if cli.kind == minify::SourceKind::Module {
-            observe_module(ctx, runner, stats, rel, &original, &minified, &static_flags, names_cfg, had_globals);
+        // M12: en el carril B, primero el envoltorio que serializa los exports;
+        // un modulo sin exports cae al mismo epilogo que el carril A.
+        if cli.kind == minify::SourceKind::Module
+            && observe_module(ctx, runner, stats, rel, original, minified, static_flags, names_cfg)
+        {
             return;
         }
-        // Segunda pasada con el epilogo observador.
-        // El epilogo se agrega al fuente crudo y despues se aplica la forma: asi
-        // queda dentro de la funcion y ve los bindings.
-        let Some(instrumented) = minify::instrument(&raw, cli.invocar).map(|s| cli.forma.apply(&s)) else {
-            if had_globals {
-                stats.observed_globals += 1;
-                stats.same += 1;
-            } else {
-                stats.silent_unobservable += 1;
-            }
-            return;
-        };
-        let (original, minified, static_flags) = match minify::prepare(&instrumented, cfg) {
-            minify::Outcome::Ok {
-                original,
-                minified,
-                static_flags,
-                ..
-            } => (original, minified, static_flags),
-            minify::Outcome::Panic(msg) => {
-                stats.panics += 1;
-                ctx.reporter.panic(rel, &instrumented, &msg);
-                return;
-            }
-            // El fuente ya parseo sin el epilogo; si falla con el, es problema
-            // del instrumentador, no un hallazgo.
-            minify::Outcome::ParseError { .. } | minify::Outcome::CodegenError => {
-                stats.silent_unobservable += 1;
-                return;
-            }
-        };
-        let a = ctx.cache.run(runner, &original, &mut stats.cache_hits);
-        if !a.ok_with_output() {
-            stats.observed_not_ok += 1;
-            return;
-        }
-        stats.observed += 1;
-        if a.threw() {
-            stats.threw += 1;
-        }
-        if !compare_and_report(ctx, runner, stats, rel, &original, &minified, a, true, &static_flags, names_cfg) {
-            stats.same += 1;
-        }
-    } else if cli.kind == minify::SourceKind::Module && a.status == Status::Exited(runner::LINK_EXIT) {
+        observe_epilogue(ctx, runner, cfg, names_cfg, cli, stats, rel, raw, had_globals);
+    } else if a.link_failed() {
+        // M9: en los dos carriles (en A, un require de algo que no existe).
         stats.a_link += 1;
+        ctx.reporter.discard(rel, "enlace", a.elapsed);
     } else {
-        stats.discard_original(&a.status);
+        let cause = stats.discard_original(&a.status);
+        ctx.reporter.discard(rel, cause, a.elapsed);
+    }
+}
+
+/// Segunda pasada de un programa mudo: el epilogo observador (minify::instrument)
+/// sobre el fuente crudo, minificado y comparado de nuevo. Carril A, y desde M12
+/// tambien el carril B cuando el modulo no tiene exports.
+#[allow(clippy::too_many_arguments)]
+fn observe_epilogue(
+    ctx: &Ctx,
+    runner: &runner::Runner,
+    cfg: &minify::Config,
+    names_cfg: Option<&minify::Config>,
+    cli: &Cli,
+    stats: &mut Stats,
+    rel: &Path,
+    raw: &str,
+    had_globals: bool,
+) {
+    // Segunda pasada con el epilogo observador.
+    // El epilogo se agrega al fuente crudo y despues se aplica la forma: asi
+    // queda dentro de la funcion y ve los bindings.
+    let Some(instrumented) = minify::instrument(raw, cli.invocar, cli.kind).map(|s| cli.forma.apply(&s)) else {
+        if had_globals {
+            stats.observed_globals += 1;
+            stats.same += 1;
+        } else {
+            stats.silent_unobservable += 1;
+        }
+        return;
+    };
+    let (original, minified, static_flags) = match minify::prepare(&instrumented, cfg) {
+        minify::Outcome::Ok {
+            original,
+            minified,
+            static_flags,
+            ..
+        } => (original, minified, static_flags),
+        minify::Outcome::Panic(msg) => {
+            stats.panics += 1;
+            ctx.reporter.panic(rel, &instrumented, &msg);
+            return;
+        }
+        // El fuente ya parseo sin el epilogo; si falla con el, es problema
+        // del instrumentador, no un hallazgo.
+        minify::Outcome::ParseError { .. } | minify::Outcome::CodegenError => {
+            stats.silent_unobservable += 1;
+            return;
+        }
+    };
+    let (a, a_cached) = ctx.cache.run(runner, &original, &mut stats.cache_hits);
+    if !a.ok_with_output() {
+        stats.observed_not_ok += 1;
+        ctx.reporter.discard(rel, "observado_sin_salida", a.elapsed);
+        return;
+    }
+    stats.observed += 1;
+    if a.threw() {
+        stats.threw += 1;
+    }
+    if !compare_and_report(ctx, runner, stats, rel, &original, &minified, a, a_cached, true, &static_flags, names_cfg) {
+        stats.same += 1;
     }
 }
 
@@ -649,32 +847,27 @@ fn observe_module(
     minified: &str,
     static_flags: &[&'static str],
     names_cfg: Option<&minify::Config>,
-    had_globals: bool,
-) {
+) -> bool {
     let obs = runner.observing();
     let a = obs.run(original);
-    // Sin exports el envoltorio no imprime nada: el mismo caso que un script
-    // sin bindings top-level.
+    // Sin exports el envoltorio no imprime nada. M12: el llamador sigue con el
+    // epilogo (antes el caso quedaba en mudos_sin_bindings: 585 en B contra 84 en A).
     if a.ok_silent() {
-        if had_globals {
-            stats.observed_globals += 1;
-            stats.same += 1;
-        } else {
-            stats.silent_unobservable += 1;
-        }
-        return;
+        return false;
     }
     if !a.ok_with_output() {
         stats.observed_not_ok += 1;
-        return;
+        ctx.reporter.discard(rel, "observado_sin_salida", a.elapsed);
+        return true;
     }
     stats.observed += 1;
     if a.threw() {
         stats.threw += 1;
     }
-    if !compare_and_report(ctx, &obs, stats, rel, original, minified, a, true, static_flags, names_cfg) {
+    if !compare_and_report(ctx, &obs, stats, rel, original, minified, a, false, true, static_flags, names_cfg) {
         stats.same += 1;
     }
+    true
 }
 
 /// Precondicion de names_only: la salida del original puede mostrar nombres,
@@ -713,6 +906,59 @@ struct Ctx<'a> {
     known: &'a known::Known,
     cache: &'a cache::CacheA,
     triage: &'a triage::Triage,
+    /// M17: con `--minifier oxc --carril a`, el preset con el que se re-minifica
+    /// el original en estricto ante una divergencia no conocida. `None` en las
+    /// demas celdas.
+    strict_recheck: Option<minify::Preset>,
+    /// M13: con `--minifier oxc`, preset y carril para re-chequear el flag
+    /// `extends` (ver `extends_matters`). `None` con swc.
+    oxc_recheck: Option<(minify::Preset, minify::SourceKind)>,
+}
+
+/// M13: el flag `extends` (estatico) mira todo el programa: en 9460 un
+/// `class extends 1` atrapado a proposito tapaba un bug real (O5). Se cambia
+/// cada heredero literal por `null`, se minifica igual y se compara: si la
+/// divergencia sigue, `extends` no la explica (`false`). Si no hay nada que
+/// cambiar o algo falla, `true` (se conserva el flag, como antes).
+fn extends_matters(runner: &runner::Runner, recheck: (minify::Preset, minify::SourceKind), original: &str) -> bool {
+    let (preset, kind) = recheck;
+    let Some(neutral) = backend::swc::neutralize_extends(original, kind) else {
+        return true;
+    };
+    let cfg = preset.build(backend::Minifier::Oxc, kind);
+    let minify::Outcome::Ok { original: o2, minified: m2, .. } = minify::prepare(&neutral, &cfg) else {
+        return true;
+    };
+    let a2 = runner.run(&o2);
+    if !a2.completed() {
+        return true;
+    }
+    let b2 = runner.run(&m2);
+    matches!(oracle::compare(&a2, &b2), oracle::Verdict::Same)
+}
+
+/// M17: oxc no soporta sloppy (D1 del CLAUDE.md). Ante una divergencia de oxc
+/// en el carril A: si el original con `"use strict"` es valido para node y la
+/// divergencia desaparece al minificarlo asi, es "solo sloppy" (`Ok(true)`). Si
+/// no es estricto-valido, `Err(nota)`: queda en div/ para confirmar en el
+/// carril B. Se minifica el original ya impreso: es el mismo programa.
+fn sloppy_only(runner: &runner::Runner, preset: minify::Preset, original: &str, a: &runner::Exec) -> Result<bool, &'static str> {
+    let strict = format!("\"use strict\";\n{original}");
+    if !runner.node_accepts(&strict) {
+        return Err("no es estricto-valido: confirmar en el carril B");
+    }
+    let cfg = preset.build(backend::Minifier::Oxc, minify::SourceKind::Script);
+    let minify::Outcome::Ok { original: o2, minified: m2, .. } = minify::prepare(&strict, &cfg) else {
+        return Ok(false);
+    };
+    let a2 = runner.run(&o2);
+    // Si en estricto el original muere antes (y en sloppy no), no hay nada que
+    // comparar: no se lo da por sloppy.
+    if !a2.completed() || (a2.threw() && !a.threw()) {
+        return Ok(false);
+    }
+    let b2 = runner.run(&m2);
+    Ok(matches!(oracle::compare(&a2, &b2), oracle::Verdict::Same))
 }
 
 /// Corre B y compara contra A (que ya termino con exit 0). Devuelve `true` si
@@ -728,6 +974,7 @@ fn compare_and_report(
     original: &str,
     minified: &str,
     a: runner::Exec,
+    a_cached: bool,
     observed: bool,
     static_flags: &[&'static str],
     names_cfg: Option<&minify::Config>,
@@ -742,12 +989,23 @@ fn compare_and_report(
     let b = runner.run(minified);
     if let Status::Failed(e) = &b.status {
         stats.runner_failed += 1;
+        ctx.reporter.discard(rel, "runner", b.elapsed);
         eprintln!("runner: {e}");
         return true;
     }
+    let (a, b) = match confirm(ctx, runner, stats, rel, original, minified, a, a_cached, b) {
+        Confirmed::Same => return false,
+        Confirmed::Nondeterministic => return true,
+        Confirmed::Divergence(ab) => *ab,
+    };
     match oracle::compare(&a, &b) {
         oracle::Verdict::Same => false,
         oracle::Verdict::Divergence(kind) => {
+            stats.last_div = Some(kind);
+            if stats.skip_kind == Some(kind) {
+                stats.inherited += 1;
+                return true;
+            }
             // Una asuncion habla del programa de entrada: clasifican los flags de A
             // y los estaticos del original. Un flag solo en B es algo que el
             // minificado hace y el original no (p. ej. el .stack que Node lee al
@@ -764,18 +1022,44 @@ fn compare_and_report(
                     flags.push("contenido_irrelevante");
                 }
             }
+            // M16: la salida puede depender del limite de pila de V8 y no del
+            // programa (1000 funciones anidadas, una recursion que atrapa el
+            // RangeError y devuelve cuantos frames entraron). Si A con el doble de
+            // pila da otra salida, la divergencia depende de la profundidad del
+            // motor. DESVIO de la propuesta: se prueba ante toda divergencia
+            // confirmada, no solo si la salida dice "RangeError" (corpus-invocar/37
+            // lo atrapa y no lo imprime). Cuesta una ejecucion por divergencia.
+            let deep = runner.run_with_args(original, &[runner::DEEP_STACK]);
+            if !matches!(deep.status, Status::Failed(_)) && !same_exec(&deep, &a) {
+                flags.push("profundidad");
+            }
             let flags_b: Vec<&str> = b.flags.iter().map(String::as_str).collect();
             if names_cfg.is_some_and(|c| names_visible(original, &a.stdout) && names_only(runner, c, original, &a)) {
                 flags.push("nombres");
             }
+            if flags.contains(&"extends") {
+                if let Some(rc) = ctx.oxc_recheck {
+                    if !extends_matters(runner, rc, original) {
+                        flags.retain(|f| *f != "extends");
+                        flags.push("extends_irrelevante");
+                    }
+                }
+            }
             let mut why = ctx.known.classify(rel, &flags);
+            let mut strict_note = None;
+            if let (None, Some(preset)) = (&why, ctx.strict_recheck) {
+                match sloppy_only(runner, preset, original, &a) {
+                    Ok(true) => {
+                        flags.push("solo_sloppy");
+                        why = Some("oxc: solo sloppy (no soportado); con \"use strict\" la divergencia desaparece".into());
+                    }
+                    Ok(false) => {}
+                    Err(nota) => strict_note = Some(nota.to_string()),
+                }
+            }
             // Una conocida que cambia de sintoma deja de estar cubierta.
             let drift = why.as_ref().and_then(|w| {
-                let h = known::fnv1a(&[
-                    format!("{kind:?}").as_str(),
-                    oracle::normalize_names(&a.stdout).as_str(),
-                    oracle::normalize_names(&b.stdout).as_str(),
-                ]);
+                let h = oracle::symptom(kind, &a, &b);
                 ctx.known
                     .record_symptom(rel, h)
                     .err()
@@ -801,13 +1085,88 @@ fn compare_and_report(
                 kind,
                 observed,
                 why.as_deref(),
-                drift.as_deref(),
+                drift.as_deref().or(strict_note.as_deref()),
                 &flags,
                 &flags_b,
+                if a_cached { "hit (confirmado con una corrida fresca)" } else { "miss" },
             );
             true
         }
     }
+}
+
+/// M3: resultado de confirmar una comparacion antes de clasificarla.
+enum Confirmed {
+    Same,
+    /// A no se reproduce a si mismo: el caso se descarta (`no_determinista`).
+    Nondeterministic,
+    /// La divergencia sigue con este A y este B.
+    Divergence(Box<(runner::Exec, runner::Exec)>),
+}
+
+/// A y A' dicen lo mismo para el oraculo (status y stdout normalizado).
+fn same_exec(x: &runner::Exec, y: &runner::Exec) -> bool {
+    x.status == y.status && oracle::normalize_names(&x.stdout) == oracle::normalize_names(&y.stdout)
+}
+
+/// M3: ninguna divergencia se reporta sin confirmar.
+/// - B en Timeout: se reintenta con `max(4 x timeout, 20 x a.elapsed)`; si
+///   ahora termina, se compara con eso (un Timeout por carga no es hallazgo).
+/// - A de la cache: se corre A en fresco. Si difiere, la entrada esta envenenada
+///   (depende de ppid, worker, cwd, otra corrida): lapida y se sigue con el A fresco.
+/// - Si la divergencia sigue y A no fue confirmado por una corrida fresca, se
+///   corre A otra vez: si no se reproduce, el caso es no determinista.
+#[allow(clippy::too_many_arguments)]
+fn confirm(
+    ctx: &Ctx,
+    runner: &runner::Runner,
+    stats: &mut Stats,
+    rel: &Path,
+    original: &str,
+    minified: &str,
+    a: runner::Exec,
+    a_cached: bool,
+    b: runner::Exec,
+) -> Confirmed {
+    let diverges = |a: &runner::Exec, b: &runner::Exec| matches!(oracle::compare(a, b), oracle::Verdict::Divergence(_));
+    let (mut a, mut b) = (a, b);
+    if !diverges(&a, &b) {
+        return Confirmed::Same;
+    }
+    if b.status == Status::Timeout {
+        let longer = (runner.timeout() * 4).max(a.elapsed * 20);
+        let b2 = runner.run_with_timeout(minified, longer);
+        if !matches!(b2.status, Status::Timeout | Status::Failed(_)) {
+            b = b2;
+            if !diverges(&a, &b) {
+                return Confirmed::Same;
+            }
+        }
+    }
+    let mut fresh_ok = false;
+    if a_cached {
+        let a1 = runner.run(original);
+        if same_exec(&a1, &a) {
+            // M21: el A fresco (su elapsed es de esta corrida, no de la cacheada).
+            a = a1;
+            fresh_ok = true;
+        } else if !matches!(a1.status, Status::Failed(_)) {
+            ctx.cache.tombstone(original);
+            a = a1;
+            if !diverges(&a, &b) {
+                return Confirmed::Same;
+            }
+        }
+    }
+    if !fresh_ok {
+        let a2 = runner.run(original);
+        if !matches!(a2.status, Status::Failed(_)) && !same_exec(&a2, &a) {
+            stats.a_nondet += 1;
+            ctx.reporter.discard(rel, "no_determinista", a2.elapsed);
+            return Confirmed::Nondeterministic;
+        }
+    }
+    Confirmed::Divergence(Box::new((a, b)))
 }
 
 /// Contadores de las variantes (mejora 10). `comparadas` = iguales + divergencias
@@ -828,6 +1187,10 @@ struct MutStats {
     /// La variante no pasa por el minifier (parse o codegen).
     parse: usize,
     runner: usize,
+    /// M15: casos cuyo base no parsea en el carril de la corrida: 0 variantes.
+    no_parsea: usize,
+    /// M18: variantes que divergen con el mismo kind que su base: no se reportan.
+    heredadas: usize,
 }
 
 impl MutStats {
@@ -843,22 +1206,26 @@ impl MutStats {
         self.original += o.original;
         self.parse += o.parse;
         self.runner += o.runner;
+        self.no_parsea += o.no_parsea;
+        self.heredadas += o.heredadas;
     }
 
     fn line(&self) -> String {
         format!(
-            "mutaciones: variantes={} comparadas={} iguales={} DIVERGENCIAS={} conocidas={} PANICS={} LINT={} | descartadas: mudas={} original={} parse={} runner={}",
+            "mutaciones: variantes={} comparadas={} iguales={} DIVERGENCIAS={} conocidas={} heredadas={} PANICS={} LINT={} | descartadas: mudas={} original={} parse={} runner={} | bases_sin_parse={}",
             self.variantes,
             self.comparadas,
             self.iguales,
             self.divergencias,
             self.conocidas,
+            self.heredadas,
             self.panics,
             self.lint,
             self.mudas,
             self.original,
             self.parse,
             self.runner,
+            self.no_parsea,
         )
     }
 }
@@ -877,8 +1244,15 @@ fn process_mutants(
     m: &mut MutStats,
     rel: &Path,
     raw: &str,
+    base_div: Option<oracle::Kind>,
+    base_lint: bool,
 ) {
-    for (k, v) in mutate::variants(raw, cli.mutaciones, known::fnv1a(&[raw])).into_iter().enumerate() {
+    // M15: segun el carril. Un base que no parsea queda contado (no_parsea).
+    let Some(vs) = mutate::variants_for(raw, cli.mutaciones, known::fnv1a(&[raw]), cli.kind) else {
+        m.no_parsea += 1;
+        return;
+    };
+    for (k, v) in vs.into_iter().enumerate() {
         m.variantes += 1;
         let rel = mutate::rel_variante(rel, k + 1);
         let desc = format!("{}\n", v.desc);
@@ -902,7 +1276,8 @@ fn process_mutants(
                 continue;
             }
         };
-        if dead_writes.1 > dead_writes.0 {
+        // M18: si el base ya fue lint, el de la variante casi siempre es el mismo.
+        if dead_writes.1 > dead_writes.0 && !base_lint {
             // Mismo triage que el caso (lint-triage.tsv): una variante
             // equivalente ya mirada no vuelve a lint/.
             if let triage::Lint::Reportar(note) = ctx.triage.check(&rel, &minified) {
@@ -934,11 +1309,15 @@ fn process_mutants(
             continue;
         }
         m.comparadas += 1;
-        let mut s = Stats::default();
-        compare_and_report(ctx, runner, &mut s, &rel, &original, &minified, a, false, &static_flags, names_cfg);
+        let mut s = Stats { skip_kind: base_div, ..Stats::default() };
+        compare_and_report(ctx, runner, &mut s, &rel, &original, &minified, a, false, false, &static_flags, names_cfg);
         m.divergencias += s.divergences;
         m.conocidas += s.known;
+        m.heredadas += s.inherited;
         m.runner += s.runner_failed;
+        if s.inherited > 0 {
+            continue;
+        }
         if s.divergences + s.known > 0 {
             ctx.reporter.attach(&rel, &files);
         } else if s.runner_failed == 0 {
@@ -1001,8 +1380,10 @@ mod tests {
             known: &known,
             cache: &cache,
             triage: &triage,
+            strict_recheck: None,
+            oxc_recheck: None,
         };
-        let preload = runner::Preload::write().unwrap();
+        let preload = runner::Preload::write_tagged("identico").unwrap();
         let r = runner::Runner::new(&preload, 999, std::time::Duration::from_secs(5));
         // A inventado: si B corriera de verdad, imprimiria "1" y divergeria.
         let a = || runner::Exec {
@@ -1011,19 +1392,74 @@ mod tests {
             stderr: String::new(),
             flags: Vec::new(),
             elapsed: std::time::Duration::ZERO,
+            ctl: String::new(),
         };
         let js = "console.log(1);\n";
         let mut st = Stats::default();
         let rel = Path::new("x/input.js");
-        assert!(!compare_and_report(&ctx, &r, &mut st, rel, js, js, a(), false, &[], None));
+        assert!(!compare_and_report(&ctx, &r, &mut st, rel, js, js, a(), false, false, &[], None));
         assert_eq!((st.identical, st.divergences), (1, 0));
         // En la pasada observada tambien se saltea, pero no se cuenta dos veces.
-        assert!(!compare_and_report(&ctx, &r, &mut st, rel, js, js, a(), true, &[], None));
+        assert!(!compare_and_report(&ctx, &r, &mut st, rel, js, js, a(), false, true, &[], None));
         assert_eq!(st.identical, 1);
-        // Control: con un minificado distinto B si corre (y diverge contra el A inventado).
-        assert!(compare_and_report(&ctx, &r, &mut st, rel, js, "console.log(2);\n", a(), false, &[], None));
-        assert_eq!(st.identical, 1);
+        // Control: con un minificado distinto B si corre y diverge contra el A
+        // inventado. M3: antes de reportar se corre A en fresco, que no da lo
+        // inventado: el caso se cierra (true) como no determinista, no como div.
+        assert!(compare_and_report(&ctx, &r, &mut st, rel, js, "console.log(2);\n", a(), false, false, &[], None));
+        assert_eq!((st.identical, st.divergences, st.a_nondet), (1, 0, 1));
+        // Con el A real la divergencia se confirma.
+        let real = r.run(js);
+        assert!(compare_and_report(&ctx, &r, &mut st, rel, js, "console.log(2);\n", real, false, false, &[], None));
+        assert_eq!((st.divergences, st.a_nondet), (1, 1));
+        // M18 (a): una variante que diverge con el mismo kind que su base no se reporta.
+        let mut sk = Stats { skip_kind: Some(oracle::Kind::Stdout), ..Stats::default() };
+        let real = r.run(js);
+        assert!(compare_and_report(&ctx, &r, &mut sk, rel, js, "console.log(2);\n", real, false, false, &[], None));
+        assert_eq!((sk.inherited, sk.divergences, sk.last_div), (1, 0, Some(oracle::Kind::Stdout)));
         std::fs::remove_dir_all(&d).unwrap();
+    }
+
+    /// M17: "solo sloppy" exige que el original sea estricto-valido y que la
+    /// divergencia desaparezca en estricto. Un bug real (O1) no se esconde.
+    #[test]
+    fn oxc_solo_sloppy() {
+        use super::{minify::Preset, runner, sloppy_only};
+        if std::process::Command::new("node").arg("--version").output().is_err() {
+            eprintln!("sin node en PATH: test omitido");
+            return;
+        }
+        let preload = runner::Preload::write_tagged("m17").unwrap();
+        let r = runner::Runner::new(&preload, 998, std::time::Duration::from_secs(20));
+        let sloppy = "function f() { return this === undefined; }\nconsole.log(f());\n";
+        let a = r.run(sloppy);
+        assert_eq!(a.stdout, "false\n");
+        assert_eq!(sloppy_only(&r, Preset::CarrilA, sloppy, &a), Ok(true));
+        let with = "with ({}) { console.log(1); }\n";
+        assert!(sloppy_only(&r, Preset::CarrilA, with, &r.run(with)).is_err());
+        let o1 = "const __proto__ = 0;\nconsole.log(Object.keys({ __proto__ }));\n";
+        assert_eq!(sloppy_only(&r, Preset::CoreDefaults, o1, &r.run(o1)), Ok(false));
+    }
+
+    /// M24: --cruce pasa por Cli::parse.
+    #[test]
+    fn cruce_en_la_cli() {
+        use super::Cli;
+        let p = |v: &[&str]| Cli::parse(v.iter().map(|s| s.to_string()).collect());
+        assert_eq!(p(&["--cruce", "ix"]).unwrap().cruce.as_deref(), Some(std::path::Path::new("ix")));
+        assert!(p(&["--cruce", "ix", "--jobs", "2"]).unwrap().cruce.is_some());
+        assert!(p(&["--cruce", "ix", "corpus"]).is_err());
+        assert!(p(&["--cruce"]).is_err());
+        assert!(p(&["corpus"]).unwrap().cruce.is_none());
+    }
+
+    /// M27 (b) y (c).
+    #[test]
+    fn cli_rechaza_timeout_cero_y_dos_corpus() {
+        use super::Cli;
+        let p = |v: &[&str]| Cli::parse(v.iter().map(|s| s.to_string()).collect());
+        assert!(p(&["c", "--timeout-ms", "0"]).err().is_some_and(|e| e.contains(">= 1")));
+        assert!(p(&["c", "--timeout-ms", "1"]).is_ok());
+        assert!(p(&["c1", "c2"]).err().is_some_and(|e| e.contains("sobra c2")));
     }
 
     #[test]

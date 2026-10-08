@@ -21,7 +21,14 @@ oxc_allocator = "=0.153.0"
 oxc_codegen   = "=0.153.0"
 oxc_minifier  = "=0.153.0"
 oxc_parser    = "=0.153.0"
+# M19: SemanticBuilder::with_check_syntax_error (errores tempranos que el parser
+# deja a la semantica). Ya estaba en Cargo.lock como dependencia de oxc_minifier.
+oxc_semantic  = "=0.153.0"
 oxc_span      = "=0.153.0"
+
+# M2: kill(-pgid) para matar el grupo de procesos del programa (hijos que heredan
+# el stdout). Ya estaba en Cargo.lock como dependencia transitiva (0.2.189).
+libc = "0.2"
 
 # Los ganchos de diagnostico del minifier (debug_assert_valid, SWC_CHECK, SWC_RUN)
 # solo existen con debug_assertions. Release por velocidad, asserts por senal (delta v1.2 §2.3).

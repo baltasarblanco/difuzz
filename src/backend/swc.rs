@@ -16,7 +16,7 @@ use swc_ecma_minifier::{
         TopLevelOptions,
     },
 };
-use swc_ecma_parser::{parse_file_as_module, parse_file_as_script, Syntax};
+use swc_ecma_parser::{parse_file_as_module, parse_file_as_script, EsSyntax, Syntax};
 use swc_ecma_transforms_base::{
     fixer::{fixer, paren_remover},
     resolver,
@@ -220,14 +220,22 @@ fn prepare_inner(src: &str, cfg: &Swc) -> Outcome {
 
 /// Parse sin errores recuperados, como script o como modulo segun el carril.
 /// `None` si el parser rechaza el fuente o lo acepta recuperando errores.
-fn parse_program(fm: &SourceFile, kind: SourceKind) -> Option<Program> {
+pub(crate) fn parse_program(fm: &SourceFile, kind: SourceKind) -> Option<Program> {
     let mut recovered = Vec::new();
     let program = match kind {
-        SourceKind::Script => {
-            parse_file_as_script(fm, Syntax::default(), EsVersion::latest(), None, &mut recovered)
-                .ok()
-                .map(Program::Script)
-        }
+        // M19: el carril A es CommonJS: `return` top-level es valido (node lo
+        // envuelve en una funcion) y oxc (`cjs()`) lo acepta. `new.target`
+        // top-level tambien es valido en CJS, pero SWC no tiene opcion para eso
+        // (NO SE si existe): sigue siendo descarte `parse`.
+        SourceKind::Script => parse_file_as_script(
+            fm,
+            Syntax::Es(EsSyntax { allow_return_outside_function: true, ..Default::default() }),
+            EsVersion::latest(),
+            None,
+            &mut recovered,
+        )
+        .ok()
+        .map(Program::Script),
         SourceKind::Module => {
             parse_file_as_module(fm, Syntax::default(), EsVersion::latest(), None, &mut recovered)
                 .ok()
@@ -235,6 +243,56 @@ fn parse_program(fm: &SourceFile, kind: SourceKind) -> Option<Program> {
         }
     };
     program.filter(|_| recovered.is_empty())
+}
+
+/// Nota transversal 2 (M12, M14, M15): parse con SWC de un texto suelto, segun
+/// el carril (script o modulo), sin errores recuperados. Un solo helper para el
+/// epilogo observador, los chequeos sobre texto de otro backend y las mutaciones.
+pub fn parse_for(src: &str, kind: SourceKind) -> Option<Program> {
+    let cm: Lrc<SourceMap> = Default::default();
+    let fm = cm.new_source_file(FileName::Anon.into(), src.to_string());
+    parse_program(&fm, kind)
+}
+
+/// M13 (re-chequeo de `extends`): el mismo programa con cada heredero literal
+/// (`class extends 1`, regex, array, objeto, template) cambiado por `null`, que
+/// no lanza al definir la clase. `None` si no parsea o no hay nada que cambiar.
+pub fn neutralize_extends(src: &str, kind: SourceKind) -> Option<String> {
+    use swc_ecma_ast::{Class, Expr, Lit, Null};
+    use swc_ecma_visit::{VisitMut, VisitMutWith};
+    struct N(bool);
+    impl VisitMut for N {
+        fn visit_mut_class(&mut self, c: &mut Class) {
+            if let Some(sup) = c.super_class.as_mut() {
+                let mut e: &Expr = sup;
+                while let Expr::Paren(p) = e {
+                    e = &p.expr;
+                }
+                let lit = matches!(e, Expr::Lit(l) if !matches!(l, Lit::Null(_)))
+                    || matches!(e, Expr::Array(_) | Expr::Object(_) | Expr::Tpl(_));
+                if lit {
+                    **sup = Expr::Lit(Lit::Null(Null { span: Default::default() }));
+                    self.0 = true;
+                }
+            }
+            c.visit_mut_children_with(self);
+        }
+    }
+    catch_unwind(AssertUnwindSafe(|| {
+        GLOBALS.set(&Globals::new(), || {
+            let cm: Lrc<SourceMap> = Default::default();
+            let fm = cm.new_source_file(FileName::Anon.into(), src.to_string());
+            let mut program = parse_program(&fm, kind)?;
+            let mut n = N(false);
+            program.visit_mut_with(&mut n);
+            if !n.0 {
+                return None;
+            }
+            emit(cm, &program.apply(fixer(None))).ok()
+        })
+    }))
+    .ok()
+    .flatten()
 }
 
 /// Solo para el desglose de descartes: distingue ESM de sintaxis rechazada.
@@ -264,37 +322,25 @@ fn emit(cm: Lrc<SourceMap>, program: &Program) -> Result<String, String> {
 /// `minified` (los textos que imprimio el otro backend) dan dead_writes. Un
 /// texto que SWC no acepta (o un panic de SWC) cuenta como sin flags y 0
 /// escrituras: un panic aca no es un hallazgo del backend medido.
+///
+/// M14: se parsea segun el carril (`kind`). Antes siempre como script: en el
+/// carril B un modulo con import/export no parseaba y quedaba sin flags ni lint.
 pub fn checks_on_text(
     src: &str,
     original: &str,
     minified: &str,
+    kind: SourceKind,
 ) -> (Vec<&'static str>, (usize, usize)) {
     catch_unwind(AssertUnwindSafe(|| {
         GLOBALS.set(&Globals::new(), || {
             let static_flags =
-                parse_script(src).map_or_else(Vec::new, |p| crate::checks::static_flags(&p));
+                parse_for(src, kind).map_or_else(Vec::new, |p| crate::checks::static_flags(&p));
             let dead =
-                |text: &str| parse_script(text).map_or(0, |p| crate::checks::dead_writes(&p));
+                |text: &str| parse_for(text, kind).map_or(0, |p| crate::checks::dead_writes(&p));
             (static_flags, (dead(original), dead(minified)))
         })
     }))
     .unwrap_or_default()
-}
-
-fn parse_script(src: &str) -> Option<Program> {
-    let cm: Lrc<SourceMap> = Default::default();
-    let fm = cm.new_source_file(FileName::Anon.into(), src.to_string());
-    let mut recovered = Vec::new();
-    match parse_file_as_script(
-        &fm,
-        Syntax::default(),
-        EsVersion::latest(),
-        None,
-        &mut recovered,
-    ) {
-        Ok(s) if recovered.is_empty() => Some(Program::Script(s)),
-        _ => None,
-    }
 }
 
 #[cfg(test)]
@@ -327,6 +373,19 @@ mod tests {
             cfg.prepare("let = ;"),
             Outcome::ParseError { esm: false, script: false }
         ));
+        // M19: `return` top-level es CommonJS valido en el carril A, no en el B.
+        assert!(matches!(Swc::carril_a().prepare("console.log(1);\nreturn;\n"), Outcome::Ok { .. }));
+        assert!(matches!(cfg.prepare("console.log(1);\nreturn;\n"), Outcome::ParseError { .. }));
+    }
+
+    /// M13: los herederos literales pasan a `null`; los demas no se tocan.
+    #[test]
+    fn neutraliza_extends_literales() {
+        use super::neutralize_extends;
+        let out = neutralize_extends("class A extends 1 {}\nvar B = class extends ([2]) {};\nclass C extends A {}\n", SourceKind::Script).unwrap();
+        assert_eq!(out.matches("extends null").count(), 2, "{out}");
+        assert!(out.contains("extends A"), "{out}");
+        assert!(neutralize_extends("class C extends D {}\n", SourceKind::Script).is_none());
     }
 
     #[test]

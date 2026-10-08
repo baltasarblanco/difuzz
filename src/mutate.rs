@@ -22,9 +22,12 @@ use std::path::{Path, PathBuf};
 use swc_common::{
     sync::Lrc, FileName, Globals, SourceMap, SourceMapper, Span, Spanned, DUMMY_SP, GLOBALS,
 };
-use swc_ecma_ast::{EsVersion, Expr, Ident, Lit, Number, Program, Stmt, Str, UnaryExpr, UnaryOp};
+use swc_ecma_ast::{
+    Decl, Expr, Ident, Lit, ModuleItem, Number, Pat, Program, Stmt, Str, UnaryExpr, UnaryOp, VarDeclKind,
+};
 use swc_ecma_codegen::{text_writer::JsWriter, Emitter};
-use swc_ecma_parser::{parse_file_as_script, Syntax};
+
+use crate::minify::SourceKind;
 use swc_ecma_transforms_base::fixer::fixer;
 use swc_ecma_visit::{VisitMut, VisitMutWith};
 
@@ -141,10 +144,38 @@ impl Mutator {
     }
 }
 
+/// M18 (e): `"use strict"` y otras directivas del prologo (strings sueltos al
+/// principio de una lista de sentencias) no se borran ni se perturban: cambian
+/// el modo del programa, no prueban el minifier.
+fn is_directive(s: &Stmt) -> bool {
+    matches!(s, Stmt::Expr(e) if matches!(&*e.expr, Expr::Lit(Lit::Str(_))))
+}
+
+/// M18 (b): borrar una declaracion `var x = e` deja `x` sin declarar (global
+/// implicito, ruido sloppy). En su lugar se borra el inicializador: `var x`.
+/// `const` pasa a `let` (un const sin inicializador no parsea). Con patrones
+/// (`var {a} = o`) no se puede: `false`, y el llamador borra la sentencia.
+fn strip_init(s: &mut Stmt) -> bool {
+    let Stmt::Decl(Decl::Var(v)) = s else {
+        return false;
+    };
+    if !v.decls.iter().any(|d| d.init.is_some()) || !v.decls.iter().all(|d| matches!(d.name, Pat::Ident(_))) {
+        return false;
+    }
+    if v.kind == VarDeclKind::Const {
+        v.kind = VarDeclKind::Let;
+    }
+    for d in &mut v.decls {
+        d.init = None;
+    }
+    true
+}
+
 impl VisitMut for Mutator {
     fn visit_mut_stmts(&mut self, n: &mut Vec<Stmt>) {
         let mut doomed = None;
-        for (i, s) in n.iter_mut().enumerate() {
+        let prologue = n.iter().take_while(|s| is_directive(s)).count();
+        for (i, s) in n.iter_mut().enumerate().skip(prologue) {
             let id = self.stmts;
             self.stmts += 1;
             if self.op == Some(Op::Delete(id)) {
@@ -154,7 +185,37 @@ impl VisitMut for Mutator {
             s.visit_mut_with(self);
         }
         if let Some(i) = doomed {
-            n.remove(i);
+            if !strip_init(&mut n[i]) {
+                n.remove(i);
+            }
+        }
+    }
+
+    /// M15: la lista top-level de un modulo. Solo se borran sentencias; los
+    /// import/export no (borrarlos rompe el enlace o la forma del modulo), pero
+    /// se recorren (un `export function` tiene sentencias adentro).
+    fn visit_mut_module_items(&mut self, n: &mut Vec<ModuleItem>) {
+        let mut doomed = None;
+        let prologue = n.iter().take_while(|it| matches!(it, ModuleItem::Stmt(s) if is_directive(s))).count();
+        for (i, item) in n.iter_mut().enumerate().skip(prologue) {
+            if let ModuleItem::Stmt(s) = item {
+                let id = self.stmts;
+                self.stmts += 1;
+                if self.op == Some(Op::Delete(id)) {
+                    doomed = Some(i);
+                    self.hit = Some(s.span());
+                }
+            }
+            item.visit_mut_with(self);
+        }
+        if let Some(i) = doomed {
+            let stripped = match &mut n[i] {
+                ModuleItem::Stmt(s) => strip_init(s),
+                _ => false,
+            };
+            if !stripped {
+                n.remove(i);
+            }
         }
     }
 
@@ -187,27 +248,33 @@ impl VisitMut for Mutator {
     }
 }
 
-/// Hasta `n` variantes de `src`, distintas entre si y del original. Menos si el
-/// programa no da para tantas; ninguna si no parsea como script.
+/// Carril A (script): las de siempre. Solo para los tests.
+#[cfg(test)]
 pub fn variants(src: &str, n: usize, seed: u64) -> Vec<Variant> {
-    if n == 0 {
-        return Vec::new();
-    }
-    catch_unwind(AssertUnwindSafe(|| {
-        GLOBALS.set(&Globals::new(), || variants_inner(src, n, seed))
-    }))
-    .unwrap_or_default()
+    variants_for(src, n, seed, SourceKind::Script).unwrap_or_default()
 }
 
-fn variants_inner(src: &str, n: usize, seed: u64) -> Vec<Variant> {
+/// Hasta `n` variantes de `src`, distintas entre si y del original. Menos si el
+/// programa no da para tantas. M15: se parsea, reparsea e imprime segun el
+/// carril (`kind`); `None` si el base no parsea (MutStats.no_parsea), para que
+/// no quede como "0 variantes" en silencio.
+pub fn variants_for(src: &str, n: usize, seed: u64, kind: SourceKind) -> Option<Vec<Variant>> {
+    if n == 0 {
+        return Some(Vec::new());
+    }
+    catch_unwind(AssertUnwindSafe(|| {
+        GLOBALS.set(&Globals::new(), || variants_inner(src, n, seed, kind))
+    }))
+    .unwrap_or(Some(Vec::new()))
+}
+
+fn variants_inner(src: &str, n: usize, seed: u64, kind: SourceKind) -> Option<Vec<Variant>> {
     let cm: Lrc<SourceMap> = Default::default();
-    let Some(program) = parse(&cm, src) else {
-        return Vec::new();
-    };
+    let program = parse(&cm, src, kind)?;
     let mut census = Mutator::new(None);
     program.clone().visit_mut_with(&mut census);
     let Some(base) = print(&cm, program.clone()) else {
-        return Vec::new();
+        return Some(Vec::new());
     };
 
     let mut dels: Vec<Op> = (0..census.stmts).map(Op::Delete).collect();
@@ -245,7 +312,7 @@ fn variants_inner(src: &str, n: usize, seed: u64) -> Vec<Variant> {
         };
         // Variante que reimprime igual que otra (o que el original): no agrega nada.
         // Variante que no reparsea: el fixer no alcanzo; se descarta.
-        if seen.contains(&text) || parse(&Lrc::new(SourceMap::default()), &text).is_none() {
+        if seen.contains(&text) || parse(&Lrc::new(SourceMap::default()), &text, kind).is_none() {
             continue;
         }
         seen.insert(text.clone());
@@ -254,7 +321,7 @@ fn variants_inner(src: &str, n: usize, seed: u64) -> Vec<Variant> {
             src: text,
         });
     }
-    out
+    Some(out)
 }
 
 fn describe(cm: &SourceMap, op: Op, hit: Span) -> String {
@@ -275,13 +342,11 @@ fn describe(cm: &SourceMap, op: Op, hit: Span) -> String {
     }
 }
 
-fn parse(cm: &Lrc<SourceMap>, src: &str) -> Option<Program> {
+/// Nota transversal 2: el mismo parse por carril que backend/swc.rs (con este
+/// SourceMap, que `describe` usa para el fragmento).
+fn parse(cm: &Lrc<SourceMap>, src: &str, kind: SourceKind) -> Option<Program> {
     let fm = cm.new_source_file(FileName::Anon.into(), src.to_string());
-    let mut recovered = Vec::new();
-    match parse_file_as_script(&fm, Syntax::default(), EsVersion::latest(), None, &mut recovered) {
-        Ok(s) if recovered.is_empty() => Some(Program::Script(s)),
-        _ => None,
-    }
+    crate::backend::swc::parse_program(&fm, kind)
 }
 
 /// El mismo printer que minify::emit, sin modo minify: la variante se lee a mano
@@ -357,8 +422,23 @@ mod tests {
 
     fn parses(src: &str) -> bool {
         swc_common::GLOBALS.set(&Default::default(), || {
-            super::parse(&Default::default(), src).is_some()
+            super::parse(&Default::default(), src, crate::minify::SourceKind::Script).is_some()
         })
+    }
+
+    /// M15: un modulo (import/export/await top-level) genera variantes en el
+    /// carril B, y no parsea en el A (None, no "0 variantes").
+    #[test]
+    fn variantes_de_modulos() {
+        use super::variants_for;
+        use crate::minify::SourceKind;
+        let esm = "import { x } from './y.mjs';\nexport const a = 1;\nconst b = await x;\nconsole.log(a + 2, \"s\", b);\n";
+        let vs = variants_for(esm, 4, 1, SourceKind::Module).expect("parsea como modulo");
+        assert!(!vs.is_empty());
+        for v in &vs {
+            assert!(v.src.contains("import") && v.src.contains("export"), "{}", v.src);
+        }
+        assert!(variants_for(esm, 4, 1, SourceKind::Script).is_none());
     }
 
     #[test]
@@ -411,6 +491,22 @@ mod tests {
         // -0 como base de ** necesita parentesis.
         let pow = variants("var p = 2 ** 3;\n", 100, 3);
         assert!(pow.iter().any(|v| v.src.contains("(-0) ** 3")), "{:#?}", pow.iter().map(|v| &v.src).collect::<Vec<_>>());
+    }
+
+    /// M18 (b) y (e): borrar una declaracion con inicializador borra el
+    /// inicializador; las directivas no se tocan.
+    #[test]
+    fn borrar_declaracion_y_directivas() {
+        let all = variants("\"use strict\";\nconst k = 5;\nvar {q} = o;\nfunction f() {\n  \"use strict\";\n  return k;\n}\n", 100, 1);
+        let src: Vec<&str> = all.iter().map(|v| v.src.as_str()).collect();
+        assert!(src.iter().any(|s| s.contains("let k;")), "{src:#?}");
+        // El patron no tiene version sin inicializador: se borra entera.
+        assert!(src.iter().any(|s| !s.contains("q") && s.contains("const k = 5")), "{src:#?}");
+        // (Borrar `function f` se lleva su directiva; la de arriba queda siempre.)
+        for s in &src {
+            assert!(s.starts_with("\"use strict\";"), "{s}");
+        }
+        assert!(!all.iter().any(|v| (v.desc.starts_with("literal") && v.desc.contains("use strict")) || v.desc.contains("): \"use strict\"")), "{:#?}", all.iter().map(|v| &v.desc).collect::<Vec<_>>());
     }
 
     #[test]

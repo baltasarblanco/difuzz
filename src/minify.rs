@@ -9,9 +9,8 @@
 use std::any::Any;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 
-use swc_common::{sync::Lrc, FileName, Globals, SourceMap, GLOBALS};
-use swc_ecma_ast::{Decl, EsVersion, ObjectPatProp, Pat, Stmt};
-use swc_ecma_parser::{parse_file_as_script, Syntax};
+use swc_common::{Globals, GLOBALS};
+use swc_ecma_ast::{Decl, ModuleDecl, ModuleItem, ObjectPatProp, Pat, Program, Stmt};
 
 use crate::backend::{Backend, Minifier};
 
@@ -154,10 +153,31 @@ pub enum Outcome {
 }
 
 pub fn prepare(src: &str, cfg: &Config) -> Outcome {
+    PANIC_LOCATION.with(|l| l.borrow_mut().take());
     let result = catch_unwind(AssertUnwindSafe(|| cfg.0.prepare(src)));
     match result {
         Ok(outcome) => outcome,
-        Err(payload) => Outcome::Panic(panic_message(&payload)),
+        Err(payload) => {
+            let mut msg = panic_message(&payload);
+            // M22: de que crate viene (parser, minifier o codegen).
+            if let Some(loc) = PANIC_LOCATION.with(|l| l.borrow_mut().take()) {
+                msg.push_str(&format!("\nubicacion: {loc}"));
+            }
+            Outcome::Panic(msg)
+        }
+    }
+}
+
+thread_local! {
+    /// M22: ubicacion del ultimo panic en este hilo (la escribe el hook de main).
+    static PANIC_LOCATION: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
+}
+
+/// M22: llamado desde el panic hook. Corre en el hilo que entro en panico.
+pub fn record_panic_location(info: &std::panic::PanicHookInfo) {
+    if let Some(l) = info.location() {
+        let loc = format!("{}:{}:{}", l.file(), l.line(), l.column());
+        PANIC_LOCATION.with(|p| *p.borrow_mut() = Some(loc));
     }
 }
 
@@ -178,12 +198,24 @@ const MAX_OBSERVED: usize = 30;
 ///
 /// `invocar` (mejora 7, `--invocar`): el epilogo llama a `__difuzzObserveInvocar`,
 /// que imprime lo mismo y despues llama a cada funcion observada (preload.js).
-pub fn instrument(src: &str, invocar: bool) -> Option<String> {
+///
+/// `kind` (M12): los bindings se leen parseando segun el carril; en el carril B
+/// es el epilogo de un modulo sin exports.
+pub fn instrument(src: &str, invocar: bool, kind: SourceKind) -> Option<String> {
     let names = catch_unwind(AssertUnwindSafe(|| {
-        GLOBALS.set(&Globals::new(), || top_level_bindings(src))
+        GLOBALS.set(&Globals::new(), || top_level_bindings(src, kind))
     }))
     .ok()??;
-    if names.is_empty() {
+    // M36 (decision del usuario, opcion a): en el carril A (CommonJS) un programa
+    // que menciona `module`/`exports` (UMD, CJS) puede no tener bindings top-level
+    // y exportar todo por `module.exports`. Se observa eso tambien. `module` es la
+    // variable del envoltorio CommonJS de node: con `en_funcion` sigue a la vista
+    // (la funcion esta adentro del .cjs), salvo que el programa declare su propio
+    // `module` top-level, que ya se observa como binding.
+    let cjs = kind == SourceKind::Script
+        && (mentions_word(src, "module") || mentions_word(src, "exports"))
+        && !names.iter().any(|n| n == "module");
+    if names.is_empty() && !cjs {
         return None;
     }
     let mut args: Vec<String> = names
@@ -197,26 +229,50 @@ pub fn instrument(src: &str, invocar: bool) -> Option<String> {
     // "\n;\n": cierra un comentario de linea final y evita que ASI pegue el
     // epilogo a la ultima expresion del programa.
     let observe = if invocar { "__difuzzObserveInvocar" } else { "__difuzzObserve" };
-    Some(format!("{src}\n;\n{observe}({});\n", args.join(", ")))
+    let mut out = format!("{src}\n;\n");
+    if !args.is_empty() {
+        out.push_str(&format!("{observe}({});\n", args.join(", ")));
+    }
+    if cjs {
+        out.push_str(&format!("__difuzzObserveCjs(module.exports, {invocar});\n"));
+    }
+    Some(out)
 }
 
-fn top_level_bindings(src: &str) -> Option<Vec<String>> {
-    let cm: Lrc<SourceMap> = Default::default();
-    let fm = cm.new_source_file(FileName::Anon.into(), src.to_string());
-    let script = parse_file_as_script(
-        &fm,
-        Syntax::default(),
-        EsVersion::latest(),
-        None,
-        &mut Vec::new(),
-    )
-    .ok()?;
+/// `word` aparece en `src` como palabra (no como parte de un identificador).
+/// Aproximado a proposito: puede ser un comentario o un string; el costo es
+/// observar un `module.exports` vacio (`{}`).
+fn mentions_word(src: &str, word: &str) -> bool {
+    let ident = |c: char| c.is_alphanumeric() || c == '_' || c == '$';
+    src.match_indices(word).any(|(i, _)| {
+        !src[..i].chars().next_back().is_some_and(ident) && !src[i + word.len()..].chars().next().is_some_and(ident)
+    })
+}
+
+fn top_level_bindings(src: &str, kind: SourceKind) -> Option<Vec<String>> {
+    let program = crate::backend::swc::parse_for(src, kind)?;
+    let decls: Vec<&Decl> = match &program {
+        Program::Script(s) => s
+            .body
+            .iter()
+            .filter_map(|st| match st {
+                Stmt::Decl(d) => Some(d),
+                _ => None,
+            })
+            .collect(),
+        Program::Module(m) => m
+            .body
+            .iter()
+            .filter_map(|it| match it {
+                ModuleItem::Stmt(Stmt::Decl(d)) => Some(d),
+                ModuleItem::ModuleDecl(ModuleDecl::ExportDecl(e)) => Some(&e.decl),
+                _ => None,
+            })
+            .collect(),
+    };
 
     let mut names = Vec::new();
-    for stmt in &script.body {
-        let Stmt::Decl(decl) = stmt else {
-            continue;
-        };
+    for decl in decls {
         match decl {
             Decl::Var(var) => {
                 for d in &var.decls {
@@ -276,6 +332,25 @@ fn panic_message(payload: &Box<dyn Any + Send>) -> String {
 mod tests {
     use super::{Forma, Preset};
     use crate::backend::swc::Swc;
+
+    /// M22: un panic adentro de prepare sale con su ubicacion.
+    #[test]
+    fn panic_con_ubicacion() {
+        use super::{prepare, record_panic_location, Config, Outcome};
+        use crate::backend::Backend;
+        struct Revienta;
+        impl Backend for Revienta {
+            fn prepare(&self, _: &str) -> Outcome {
+                panic!("adentro del backend")
+            }
+        }
+        let prev = std::panic::take_hook();
+        std::panic::set_hook(Box::new(record_panic_location));
+        let out = prepare("x", &Config(Box::new(Revienta)));
+        std::panic::set_hook(prev);
+        let Outcome::Panic(msg) = out else { panic!("tenia que ser Panic") };
+        assert!(msg.starts_with("adentro del backend\nubicacion: src/minify.rs:"), "{msg}");
+    }
 
     #[test]
     fn ejes_de_la_matriz() {

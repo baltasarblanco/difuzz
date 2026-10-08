@@ -9,7 +9,7 @@
 //   3. Excepciones: un throw no atrapado imprime su tipo y sale con 70 (runner::THROW_EXIT).
 //   4. Sensor de asunciones: marca si el programa usa algo que AGENTS.md del minifier
 //      declara asumido (toString de funciones, .stack, Proxy, built-ins pisados, TDZ).
-//      Al salir escribe los flags en stderr (runner::FLAGS_TAG), que no se compara.
+//      Al salir escribe los flags por el canal de control (M10, ver abajo).
 //   5. Canales: console.error/warn/trace van a stdout (stderr no se compara), y al salir
 //      se imprimen los globals que el programa creo (sin tocar el fuente: sin efecto
 //      observador).
@@ -45,9 +45,127 @@
     return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
   };
 
+  // M20: lo demas que cambia entre ejecuciones, fijo (mismo patron que Date). Valores
+  // inventados pero estables: A y B ven lo mismo, y una corrida ve lo mismo que otra.
+  const fix = (obj, key, value) => {
+    try {
+      Object.defineProperty(obj, key, { value, writable: true, configurable: true, enumerable: true });
+    } catch {}
+  };
+  fix(process, 'pid', 4242);
+  fix(process, 'ppid', 4241);
+  // hrtime avanza 1 ms por llamada (un programa que mide un intervalo ve algo > 0).
+  let hrNow = 0n;
+  const HR_STEP = 1000000n;
+  const hrtime = (prev) => {
+    hrNow += HR_STEP;
+    let s = Number(hrNow / 1000000000n);
+    let ns = Number(hrNow % 1000000000n);
+    if (Array.isArray(prev)) {
+      s -= prev[0];
+      ns -= prev[1];
+      if (ns < 0) {
+        s -= 1;
+        ns += 1e9;
+      }
+    }
+    return [s, ns];
+  };
+  hrtime.bigint = () => {
+    hrNow += HR_STEP;
+    return hrNow;
+  };
+  fix(process, 'hrtime', hrtime);
+  fix(process, 'uptime', () => 1);
+  const MEM = { rss: 50000000, heapTotal: 20000000, heapUsed: 10000000, external: 1000000, arrayBuffers: 10000 };
+  const memoryUsage = () => ({ ...MEM });
+  memoryUsage.rss = () => MEM.rss;
+  fix(process, 'memoryUsage', memoryUsage);
+  try {
+    const os = require('os');
+    fix(os, 'freemem', () => 1073741824);
+    fix(os, 'uptime', () => 1);
+    fix(os, 'loadavg', () => [0, 0, 0]);
+  } catch {}
+  // crypto: PRNG sembrado (mulberry32, otra semilla que Math.random).
+  let cseed = 0x1b873593 | 0;
+  const rnd8 = () => {
+    cseed = (cseed + 0x6d2b79f5) | 0;
+    let t = cseed;
+    t = Math.imul(t ^ (t >>> 15), t | 1);
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+    return ((t ^ (t >>> 14)) >>> 0) & 0xff;
+  };
+  const fillRandom = (view) => {
+    const u8 = new Uint8Array(view.buffer, view.byteOffset, view.byteLength);
+    for (let i = 0; i < u8.length; i++) u8[i] = rnd8();
+    return view;
+  };
+  const randomUUID = () => {
+    const b = fillRandom(new Uint8Array(16));
+    b[6] = (b[6] & 0x0f) | 0x40;
+    b[8] = (b[8] & 0x3f) | 0x80;
+    const h = [...b].map((x) => x.toString(16).padStart(2, '0')).join('');
+    return `${h.slice(0, 8)}-${h.slice(8, 12)}-${h.slice(12, 16)}-${h.slice(16, 20)}-${h.slice(20)}`;
+  };
+  try {
+    const nodeCrypto = require('crypto');
+    fix(nodeCrypto, 'randomUUID', randomUUID);
+    fix(nodeCrypto, 'getRandomValues', fillRandom);
+    fix(nodeCrypto, 'randomFillSync', (buf) => fillRandom(buf));
+    fix(nodeCrypto, 'randomBytes', (n, cb) => {
+      const b = fillRandom(Buffer.alloc(n));
+      if (typeof cb === 'function') {
+        process.nextTick(cb, null, b);
+        return undefined;
+      }
+      return b;
+    });
+    fix(nodeCrypto, 'randomInt', (min, max, cb) => {
+      if (max === undefined || typeof max === 'function') {
+        cb = max;
+        max = min;
+        min = 0;
+      }
+      const v = min + ((rnd8() << 16) | (rnd8() << 8) | rnd8()) % (max - min);
+      if (typeof cb === 'function') {
+        process.nextTick(cb, null, v);
+        return undefined;
+      }
+      return v;
+    });
+  } catch {}
+  try {
+    fix(globalThis.crypto, 'randomUUID', randomUUID);
+    fix(globalThis.crypto, 'getRandomValues', fillRandom);
+  } catch {}
+
   // Se captura antes de que el programa pueda pisar console.log o process.stdout.write.
   const write = process.stdout.write.bind(process.stdout);
-  const writeErr = process.stderr.write.bind(process.stderr);
+
+  // M10: canal de control propio (archivo DIFUZZ_CTL que el runner trunca antes de
+  // cada ejecucion), fuera de stdout/stderr/exit code, que el programa tambien puede
+  // escribir. Lineas: `throw <Tipo>`, `link <code>`, `flags a,b`, `dz` (una por cada
+  // linea "!dz " que escribe el preload en stdout) y `global` (una por global creado).
+  // process.exit se captura aca: un programa que lo pisa no evita que un throw termine.
+  const fs = require('fs');
+  const realExit = process.exit.bind(process);
+  let ctlFd = null;
+  try {
+    if (process.env.DIFUZZ_CTL) ctlFd = fs.openSync(process.env.DIFUZZ_CTL, 'a');
+  } catch {}
+  delete process.env.DIFUZZ_CTL;
+  const ctl = (line) => {
+    if (ctlFd === null) return;
+    try {
+      fs.writeSync(ctlFd, `${line}\n`);
+    } catch {}
+  };
+  // Una linea "!dz " del preload: se cuenta en el canal (runner::Exec::own_output).
+  const writeDz = (s) => {
+    ctl('dz');
+    write(s);
+  };
 
   // --- Sensor de asunciones ---------------------------------------------------
   const flags = new Set();
@@ -71,9 +189,11 @@
     enumerable: false,
   });
 
-  // V8 llama a prepareStackTrace la primera vez que alguien lee .stack.
+  // V8 llama a prepareStackTrace la primera vez que alguien lee .stack. `quiet`: el
+  // preload mismo lee el stack de un throw (M21) y eso no es uso del programa.
+  let quiet = false;
   Error.prepareStackTrace = (err, frames) => {
-    flags.add('stack');
+    if (!quiet) flags.add('stack');
     let head;
     try {
       head = String(err);
@@ -102,6 +222,23 @@
   const MAX_DEPTH = 4;
   const MAX_ITEMS = 20;
 
+  // Oraculo de excepciones. Solo el tipo: el mensaje trae nombres mangleados
+  // ("n is not a function"). Clases propias que extienden Error se ven como su
+  // built-in mas cercano, porque su nombre tambien puede cambiar.
+  const ERRORS = [AggregateError, EvalError, RangeError, ReferenceError, SyntaxError, TypeError, URIError, Error];
+  const thrownType = (e) => {
+    if (e === null || (typeof e !== 'object' && typeof e !== 'function')) {
+      return `valor ${ser(e, 0, new Set())}`;
+    }
+    for (const E of ERRORS) {
+      try {
+        if (e instanceof E) return E.name;
+      } catch {}
+    }
+    return 'objeto';
+  };
+  // (Definido antes de `ser`, que lo usa para los Error: M6.)
+
   // Serializador determinista. Nunca invoca getters (lee descriptores) y nunca imprime
   // codigo fuente ni nombres de funciones: esos cambian legitimamente al minificar.
   const ser = (v, depth, ancestors) => {
@@ -121,7 +258,9 @@
     try {
       if (v instanceof RealDate) return `Date(${RealDate.prototype.getTime.call(v)})`;
       if (v instanceof RegExp) return String(v);
-      if (v instanceof Error) return `${v.name}: ${v.message}`;
+      // M6: ni name ni message (traen nombres locales que el minifier renombra,
+      // y una subclase propia tambien cambia de nombre): solo el tipo, como un throw.
+      if (v instanceof Error) return `Error(${thrownType(v)})`;
       if (v instanceof Map) {
         const out = [];
         for (const [k, val] of v) {
@@ -168,29 +307,33 @@
     }
   };
 
-  // Oraculo de excepciones. Solo el tipo: el mensaje trae nombres mangleados
-  // ("n is not a function"). Clases propias que extienden Error se ven como su
-  // built-in mas cercano, porque su nombre tambien puede cambiar.
-  const ERRORS = [AggregateError, EvalError, RangeError, ReferenceError, SyntaxError, TypeError, URIError, Error];
-  const thrownType = (e) => {
-    if (e === null || (typeof e !== 'object' && typeof e !== 'function')) {
-      return `valor ${ser(e, 0, new Set())}`;
-    }
-    for (const E of ERRORS) {
-      try {
-        if (e instanceof E) return E.name;
-      } catch {}
-    }
-    return 'objeto';
-  };
   // process.exit y no exitCode: despues de un uncaughtException, node seguiria
   // corriendo timers pendientes, y un crash real no los corre.
+  // M13: "Class extends value X is not a constructor or null" (asuncion de oxc: extender
+  // una clase no tiene efectos).
+  const extendsFlag = (e) => {
+    try {
+      if (e instanceof TypeError && /^Class extends value/.test(e.message)) flags.add('extends');
+    } catch {}
+  };
   const onThrow = (e) => {
     try {
       if (e instanceof ReferenceError && / before initialization/.test(e.message)) flags.add('tdz');
     } catch {}
-    write(`!dz throw ${thrownType(e)}\n`);
-    process.exit(70);
+    extendsFlag(e);
+    const t = thrownType(e);
+    ctl(`throw ${t}`);
+    // M21: mensaje y stack por el canal (no se comparan; van a a.exc/b.exc del hallazgo).
+    try {
+      quiet = true;
+      const text = e !== null && typeof e === 'object' ? String(e.stack || e.message || e) : String(e);
+      ctl(`exc ${text.replace(/\\/g, '\\\\').replace(/\n/g, '\\n')}`);
+    } catch {
+    } finally {
+      quiet = false;
+    }
+    writeDz(`!dz throw ${t}\n`);
+    realExit(70);
   };
   process.on('uncaughtException', onThrow);
   process.on('unhandledRejection', onThrow);
@@ -204,6 +347,7 @@
         } catch (e) {
           s = `[throws ${e && e.name}]`;
         }
+        if (String(name).startsWith('!dz ')) ctl('dz');
         write(`${name} = ${s}\n`);
       }
     },
@@ -232,7 +376,8 @@
       } catch (e) {
         s = `[throws ${e && e.name}]`;
       }
-      write(`!dz global ${String(k)} = ${s}\n`);
+      ctl('global');
+      writeDz(`!dz global ${String(k)} = ${s}\n`);
     }
   };
 
@@ -288,7 +433,7 @@
     } catch {
       flags.add('builtins');
     }
-    writeErr(`\n__DIFUZZ_FLAGS__ ${[...flags].sort().join(',')}\n`);
+    ctl(`flags ${[...flags].sort().join(',')}`);
   });
 
   // --- Mejora 7: invocar las funciones observadas (`--invocar`) ---------------
@@ -332,6 +477,7 @@
       try {
         if (e instanceof ReferenceError && / before initialization/.test(e.message)) flags.add('tdz');
       } catch {}
+      extendsFlag(e);
       return `${name}() throws ${thrownType(e)}`;
     }
     let isPromise = false;
@@ -363,6 +509,38 @@
     },
     enumerable: false,
   });
+  // M36: `module.exports` del carril A (UMD/CJS sin bindings top-level). Se imprime como
+  // un binding mas (`module.exports = ...`, con ser). Con --invocar se llama a lo
+  // exportado: la exportacion misma si es funcion, y sus propiedades propias que sean
+  // funciones (data descriptors, sin getters), hasta MAX_INVOKED, sin `new`.
+  const MAX_INVOKED = 30;
+  Object.defineProperty(globalThis, '__difuzzObserveCjs', {
+    value: (ex, inv) => {
+      observe(['module.exports', ex]);
+      if (!inv) return;
+      if (typeof ex === 'function') write(`${invocar('module.exports', ex)}\n`);
+      if (ex === null || (typeof ex !== 'object' && typeof ex !== 'function')) return;
+      let n = 0;
+      for (const k of Reflect.ownKeys(ex)) {
+        if (typeof k !== 'string') continue;
+        let d;
+        try {
+          d = Object.getOwnPropertyDescriptor(ex, k);
+        } catch {
+          continue;
+        }
+        if (!d || !('value' in d) || typeof d.value !== 'function') continue;
+        if (n++ === MAX_INVOKED) {
+          writeDz(`!dz invocadas_truncadas\n`);
+          break;
+        }
+        write(`${invocar(`module.exports.${k}`, d.value)}\n`);
+      }
+    },
+    enumerable: false,
+  });
+  baseGlobals.add('__difuzzObserveCjs');
+
   // --- Carril B: modulos ES (.mjs) -------------------------------------------
   // Observador de modulos: los bindings top-level de un modulo no son globales. El runner
   // corre un envoltorio que importa el programa y pasa su namespace de exports aca. El
@@ -386,16 +564,39 @@
   // No es un global del programa (observeNewGlobals).
   baseGlobals.add('__difuzzObserveInvocar');
   process.on('exit', () => {
-    for (const p of promesas) write(`!dz promesa ${p.name}() ${p.s}\n`);
+    for (const p of promesas) writeDz(`!dz promesa ${p.name}() ${p.s}\n`);
   });
-  // Definido despues de la foto de globals: no es un global del programa.
+  // M12: con --invocar, lo mismo y despues llama a cada funcion exportada, como
+  // __difuzzObserveInvocar con los bindings top-level.
+  Object.defineProperty(globalThis, '__difuzzObserveExportsInvocar', {
+    value: (ns) => {
+      globalThis.__difuzzObserveExports(ns);
+      for (const k of Reflect.ownKeys(ns)) {
+        if (typeof k !== 'string') continue;
+        let v;
+        try {
+          v = ns[k];
+        } catch {
+          continue;
+        }
+        if (typeof v === 'function') write(`${invocar(`export ${k}`, v)}\n`);
+      }
+    },
+    enumerable: false,
+  });
+  // Definidos despues de la foto de globals: no son globals del programa.
   baseGlobals.add('__difuzzObserveExports');
+  baseGlobals.add('__difuzzObserveExportsInvocar');
 
   // Un modulo que no enlaza (import que no resuelve, export pedido que no existe) falla
   // antes de ejecutar nada: no es un caso, y no es un throw comparable. Sale con 71
-  // (runner::LINK_EXIT). Solo en .mjs: el carril A queda como estaba.
-  if (/\.mjs$/.test(process.argv[1] || '')) {
-    const LINK_CODES = ['ERR_MODULE_NOT_FOUND', 'ERR_UNSUPPORTED_DIR_IMPORT', 'ERR_UNSUPPORTED_ESM_URL_SCHEME'];
+  // (runner::LINK_EXIT). M9: tambien en el carril A, con el `require`/`import()` de algo
+  // que no existe (MODULE_NOT_FOUND) no atrapado: antes contaba como "igual" con
+  // `lanzaron` sin haber ejecutado casi nada.
+  {
+    const LINK_CODES = [
+      'ERR_MODULE_NOT_FOUND', 'ERR_UNSUPPORTED_DIR_IMPORT', 'ERR_UNSUPPORTED_ESM_URL_SCHEME', 'MODULE_NOT_FOUND',
+    ];
     const onLinkError = (e) => {
       let link = null;
       try {
@@ -403,8 +604,9 @@
         else if (e instanceof SyntaxError && / does not provide an export named /.test(e.message)) link = 'export';
       } catch {}
       if (link === null) return;
-      write(`!dz link ${link}\n`);
-      process.exit(71);
+      ctl(`link ${link}`);
+      writeDz(`!dz link ${link}\n`);
+      realExit(71);
     };
     process.prependListener('uncaughtException', onLinkError);
     process.prependListener('unhandledRejection', onLinkError);

@@ -27,16 +27,17 @@ const FLAG_REASONS: &[(&str, &str)] = &[
     ("redefine_global", "undefined/NaN/Infinity no se redefinen"),
     ("coercion", "toString/valueOf (helpers de coercion) sin efectos"),
     ("nombres", "core_defaults no preserva nombres de funciones/clases (keep_* apagado)"),
+    // M16 (main.rs): no es asuncion del minifier, es el motor.
+    ("profundidad", "difuzz: limite de pila del motor (V8), no del programa"),
 ];
 
 /// Lo mismo para oxc, contra crates/oxc_minifier/docs/ASSUMPTIONS.md (tag
 /// crates_v0.153.0). Asunciones de oxc SIN flag todavia (sus divergencias caen
-/// en div/): `document.all`, `with`, longitud maxima de Array/String/TypedArray,
-/// coercion que lanza con Symbol (`Math.abs(Symbol())`), `extends` que lanza,
-/// `var` de un eval directo usada afuera, globals conocidos que existen y se
-/// leen sin efectos (`window`, `document` no existen en node), `arguments`
-/// global, y escrituras de propiedades sobre bindings no usados (setters en
-/// prototipos: solo cubierto si el preload ve `builtins`).
+/// en div/): `document.all`, longitud maxima de Array/String/TypedArray,
+/// coercion que lanza con Symbol (`Math.abs(Symbol())`), `var` de un eval
+/// directo usada afuera, `arguments` global, y escrituras de propiedades sobre
+/// bindings no usados (setters en prototipos: solo cubierto si el preload ve
+/// `builtins`). M13 agrego `with`, `global_conocido` y `extends`.
 /// Flags de SWC que oxc NO declara como asuncion y por eso no van aca:
 /// `proxy` (property_read_side_effects es All por defecto), `callee`,
 /// `redefine_global`.
@@ -46,6 +47,12 @@ const FLAG_REASONS_OXC: &[(&str, &str)] = &[
     ("tdz", "oxc: No TDZ Violation"),
     ("coercion", "oxc: Coercion Methods Are Pure"),
     ("nombres", "oxc: No Reliance on Function.prototype.name (keep_names apagado en core_defaults)"),
+    // M13 (checks.rs y preload.js).
+    ("with", "oxc: No `with` Statement"),
+    ("global_conocido", "oxc: Known globals exist and are side-effect-free to access (no existe en node)"),
+    ("extends", "oxc: No side effects from extending a class"),
+    // M16 (main.rs): no es asuncion del minifier, es el motor.
+    ("profundidad", "difuzz: limite de pila del motor (V8), no del programa"),
     // No es asuncion documentada de oxc: el contenido de .stack (posiciones,
     // nombres) cambia con cualquier minificacion. Decision de difuzz, VERIFICAR.
     ("stack", "difuzz: el contenido de Error.prototype.stack cambia al minificar (oxc no lo documenta)"),
@@ -199,7 +206,10 @@ impl Symptoms {
         for (case, h) in rows {
             text.push_str(&format!("{case}\t{h:016x}\n"));
         }
-        std::fs::write(&self.path, text)
+        // M23: temporal + rename (como triage.rs): un corte no deja la tabla a medias.
+        let tmp = PathBuf::from(format!("{}.tmp-{}", self.path.display(), std::process::id()));
+        std::fs::write(&tmp, text)?;
+        std::fs::rename(&tmp, &self.path)
     }
 }
 
@@ -254,6 +264,10 @@ mod tests {
         assert!(k.classify(Path::new("x/input.js"), &["tdz"]).is_some_and(|w| w.contains("oxc")));
         assert!(k.classify(Path::new("x/input.js"), &["proxy"]).is_none());
         assert!(k.classify(Path::new("x/input.js"), &["redefine_global"]).is_none());
+        // M13: asunciones de oxc que SWC no documenta.
+        for f in ["with", "global_conocido", "extends"] {
+            assert!(k.classify(Path::new("x/input.js"), &[f]).is_some_and(|w| w.contains("oxc")), "{f}");
+        }
     }
 
     #[test]

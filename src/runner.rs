@@ -10,8 +10,10 @@
 //! que el programa pueda leer del entorno es identica en los dos lados.
 
 use std::io::Read;
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::{mpsc, Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use crate::minify::SourceKind;
@@ -26,8 +28,10 @@ pub const THROW_EXIT: i32 = 70;
 /// Prefijo de las lineas que escribe difuzz, no el programa.
 pub const DZ: &str = "!dz ";
 
-/// Linea de stderr donde el preload deja los flags del sensor de asunciones.
-pub const FLAGS_TAG: &str = "__DIFUZZ_FLAGS__";
+
+/// M16: el doble del limite de pila por defecto de V8 (984 KB: `node --v8-options`, v24.14.1), para
+/// distinguir un RangeError por profundidad del motor de uno del programa.
+pub const DEEP_STACK: &str = "--stack-size=1968";
 
 /// Exit code del preload cuando un modulo no enlaza (import que no resuelve,
 /// export pedido que no existe). Carril B: el programa no es un caso. No es
@@ -54,16 +58,55 @@ pub struct Exec {
     /// a salir solo (timeout, senal).
     pub flags: Vec<String>,
     pub elapsed: Duration,
+    /// M10: lo que el preload escribio por su canal de control (DIFUZZ_CTL):
+    /// `throw <Tipo>`, `link <code>`, `flags a,b`, `dz`, `global`. El programa no
+    /// lo ve ni lo puede escribir (salvo adivinando el fd).
+    pub ctl: String,
 }
 
 impl Exec {
     /// Termino por si mismo: exit 0 o lanzando (THROW_EXIT).
     pub fn completed(&self) -> bool {
-        matches!(self.status, Status::Exited(0) | Status::Exited(THROW_EXIT))
+        self.status == Status::Exited(0) || self.threw()
     }
 
+    /// M10: lanzo sin atrapar segun el preload (exit 70 **y** `throw` en el
+    /// canal). Un programa que sale con 70 por su cuenta no lanzo.
     pub fn threw(&self) -> bool {
-        self.status == Status::Exited(THROW_EXIT)
+        self.status == Status::Exited(THROW_EXIT) && self.ctl_count("throw ") > 0
+    }
+
+    /// M10: no enlazo (exit 71 **y** `link` en el canal).
+    pub fn link_failed(&self) -> bool {
+        self.status == Status::Exited(LINK_EXIT) && self.ctl_count("link ") > 0
+    }
+
+    /// M21: mensaje y stack del throw no atrapado (linea `exc` del canal, con
+    /// `\n` y `\\` escapados), para guardar junto al hallazgo. No se compara.
+    pub fn exc(&self) -> Option<String> {
+        let esc = self.ctl.lines().rev().find_map(|l| l.strip_prefix("exc "))?;
+        let mut out = String::with_capacity(esc.len());
+        let mut it = esc.chars();
+        while let Some(c) = it.next() {
+            match (c, c == '\\') {
+                (_, true) => match it.next() {
+                    Some('n') => out.push('\n'),
+                    Some(o) => out.push(o),
+                    None => out.push('\\'),
+                },
+                (c, false) => out.push(c),
+            }
+        }
+        Some(out)
+    }
+
+    /// Lineas del canal que empiezan con `prefix` (o que son exactamente
+    /// `prefix` sin el espacio final: `dz`, `global`).
+    fn ctl_count(&self, prefix: &str) -> usize {
+        self.ctl
+            .lines()
+            .filter(|l| l.starts_with(prefix) || *l == prefix.trim_end())
+            .count()
     }
 
     /// Algo que comparar: el programa imprimio, o lanzo (y el tipo esta en stdout).
@@ -75,16 +118,18 @@ impl Exec {
         self.completed() && !self.threw() && !self.own_output()
     }
 
-    /// El preload vio globals creados por el programa (`!dz global …`).
+    /// El preload vio globals creados por el programa (M10: contados en el
+    /// canal, no en stdout, donde el programa puede imprimir `!dz global`).
     pub fn has_globals(&self) -> bool {
-        self.stdout.lines().any(|l| l.starts_with("!dz global "))
+        self.ctl_count("global") > 0
     }
 
-    /// Lineas escritas por el programa, no por difuzz.
+    /// Lineas escritas por el programa, no por difuzz. M10: las lineas no vacias
+    /// de stdout son mas que las `!dz` que el preload declaro en el canal (antes,
+    /// una linea `!dz ` del programa no contaba como salida propia).
     fn own_output(&self) -> bool {
-        self.stdout
-            .lines()
-            .any(|l| !l.trim().is_empty() && !l.starts_with(DZ))
+        let lines = self.stdout.lines().filter(|l| !l.trim().is_empty()).count();
+        lines > self.ctl_count("dz")
     }
 
     fn failed(msg: String, start: Instant) -> Exec {
@@ -94,6 +139,7 @@ impl Exec {
             stderr: String::new(),
             flags: Vec::new(),
             elapsed: start.elapsed(),
+            ctl: String::new(),
         }
     }
 }
@@ -104,9 +150,61 @@ pub struct Preload {
     path: PathBuf,
 }
 
+/// M23: todos los temporales de una corrida en `<tmp>/difuzz-<pid>-tmp/`. El
+/// prefijo `difuzz-<pid>-` lo siguen reconociendo normalize_paths (oracle.rs) y
+/// la cache (cache.rs); `clean_stale` borra los de procesos muertos.
+pub fn run_dir() -> PathBuf {
+    std::env::temp_dir().join(format!("difuzz-{}-tmp", std::process::id()))
+}
+
+/// M23: borra de `<tmp>` lo que dejaron corridas cortadas (abort, SIGKILL): las
+/// entradas `difuzz-<pid>-...` cuyo pid ya no existe (`/proc/<pid>`). Devuelve
+/// cuantas borro.
+pub fn clean_stale() -> usize {
+    clean_stale_in(&std::env::temp_dir())
+}
+
+fn clean_stale_in(tmp: &Path) -> usize {
+    let own = std::process::id().to_string();
+    let Ok(dir) = std::fs::read_dir(tmp) else {
+        return 0;
+    };
+    let mut n = 0;
+    for e in dir.flatten() {
+        let name = e.file_name().to_string_lossy().into_owned();
+        let Some(rest) = name.strip_prefix("difuzz-") else {
+            continue;
+        };
+        let pid: String = rest.chars().take_while(char::is_ascii_digit).collect();
+        if pid.is_empty() || pid == own || !rest[pid.len()..].starts_with('-') {
+            continue;
+        }
+        if Path::new("/proc").join(&pid).exists() {
+            continue;
+        }
+        let ok = match e.file_type() {
+            Ok(t) if t.is_dir() => std::fs::remove_dir_all(e.path()).is_ok(),
+            Ok(_) => std::fs::remove_file(e.path()).is_ok(),
+            Err(_) => false,
+        };
+        n += usize::from(ok);
+    }
+    n
+}
+
 impl Preload {
     pub fn write() -> std::io::Result<Preload> {
-        let path = std::env::temp_dir().join(format!("difuzz-{}-preload.cjs", std::process::id()));
+        std::fs::create_dir_all(run_dir())?;
+        let path = run_dir().join(format!("difuzz-{}-preload.cjs", std::process::id()));
+        std::fs::write(&path, PRELOAD)?;
+        Ok(Preload { path })
+    }
+
+    /// Para tests en paralelo: un preload con nombre propio (el de `write` es
+    /// uno por proceso y el primero que se suelta lo borra).
+    #[cfg(test)]
+    pub fn write_tagged(tag: &str) -> std::io::Result<Preload> {
+        let path = std::env::temp_dir().join(format!("difuzz-test-{}-preload-{tag}.cjs", std::process::id()));
         std::fs::write(&path, PRELOAD)?;
         Ok(Preload { path })
     }
@@ -115,6 +213,10 @@ impl Preload {
 impl Drop for Preload {
     fn drop(&mut self) {
         let _ = std::fs::remove_file(&self.path);
+        // Vacio si los runners ya se soltaron (main los suelta antes).
+        if self.path.parent() == Some(run_dir().as_path()) {
+            let _ = std::fs::remove_dir(run_dir());
+        }
     }
 }
 
@@ -132,19 +234,33 @@ pub struct Runner {
     wrapper: PathBuf,
     /// Corre `wrapper` en vez de `script` (ver `observing`).
     observe: bool,
+    /// M12: con `--invocar`, el envoltorio de modulos ademas llama a las
+    /// funciones exportadas (`__difuzzObserveExportsInvocar`).
+    invocar: bool,
+    /// M10: canal de control del preload, uno por worker, truncado antes de
+    /// cada ejecucion.
+    ctl: PathBuf,
+    /// M11: cwd del programa, uno por worker y la MISMA ruta para A y B; se
+    /// vacia antes de cada ejecucion (sin estado compartido entre A y B).
+    cwd: PathBuf,
 }
 
 impl Runner {
     pub fn new(preload: &Preload, worker: usize, timeout: Duration) -> Runner {
+        let dir = run_dir();
+        // Si falla, el primer `run` lo reporta como Failed (no se puede escribir).
+        let _ = std::fs::create_dir_all(&dir);
+        let pid = std::process::id();
         Runner {
-            script: std::env::temp_dir()
-                .join(format!("difuzz-{}-w{worker}.cjs", std::process::id())),
+            script: dir.join(format!("difuzz-{pid}-w{worker}.cjs")),
             preload: preload.path.clone(),
             timeout,
             kind: SourceKind::Script,
-            wrapper: std::env::temp_dir()
-                .join(format!("difuzz-{}-w{worker}-observar.mjs", std::process::id())),
+            wrapper: dir.join(format!("difuzz-{pid}-w{worker}-observar.mjs")),
             observe: false,
+            invocar: false,
+            ctl: dir.join(format!("difuzz-{pid}-w{worker}-ctl.txt")),
+            cwd: dir.join(format!("difuzz-{pid}-w{worker}-cwd")),
         }
     }
 
@@ -154,6 +270,12 @@ impl Runner {
     pub fn with_kind(mut self, kind: SourceKind) -> Runner {
         self.script.set_extension(kind.ext());
         self.kind = kind;
+        self
+    }
+
+    /// M12: `--invocar` tambien en el envoltorio de modulos (carril B).
+    pub fn with_invocar(mut self, invocar: bool) -> Runner {
+        self.invocar = invocar;
         self
     }
 
@@ -169,17 +291,35 @@ impl Runner {
             kind: self.kind,
             wrapper: self.wrapper.clone(),
             observe: true,
+            invocar: self.invocar,
+            ctl: self.ctl.clone(),
+            cwd: self.cwd.clone(),
         }
     }
 
     pub fn run(&self, js: &str) -> Exec {
-        self.run_inner(js, false)
+        self.run_inner(js, Opts::default())
     }
 
     /// Igual, pero el preload cambia el contenido de `Function.prototype.toString()`
     /// y de `.stack`. Si la salida no cambia, el programa no depende de ellos.
     pub fn run_salted(&self, js: &str) -> Exec {
-        self.run_inner(js, true)
+        self.run_inner(js, Opts { salted: true, ..Opts::default() })
+    }
+
+    /// M3: igual que `run` con otro timeout (reintento de un Timeout de B).
+    pub fn run_with_timeout(&self, js: &str, timeout: Duration) -> Exec {
+        self.run_inner(js, Opts { timeout: Some(timeout), ..Opts::default() })
+    }
+
+    /// M16: igual que `run` con argumentos extra para node (p. ej. `--stack-size`).
+    pub fn run_with_args(&self, js: &str, node_args: &[&str]) -> Exec {
+        self.run_inner(js, Opts { node_args, ..Opts::default() })
+    }
+
+    /// El timeout de este runner (`--timeout-ms`).
+    pub fn timeout(&self) -> Duration {
+        self.timeout
     }
 
     /// `node --check`: si node no acepta el fuente, no es un caso. El parser de SWC
@@ -198,19 +338,19 @@ impl Runner {
             .map_or(true, |s| s.success())
     }
 
-    fn run_inner(&self, js: &str, salted: bool) -> Exec {
+    fn run_inner(&self, js: &str, opts: Opts) -> Exec {
         let start = Instant::now();
         if let Err(e) = std::fs::write(&self.script, js) {
             return Exec::failed(format!("escribir {}: {e}", self.script.display()), start);
         }
         if self.observe {
             let name = self.script.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-            if let Err(e) = std::fs::write(&self.wrapper, module_wrapper(&name)) {
+            if let Err(e) = std::fs::write(&self.wrapper, module_wrapper(&name, self.invocar)) {
                 return Exec::failed(format!("escribir {}: {e}", self.wrapper.display()), start);
             }
-            return run_file(&self.preload, &self.wrapper, self.timeout, start, salted);
+            return run_file(self, &self.wrapper, start, opts.timeout.unwrap_or(self.timeout), opts);
         }
-        run_file(&self.preload, &self.script, self.timeout, start, salted)
+        run_file(self, &self.script, start, opts.timeout.unwrap_or(self.timeout), opts)
     }
 }
 
@@ -221,6 +361,8 @@ impl Drop for Runner {
         }
         let _ = std::fs::remove_file(&self.script);
         let _ = std::fs::remove_file(&self.wrapper);
+        let _ = std::fs::remove_file(&self.ctl);
+        let _ = std::fs::remove_dir_all(&self.cwd);
     }
 }
 
@@ -231,17 +373,46 @@ impl Drop for Runner {
 /// Sin efecto observador: el fuente que se minifica no cambia, y los exports ya
 /// son usados por ser exports. Si el programa lanza, el envoltorio no llega a
 /// correr y el throw sale como siempre (onThrow del preload).
-pub fn module_wrapper(program_file: &str) -> String {
+///
+/// `invocar` (M12): llama a `__difuzzObserveExportsInvocar`, que imprime lo mismo
+/// y despues llama a cada funcion exportada (preload.js).
+pub fn module_wrapper(program_file: &str, invocar: bool) -> String {
     // El nombre lo arma el runner (difuzz-<pid>-w<n>.mjs), pero igual va escapado.
     let spec = program_file.replace('\\', "\\\\").replace('"', "\\\"");
-    format!("import * as ns from \"./{spec}\";\nglobalThis.__difuzzObserveExports(ns);\n")
+    let observe = if invocar { "__difuzzObserveExportsInvocar" } else { "__difuzzObserveExports" };
+    format!("import * as ns from \"./{spec}\";\nglobalThis.{observe}(ns);\n")
 }
 
-fn run_file(preload: &Path, script: &Path, timeout: Duration, start: Instant, salted: bool) -> Exec {
-    let mut cmd = Command::new("node");
+/// Variantes de una ejecucion: salada, otro timeout, argumentos extra de node.
+#[derive(Default, Clone, Copy)]
+struct Opts<'a> {
+    salted: bool,
+    timeout: Option<Duration>,
+    node_args: &'a [&'a str],
+}
+
+fn run_file(r: &Runner, script: &Path, start: Instant, timeout: Duration, opts: Opts) -> Exec {
+    let (preload, salted) = (&r.preload, opts.salted);
+    if let Err(e) = std::fs::write(&r.ctl, "") {
+        return Exec::failed(format!("escribir {}: {e}", r.ctl.display()), start);
+    }
+    // M11: directorio de trabajo vacio, el mismo para A y B. TMPDIR y HOME
+    // adentro; del entorno de difuzz solo pasa PATH (y TZ fija).
+    let _ = std::fs::remove_dir_all(&r.cwd);
+    let tmpdir = r.cwd.join("tmp");
+    if let Err(e) = std::fs::create_dir_all(&tmpdir) {
+        return Exec::failed(format!("crear {}: {e}", tmpdir.display()), start);
+    }
+    let mut cmd = Command::new(node_path());
+    cmd.current_dir(&r.cwd).env_clear();
+    if let Some(path) = std::env::var_os("PATH") {
+        cmd.env("PATH", path);
+    }
+    cmd.env("TMPDIR", &tmpdir).env("HOME", &r.cwd);
     // --no-warnings: los avisos de node (p. ej. "Invalid asm.js") traen el PID y
     // no son salida del programa.
     cmd.arg("--no-warnings")
+        .args(opts.node_args)
         .arg("--require")
         .arg(preload)
         .arg(script)
@@ -249,6 +420,11 @@ fn run_file(preload: &Path, script: &Path, timeout: Duration, start: Instant, sa
     if salted {
         cmd.env("DIFUZZ_SALT", "1");
     }
+    cmd.env("DIFUZZ_CTL", &r.ctl);
+    // M2: grupo de procesos propio (pgid = pid de node). Al terminar, por timeout
+    // o normalmente, se mata el grupo entero: un hijo que hereda el stdout ya no
+    // mantiene el pipe abierto ni queda huerfano.
+    cmd.process_group(0);
     let mut child = match cmd
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -258,22 +434,16 @@ fn run_file(preload: &Path, script: &Path, timeout: Duration, start: Instant, sa
         Ok(c) => c,
         Err(e) => return Exec::failed(format!("spawn node: {e}"), start),
     };
+    let pid = child.id();
 
     // Los pipes se drenan en hilos propios. Si no, un programa que imprime mas
     // que el buffer del pipe se bloquea escribiendo y nosotros esperando: deadlock
-    // que el timeout reportaria como "cuelgue", falso.
-    let mut out_pipe = child.stdout.take().expect("stdout fue pedido como piped");
-    let mut err_pipe = child.stderr.take().expect("stderr fue pedido como piped");
-    let out_thread = std::thread::spawn(move || {
-        let mut buf = Vec::new();
-        let _ = out_pipe.read_to_end(&mut buf);
-        buf
-    });
-    let err_thread = std::thread::spawn(move || {
-        let mut buf = Vec::new();
-        let _ = err_pipe.read_to_end(&mut buf);
-        buf
-    });
+    // que el timeout reportaria como "cuelgue", falso. Lo leido se acumula en un
+    // buffer compartido: si un proceso escapo del grupo (setsid) y retiene el
+    // pipe, el join tiene limite y se usa lo que haya.
+    let (tx, rx) = mpsc::channel::<()>();
+    let out_buf = drain(child.stdout.take().expect("stdout fue pedido como piped"), tx.clone());
+    let err_buf = drain(child.stderr.take().expect("stderr fue pedido como piped"), tx);
 
     let status = loop {
         match child.try_wait() {
@@ -285,6 +455,7 @@ fn run_file(preload: &Path, script: &Path, timeout: Duration, start: Instant, sa
             }
             Ok(None) => {
                 if start.elapsed() >= timeout {
+                    kill_group(pid);
                     let _ = child.kill();
                     let _ = child.wait();
                     break Status::Timeout;
@@ -292,54 +463,135 @@ fn run_file(preload: &Path, script: &Path, timeout: Duration, start: Instant, sa
                 std::thread::sleep(Duration::from_millis(5));
             }
             Err(e) => {
+                kill_group(pid);
                 let _ = child.kill();
                 let _ = child.wait();
                 break Status::Failed(format!("wait: {e}"));
             }
         }
     };
+    // Tambien al terminar normalmente: lo que el programa dejo corriendo muere.
+    // Riesgo aceptado: node ya fue cosechado y su pid podria reusarse, pero un
+    // proceso nuevo solo tiene pgid == pid si se hace lider de grupo.
+    kill_group(pid);
 
-    let stdout = out_thread.join().unwrap_or_default();
-    let stderr = err_thread.join().unwrap_or_default();
+    let deadline = Instant::now() + READ_GRACE;
+    let mut closed = 0;
+    while closed < 2 {
+        match rx.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
+            Ok(()) => closed += 1,
+            Err(_) => break,
+        }
+    }
+    if closed < 2 {
+        eprintln!(
+            "runner: un proceso escapo del grupo (setsid/detached?) y retiene la salida de {}; se usa lo leido hasta ahora",
+            script.display()
+        );
+    }
+    let take = |b: &Arc<Mutex<Vec<u8>>>| std::mem::take(&mut *b.lock().unwrap_or_else(|e| e.into_inner()));
+    let stdout = take(&out_buf);
+    let stderr = take(&err_buf);
 
-    let (stderr, flags) = split_flags(String::from_utf8_lossy(&stderr).into_owned());
+    let ctl = std::fs::read(&r.ctl).map(|b| decode_lossless(&b)).unwrap_or_default();
     Exec {
         status,
-        stdout: String::from_utf8_lossy(&stdout).into_owned(),
-        stderr,
-        flags,
+        stdout: decode_lossless(&stdout),
+        stderr: decode_lossless(&stderr),
+        flags: ctl_flags(&ctl),
         elapsed: start.elapsed(),
+        ctl,
     }
 }
 
-/// Saca la linea de flags del stderr y la parsea.
-fn split_flags(stderr: String) -> (String, Vec<String>) {
-    let Some(i) = stderr.rfind(FLAGS_TAG) else {
-        return (stderr, Vec::new());
+/// M8: UTF-8 sin perdida. El UTF-8 valido queda igual; cada byte invalido pasa
+/// a `\u{FFFD}` seguido de su valor en hex (`\u{FFFD}ff`). `from_utf8_lossy`
+/// colapsaba bytes distintos en el mismo U+FFFD y dos salidas distintas
+/// comparaban iguales. Colision aceptada: un programa que imprima a proposito
+/// U+FFFD seguido de dos hex se confunde con el escape.
+pub fn decode_lossless(bytes: &[u8]) -> String {
+    let mut out = String::with_capacity(bytes.len());
+    for chunk in bytes.utf8_chunks() {
+        out.push_str(chunk.valid());
+        for b in chunk.invalid() {
+            out.push('\u{FFFD}');
+            out.push_str(&format!("{b:02x}"));
+        }
+    }
+    out
+}
+
+/// Ruta absoluta de `node`, buscada una vez en el PATH de difuzz. Con
+/// `env_clear` + `PATH` (M11), `std` no puede usar posix_spawnp para buscar un
+/// programa por nombre y cae a fork+exec: en un proceso con mucha memoria eso
+/// duplicaba el tiempo de sistema (MEDIDO con strace: sin CLONE_VFORK). Con la
+/// ruta absoluta vuelve a posix_spawn (vfork). Si no la encuentra, "node" (el
+/// spawn fallara igual que antes y se reporta como Failed).
+fn node_path() -> &'static Path {
+    static NODE: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+    NODE.get_or_init(|| {
+        std::env::var_os("PATH")
+            .and_then(|p| std::env::split_paths(&p).map(|d| d.join("node")).find(|n| n.is_file()))
+            .unwrap_or_else(|| PathBuf::from("node"))
+    })
+}
+
+/// M2: cuanto se espera el EOF de los pipes despues de que node termino y se
+/// mato su grupo. Solo se agota si un proceso escapo del grupo.
+const READ_GRACE: Duration = Duration::from_secs(1);
+
+/// Lee `pipe` hasta EOF en un hilo propio, acumulando en un buffer compartido.
+/// Avisa por `done` al llegar al EOF (o a un error de lectura).
+fn drain(mut pipe: impl Read + Send + 'static, done: mpsc::Sender<()>) -> Arc<Mutex<Vec<u8>>> {
+    let buf = Arc::new(Mutex::new(Vec::new()));
+    let b = Arc::clone(&buf);
+    std::thread::spawn(move || {
+        let mut chunk = vec![0u8; 64 * 1024];
+        loop {
+            match pipe.read(&mut chunk) {
+                Ok(0) | Err(_) => break,
+                Ok(n) => b.lock().unwrap_or_else(|e| e.into_inner()).extend_from_slice(&chunk[..n]),
+            }
+        }
+        let _ = done.send(());
+    });
+    buf
+}
+
+/// M2: SIGKILL al grupo de procesos `pid` (creado con `process_group(0)`).
+fn kill_group(pid: u32) {
+    let Ok(pid) = i32::try_from(pid) else {
+        return;
     };
-    let end = stderr[i..].find('\n').map_or(stderr.len(), |j| i + j);
-    let flags = stderr[i + FLAGS_TAG.len()..end]
-        .split(',')
-        .map(str::trim)
-        .filter(|f| !f.is_empty())
-        .map(String::from)
-        .collect();
-    let mut rest = stderr[..i].trim_end_matches('\n').to_string();
-    rest.push_str(&stderr[end..]);
-    (rest, flags)
+    // SAFETY: kill(2) no toca memoria de este proceso. El pid negativo apunta al
+    // grupo cuyo lider es node; ESRCH (grupo vacio) se ignora.
+    unsafe {
+        libc::kill(-pid, libc::SIGKILL);
+    }
+}
+
+/// M10: los flags del sensor salen del canal de control (la ultima linea
+/// `flags`), no del stderr, donde el programa podia escribir uno falso (C3).
+fn ctl_flags(ctl: &str) -> Vec<String> {
+    ctl.lines()
+        .rev()
+        .find_map(|l| l.strip_prefix("flags "))
+        .map(|f| f.split(',').map(str::trim).filter(|f| !f.is_empty()).map(String::from).collect())
+        .unwrap_or_default()
 }
 
 #[cfg(test)]
 mod tests {
-    use super::split_flags;
+    use super::ctl_flags;
 
     #[test]
     fn envoltorio_de_modulos() {
         assert_eq!(
-            super::module_wrapper("difuzz-7-w0.mjs"),
+            super::module_wrapper("difuzz-7-w0.mjs", false),
             "import * as ns from \"./difuzz-7-w0.mjs\";\nglobalThis.__difuzzObserveExports(ns);\n"
         );
-        assert!(super::module_wrapper("a\"b.mjs").contains("\"./a\\\"b.mjs\""));
+        assert!(super::module_wrapper("a\"b.mjs", false).contains("\"./a\\\"b.mjs\""));
+        assert!(super::module_wrapper("m.mjs", true).ends_with("globalThis.__difuzzObserveExportsInvocar(ns);\n"));
     }
 
     /// Node de verdad sobre un `.mjs` con el preload `.cjs` por `--require`. Si
@@ -385,16 +637,227 @@ mod tests {
         assert_eq!(thr.stdout, "!dz throw TypeError\n");
     }
 
+    /// M2: un hijo que hereda el stdout no estira el timeout ni queda huerfano.
     #[test]
-    fn separa_los_flags_del_stderr() {
-        let (rest, flags) = split_flags("warn\n\n__DIFUZZ_FLAGS__ proxy,stack\n".into());
-        assert_eq!(rest, "warn\n");
-        assert_eq!(flags, ["proxy", "stack"]);
-        let (rest, flags) = split_flags("__DIFUZZ_FLAGS__ \n".into());
-        assert_eq!(rest, "\n");
-        assert!(flags.is_empty());
-        let (rest, flags) = split_flags("nada".into());
-        assert_eq!(rest, "nada");
-        assert!(flags.is_empty());
+    fn timeout_mata_el_grupo_y_no_espera_al_hijo() {
+        use super::{Preload, Runner, Status};
+        use std::time::{Duration, Instant};
+
+        if std::process::Command::new("node").arg("--version").output().is_err() {
+            eprintln!("sin node en PATH: test omitido");
+            return;
+        }
+        let path = std::env::temp_dir().join(format!("difuzz-test-{}-preload-m2.cjs", std::process::id()));
+        std::fs::write(&path, super::PRELOAD).unwrap();
+        let preload = Preload { path };
+        let runner = Runner::new(&preload, 9998, Duration::from_millis(500));
+        let t0 = Instant::now();
+        let e = runner.run("require('child_process').spawn('sleep',['5'],{stdio:'inherit'});\nwhile(true){}\n");
+        assert_eq!(e.status, Status::Timeout);
+        assert!(t0.elapsed() < Duration::from_millis(1500), "tardo {:?}", t0.elapsed());
+    }
+
+    /// M9: en el carril A, un require no atrapado de algo que no existe es
+    /// enlace (LINK_EXIT), no un throw comparable. Atrapado, sigue siendo programa.
+    #[test]
+    fn require_inexistente_es_enlace() {
+        use super::{Preload, Runner, Status, LINK_EXIT};
+        use std::time::Duration;
+        if std::process::Command::new("node").arg("--version").output().is_err() {
+            eprintln!("sin node en PATH: test omitido");
+            return;
+        }
+        let path = std::env::temp_dir().join(format!("difuzz-test-{}-preload-m9.cjs", std::process::id()));
+        std::fs::write(&path, super::PRELOAD).unwrap();
+        let preload = Preload { path };
+        let runner = Runner::new(&preload, 9997, Duration::from_secs(20));
+        let e = runner.run("console.log(1);\nrequire('./no-existe-difuzz');\n");
+        assert_eq!(e.status, Status::Exited(LINK_EXIT), "stdout: {}", e.stdout);
+        let ok = runner.run("try { require('./no-existe-difuzz'); } catch (e) { console.log(e.code); }\n");
+        assert_eq!((ok.status, ok.stdout.as_str()), (Status::Exited(0), "MODULE_NOT_FOUND\n"));
+    }
+
+    /// M10: el programa no puede hacerse pasar por el preload (exit 70/71,
+    /// lineas `!dz`, flags en stderr) ni evitar que un throw termine.
+    #[test]
+    fn canal_de_control_no_se_falsifica() {
+        use super::{Preload, Runner, Status};
+        use std::time::Duration;
+        if std::process::Command::new("node").arg("--version").output().is_err() {
+            eprintln!("sin node en PATH: test omitido");
+            return;
+        }
+        let path = std::env::temp_dir().join(format!("difuzz-test-{}-preload-m10.cjs", std::process::id()));
+        std::fs::write(&path, super::PRELOAD).unwrap();
+        let preload = Preload { path };
+        let r = Runner::new(&preload, 9996, Duration::from_secs(20));
+        // exit 70 propio: no lanzo, no termino "solo".
+        let e = r.run("console.log(1);\nprocess.exit(70);\n");
+        assert_eq!(e.status, Status::Exited(70));
+        assert!(!e.threw() && !e.completed());
+        let e = r.run("process.exitCode = 70;\n");
+        assert!(!e.threw() && !e.completed());
+        // exit 71 propio: no es enlace.
+        assert!(!r.run("process.exit(71);\n").link_failed());
+        // Una linea `!dz throw` impresa por el programa es salida propia.
+        let e = r.run("console.log('!dz throw TypeError');\n");
+        assert!(e.ok_with_output() && !e.threw(), "{:?} {}", e.status, e.ctl);
+        // `!dz global` impreso no es un global.
+        let e = r.run("console.log('!dz global x = 1');\n");
+        assert!(!e.has_globals());
+        assert!(r.run("globalThis.creado = 1;\n").has_globals());
+        // Flags falsos en stderr no cuentan.
+        let e = r.run("process.on('exit', () => process.stderr.write('\\n__DIFUZZ_FLAGS__ proxy\\n'));\n");
+        assert!(e.flags.is_empty(), "{:?}", e.flags);
+        // process.exit pisado: el throw igual termina con 70.
+        let e = r.run("process.exit = () => {};\nsetTimeout(() => console.log('tarde'), 10);\nthrow new TypeError('x');\n");
+        assert!(e.threw(), "{:?} {}", e.status, e.stdout);
+        assert_eq!(e.stdout, "!dz throw TypeError\n");
+        // M13: el flag de runtime de `extends`.
+        let e = r.run("const v = 1;\nclass A extends v {}\n");
+        assert!(e.threw() && e.flags == ["extends"], "{:?}", e.flags);
+    }
+
+    /// M11: el programa corre en un cwd propio, vacio en cada ejecucion, con un
+    /// entorno minimo.
+    #[test]
+    fn cada_ejecucion_en_un_cwd_vacio() {
+        use super::{Preload, Runner, Status};
+        use std::time::Duration;
+        if std::process::Command::new("node").arg("--version").output().is_err() {
+            eprintln!("sin node en PATH: test omitido");
+            return;
+        }
+        let path = std::env::temp_dir().join(format!("difuzz-test-{}-preload-m11.cjs", std::process::id()));
+        std::fs::write(&path, super::PRELOAD).unwrap();
+        let preload = Preload { path };
+        let r = Runner::new(&preload, 9995, Duration::from_secs(20));
+        let js = "const fs = require('fs');\nconsole.log(fs.existsSync('x.txt'), process.cwd().endsWith('-w9995-cwd'), process.env.HOME === process.cwd(), Object.keys(process.env).sort().join());\nfs.writeFileSync('x.txt', '1');\n";
+        let e1 = r.run(js);
+        assert_eq!(e1.status, Status::Exited(0), "{}", e1.stderr);
+        assert_eq!(e1.stdout, "false true true HOME,PATH,TMPDIR,TZ\n");
+        assert_eq!(r.run(js).stdout, e1.stdout);
+        drop(r);
+        assert!(!super::run_dir().join(format!("difuzz-{}-w9995-cwd", std::process::id())).exists());
+    }
+
+    /// M12: un modulo mudo sin exports se observa con el epilogo (parseado como
+    /// modulo), y `--invocar` llama a las funciones exportadas.
+    #[test]
+    fn carril_b_epilogo_e_invocar_exports() {
+        use super::{Preload, Runner, Status};
+        use crate::minify::{instrument, SourceKind};
+        use std::time::Duration;
+        if std::process::Command::new("node").arg("--version").output().is_err() {
+            eprintln!("sin node en PATH: test omitido");
+            return;
+        }
+        let path = std::env::temp_dir().join(format!("difuzz-test-{}-preload-m12.cjs", std::process::id()));
+        std::fs::write(&path, super::PRELOAD).unwrap();
+        let preload = Preload { path };
+        let r = Runner::new(&preload, 9994, Duration::from_secs(20)).with_kind(SourceKind::Module);
+        let mudo = "const o = { a: 1 };\nlet n = await Promise.resolve(2);\nfunction f() { return n; }\n";
+        let epi = instrument(mudo, false, SourceKind::Module).expect("un modulo con bindings se observa");
+        let e = r.run(&epi);
+        assert_eq!(e.status, Status::Exited(0), "{}", e.stderr);
+        assert_eq!(e.stdout, "o = {\"a\": 1}\nn = 2\nf = fn\n");
+        // `import` no es un binding que observar; un script no parsea como modulo.
+        assert!(instrument("import 'node:fs';\n", false, SourceKind::Module).is_none());
+        let inv = r.with_invocar(true);
+        let e = inv.observing().run("export function f() { return 2; }\nexport const k = 3;\n");
+        assert_eq!(e.stdout, "export f = fn\nexport k = 3\nexport f() = 2\n");
+    }
+
+    /// M16: los argumentos extra llegan a node.
+    #[test]
+    fn argumentos_extra_de_node() {
+        use super::{Preload, Runner};
+        use std::time::Duration;
+        if std::process::Command::new("node").arg("--version").output().is_err() {
+            eprintln!("sin node en PATH: test omitido");
+            return;
+        }
+        let path = std::env::temp_dir().join(format!("difuzz-test-{}-preload-m16.cjs", std::process::id()));
+        std::fs::write(&path, super::PRELOAD).unwrap();
+        let preload = Preload { path };
+        let r = Runner::new(&preload, 9993, Duration::from_secs(20));
+        let js = "console.log(process.execArgv.filter((a) => a.startsWith('--stack')).join());\n";
+        assert_eq!(r.run(js).stdout, "\n");
+        assert_eq!(r.run_with_args(js, &[super::DEEP_STACK]).stdout, format!("{}\n", super::DEEP_STACK));
+    }
+
+    /// M20: pid, hrtime, crypto, memoria y uptime son deterministas.
+    #[test]
+    fn preload_fija_lo_no_determinista() {
+        use super::{Preload, Runner, Status};
+        use std::time::Duration;
+        if std::process::Command::new("node").arg("--version").output().is_err() {
+            eprintln!("sin node en PATH: test omitido");
+            return;
+        }
+        let path = std::env::temp_dir().join(format!("difuzz-test-{}-preload-m20.cjs", std::process::id()));
+        std::fs::write(&path, super::PRELOAD).unwrap();
+        let preload = Preload { path };
+        let r = Runner::new(&preload, 9992, Duration::from_secs(20));
+        let js = "const c = require('crypto'), os = require('os');\nconst t0 = process.hrtime();\nconsole.log(process.pid, process.ppid, process.hrtime(t0), process.hrtime.bigint(), process.uptime());\nconsole.log(c.randomUUID(), crypto.randomUUID(), c.randomBytes(4).toString('hex'), crypto.getRandomValues(new Uint8Array(3)).join(), c.randomInt(10));\nconsole.log(process.memoryUsage().rss, process.memoryUsage.rss(), os.freemem(), os.uptime());\n";
+        let a = r.run(js);
+        assert_eq!(a.status, Status::Exited(0), "{}", a.stderr);
+        assert_eq!(r.run(js).stdout, a.stdout);
+        assert!(a.stdout.starts_with("4242 4241 [ 0, 1000000 ] 3000000n 1\n"), "{}", a.stdout);
+    }
+
+    /// M21: el mensaje y el stack del throw llegan por el canal, sin prender el
+    /// flag `stack` (lo lee el preload, no el programa).
+    #[test]
+    fn excepcion_con_mensaje_por_el_canal() {
+        use super::{Preload, Runner};
+        use std::time::Duration;
+        if std::process::Command::new("node").arg("--version").output().is_err() {
+            eprintln!("sin node en PATH: test omitido");
+            return;
+        }
+        let preload = Preload::write_tagged("m21").unwrap();
+        let r = Runner::new(&preload, 9991, Duration::from_secs(20));
+        let e = r.run("function f(callback) { callback(); }\nf(1);\n");
+        assert!(e.threw());
+        let exc = e.exc().expect("exc en el canal");
+        assert!(exc.starts_with("TypeError: callback is not a function\n    at "), "{exc}");
+        assert!(e.flags.is_empty(), "{:?}", e.flags);
+    }
+
+    /// M23: los restos de un pid muerto se borran; los de uno vivo no.
+    #[test]
+    fn limpia_restos_de_pids_muertos() {
+        // pid 0 no existe en /proc: es un "muerto" seguro para el test. En un
+        // directorio propio: el test no limpia el /tmp real.
+        let tmp = std::env::temp_dir().join(format!("difuzz-test-limpieza-{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let muerto = tmp.join("difuzz-0-tmp");
+        std::fs::create_dir_all(muerto.join("x")).unwrap();
+        let vivo = tmp.join(format!("difuzz-{}-tmp", std::process::id()));
+        std::fs::create_dir_all(&vivo).unwrap();
+        let ajeno = tmp.join("difuzz-test-no-se-toca");
+        std::fs::create_dir_all(&ajeno).unwrap();
+        std::fs::write(tmp.join("difuzz-0-w1.cjs"), "x").unwrap();
+        assert_eq!(super::clean_stale_in(&tmp), 2);
+        assert!(!muerto.exists() && !tmp.join("difuzz-0-w1.cjs").exists());
+        assert!(vivo.exists() && ajeno.exists());
+        std::fs::remove_dir_all(&tmp).unwrap();
+    }
+
+    /// M8: bytes invalidos distintos no colapsan.
+    #[test]
+    fn utf8_sin_perdida() {
+        use super::decode_lossless as d;
+        assert_ne!(d(b"\xff"), d(b"\xfe"));
+        assert_eq!(d(b"hola \xc3\xb1\n"), "hola \u{f1}\n");
+        assert_eq!(d(b"a\xffb"), "a\u{FFFD}ffb");
+    }
+
+    #[test]
+    fn flags_del_canal_de_control() {
+        assert_eq!(ctl_flags("dz\nflags proxy,stack\ndz\n"), ["proxy", "stack"]);
+        assert!(ctl_flags("flags \n").is_empty());
+        assert!(ctl_flags("nada").is_empty());
     }
 }

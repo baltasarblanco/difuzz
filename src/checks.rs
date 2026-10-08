@@ -1,8 +1,12 @@
 //! Chequeos estaticos sobre el AST, sin ejecutar nada.
 
+use std::collections::HashSet;
+
 use swc_ecma_ast::{
-    AssignExpr, AssignTarget, BindingIdent, Expr, FnDecl, Ident, MemberExpr, MemberProp, Pat,
-    Program, Prop, PropName, PropOrSpread, SimpleAssignTarget, UpdateExpr,
+    AssignExpr, AssignTarget, BindingIdent, CatchClause, Class, ClassDecl, ClassExpr, Expr, FnDecl,
+    FnExpr, Ident, ImportDefaultSpecifier, ImportNamedSpecifier, ImportStarAsSpecifier, Lit,
+    MemberExpr, MemberProp, Param, Pat, Program, Prop, PropName, PropOrSpread, SimpleAssignTarget,
+    UpdateExpr, VarDeclarator, WithStmt,
 };
 use swc_ecma_visit::{Visit, VisitWith};
 
@@ -24,6 +28,17 @@ pub fn static_flags(program: &Program) -> Vec<&'static str> {
     if v.coercion {
         out.push("coercion");
     }
+    // M13: asunciones de oxc (ASSUMPTIONS.md) que se ven en el fuente. Solo las
+    // clasifica la tabla de oxc (known.rs::FLAG_REASONS_OXC).
+    if v.with {
+        out.push("with");
+    }
+    if v.refs.iter().any(|r| !v.declared.contains(r) && NODE_MISSING_OXC_GLOBALS.binary_search(&r.as_str()).is_ok()) {
+        out.push("global_conocido");
+    }
+    if v.extends_literal {
+        out.push("extends");
+    }
     out
 }
 
@@ -32,6 +47,149 @@ struct StaticFlags {
     callee: bool,
     redefines_global: bool,
     coercion: bool,
+    /// M13: hay un `with` (oxc: "No `with` Statement").
+    with: bool,
+    /// M13: `class extends <literal, regex, array, objeto o template>`: lanza al
+    /// definirse (oxc: "No side effects from extending a class").
+    extends_literal: bool,
+    /// M13: nombres declarados en cualquier parte del programa y nombres leidos
+    /// como expresion. Una lectura libre de un global conocido de oxc que no
+    /// existe en node es `global_conocido`. Aproximado: un nombre declarado en
+    /// otro scope cuenta como declarado (falso negativo del flag, no positivo).
+    declared: HashSet<String>,
+    refs: HashSet<String>,
+}
+
+/// M13: globals de `KNOWN_GLOBAL_IDENTIFIERS` de oxc (oxc_ecmascript 0.153.0,
+/// src/side_effects/known_globals.rs:276-403, privada) que NO existen en node
+/// (`!(k in globalThis)` con node v24.14.1, 544 de 639). oxc asume que existen y
+/// que leerlos no tiene efectos; en node leerlos lanza ReferenceError. Ordenada
+/// (byte order) para binary_search. Se regenera si cambia la version de oxc.
+#[rustfmt::skip]
+const NODE_MISSING_OXC_GLOBALS: &[&str] = &[
+    "AnalyserNode", "Animation", "AnimationEffect", "AnimationEvent", "AnimationPlaybackEvent",
+    "AnimationTimeline", "Attr", "Audio", "AudioBuffer", "AudioBufferSourceNode",
+    "AudioDestinationNode", "AudioListener", "AudioNode", "AudioParam", "AudioProcessingEvent",
+    "AudioScheduledSourceNode", "BarProp", "BeforeUnloadEvent", "BiquadFilterNode", "BlobEvent",
+    "CDATASection", "CSS", "CSSAnimation", "CSSFontFaceRule", "CSSImportRule", "CSSKeyframeRule",
+    "CSSKeyframesRule", "CSSMediaRule", "CSSNamespaceRule", "CSSPageRule", "CSSRule", "CSSRuleList",
+    "CSSStyleDeclaration", "CSSStyleRule", "CSSStyleSheet", "CSSSupportsRule", "CSSTransition",
+    "CanvasGradient", "CanvasPattern", "CanvasRenderingContext2D", "ChannelMergerNode",
+    "ChannelSplitterNode", "CharacterData", "ClipboardEvent", "Comment", "CompositionEvent",
+    "ConvolverNode", "CustomElementRegistry", "DOMImplementation", "DOMMatrix", "DOMMatrixReadOnly",
+    "DOMParser", "DOMPoint", "DOMPointReadOnly", "DOMQuad", "DOMRect", "DOMRectList",
+    "DOMRectReadOnly", "DOMStringList", "DOMStringMap", "DOMTokenList", "DataTransfer",
+    "DataTransferItem", "DataTransferItemList", "DelayNode", "Document", "DocumentFragment",
+    "DocumentTimeline", "DocumentType", "DragEvent", "DynamicsCompressorNode", "Element",
+    "ErrorEvent", "EventSource", "FileList", "FileReader", "FocusEvent", "FontFace", "GainNode",
+    "Gamepad", "GamepadButton", "GamepadEvent", "Geolocation", "GeolocationPositionError",
+    "HTMLAllCollection", "HTMLAnchorElement", "HTMLAreaElement", "HTMLAudioElement",
+    "HTMLBRElement", "HTMLBaseElement", "HTMLBodyElement", "HTMLButtonElement", "HTMLCanvasElement",
+    "HTMLCollection", "HTMLDListElement", "HTMLDataElement", "HTMLDataListElement",
+    "HTMLDetailsElement", "HTMLDirectoryElement", "HTMLDivElement", "HTMLDocument", "HTMLElement",
+    "HTMLEmbedElement", "HTMLFieldSetElement", "HTMLFontElement", "HTMLFormControlsCollection",
+    "HTMLFormElement", "HTMLFrameElement", "HTMLFrameSetElement", "HTMLHRElement",
+    "HTMLHeadElement", "HTMLHeadingElement", "HTMLHtmlElement", "HTMLIFrameElement",
+    "HTMLImageElement", "HTMLInputElement", "HTMLLIElement", "HTMLLabelElement",
+    "HTMLLegendElement", "HTMLLinkElement", "HTMLMapElement", "HTMLMarqueeElement",
+    "HTMLMediaElement", "HTMLMenuElement", "HTMLMetaElement", "HTMLMeterElement", "HTMLModElement",
+    "HTMLOListElement", "HTMLObjectElement", "HTMLOptGroupElement", "HTMLOptionElement",
+    "HTMLOptionsCollection", "HTMLOutputElement", "HTMLParagraphElement", "HTMLParamElement",
+    "HTMLPictureElement", "HTMLPreElement", "HTMLProgressElement", "HTMLQuoteElement",
+    "HTMLScriptElement", "HTMLSelectElement", "HTMLSlotElement", "HTMLSourceElement",
+    "HTMLSpanElement", "HTMLStyleElement", "HTMLTableCaptionElement", "HTMLTableCellElement",
+    "HTMLTableColElement", "HTMLTableElement", "HTMLTableRowElement", "HTMLTableSectionElement",
+    "HTMLTemplateElement", "HTMLTextAreaElement", "HTMLTimeElement", "HTMLTitleElement",
+    "HTMLTrackElement", "HTMLUListElement", "HTMLUnknownElement", "HTMLVideoElement",
+    "HashChangeEvent", "History", "IDBCursor", "IDBCursorWithValue", "IDBDatabase", "IDBFactory",
+    "IDBIndex", "IDBKeyRange", "IDBObjectStore", "IDBOpenDBRequest", "IDBRequest", "IDBTransaction",
+    "IDBVersionChangeEvent", "Image", "ImageData", "InputEvent", "IntersectionObserver",
+    "IntersectionObserverEntry", "KeyboardEvent", "KeyframeEffect", "Location", "MediaCapabilities",
+    "MediaElementAudioSourceNode", "MediaEncryptedEvent", "MediaError", "MediaList",
+    "MediaQueryList", "MediaQueryListEvent", "MediaRecorder", "MediaSource", "MediaStream",
+    "MediaStreamAudioDestinationNode", "MediaStreamAudioSourceNode", "MediaStreamTrack",
+    "MediaStreamTrackEvent", "MimeType", "MimeTypeArray", "MouseEvent", "MutationEvent",
+    "MutationObserver", "MutationRecord", "NamedNodeMap", "Node", "NodeFilter", "NodeIterator",
+    "NodeList", "Notification", "OfflineAudioCompletionEvent", "Option", "OscillatorNode",
+    "PageTransitionEvent", "Path2D", "PerformanceNavigation", "PerformanceTiming", "PeriodicWave",
+    "Plugin", "PluginArray", "PointerEvent", "PopStateEvent", "ProcessingInstruction",
+    "ProgressEvent", "PromiseRejectionEvent", "RTCCertificate", "RTCDTMFSender",
+    "RTCDTMFToneChangeEvent", "RTCDataChannel", "RTCDataChannelEvent", "RTCIceCandidate",
+    "RTCPeerConnection", "RTCPeerConnectionIceEvent", "RTCRtpReceiver", "RTCRtpSender",
+    "RTCRtpTransceiver", "RTCSessionDescription", "RTCStatsReport", "RTCTrackEvent",
+    "RadioNodeList", "Range", "ResizeObserver", "ResizeObserverEntry", "SVGAElement", "SVGAngle",
+    "SVGAnimateElement", "SVGAnimateMotionElement", "SVGAnimateTransformElement",
+    "SVGAnimatedAngle", "SVGAnimatedBoolean", "SVGAnimatedEnumeration", "SVGAnimatedInteger",
+    "SVGAnimatedLength", "SVGAnimatedLengthList", "SVGAnimatedNumber", "SVGAnimatedNumberList",
+    "SVGAnimatedPreserveAspectRatio", "SVGAnimatedRect", "SVGAnimatedString",
+    "SVGAnimatedTransformList", "SVGAnimationElement", "SVGCircleElement", "SVGClipPathElement",
+    "SVGComponentTransferFunctionElement", "SVGDefsElement", "SVGDescElement", "SVGElement",
+    "SVGEllipseElement", "SVGFEBlendElement", "SVGFEColorMatrixElement",
+    "SVGFEComponentTransferElement", "SVGFECompositeElement", "SVGFEConvolveMatrixElement",
+    "SVGFEDiffuseLightingElement", "SVGFEDisplacementMapElement", "SVGFEDistantLightElement",
+    "SVGFEDropShadowElement", "SVGFEFloodElement", "SVGFEFuncAElement", "SVGFEFuncBElement",
+    "SVGFEFuncGElement", "SVGFEFuncRElement", "SVGFEGaussianBlurElement", "SVGFEImageElement",
+    "SVGFEMergeElement", "SVGFEMergeNodeElement", "SVGFEMorphologyElement", "SVGFEOffsetElement",
+    "SVGFEPointLightElement", "SVGFESpecularLightingElement", "SVGFESpotLightElement",
+    "SVGFETileElement", "SVGFETurbulenceElement", "SVGFilterElement", "SVGForeignObjectElement",
+    "SVGGElement", "SVGGeometryElement", "SVGGradientElement", "SVGGraphicsElement",
+    "SVGImageElement", "SVGLength", "SVGLengthList", "SVGLineElement", "SVGLinearGradientElement",
+    "SVGMPathElement", "SVGMarkerElement", "SVGMaskElement", "SVGMatrix", "SVGMetadataElement",
+    "SVGNumber", "SVGNumberList", "SVGPathElement", "SVGPatternElement", "SVGPoint", "SVGPointList",
+    "SVGPolygonElement", "SVGPolylineElement", "SVGPreserveAspectRatio", "SVGRadialGradientElement",
+    "SVGRect", "SVGRectElement", "SVGSVGElement", "SVGScriptElement", "SVGSetElement",
+    "SVGStopElement", "SVGStringList", "SVGStyleElement", "SVGSwitchElement", "SVGSymbolElement",
+    "SVGTSpanElement", "SVGTextContentElement", "SVGTextElement", "SVGTextPathElement",
+    "SVGTextPositioningElement", "SVGTitleElement", "SVGTransform", "SVGTransformList",
+    "SVGUnitTypes", "SVGUseElement", "SVGViewElement", "Screen", "ScriptProcessorNode",
+    "SecurityPolicyViolationEvent", "Selection", "ShadowRoot", "SourceBuffer", "SourceBufferList",
+    "SpeechSynthesisEvent", "SpeechSynthesisUtterance", "StaticRange", "Storage", "StorageEvent",
+    "StyleSheet", "StyleSheetList", "Text", "TextMetrics", "TextTrack", "TextTrackCue",
+    "TextTrackCueList", "TextTrackList", "TimeRanges", "TrackEvent", "TransitionEvent",
+    "TreeWalker", "UIEvent", "VTTCue", "ValidityState", "VisualViewport", "WaveShaperNode",
+    "WebGLActiveInfo", "WebGLBuffer", "WebGLContextEvent", "WebGLFramebuffer", "WebGLProgram",
+    "WebGLQuery", "WebGLRenderbuffer", "WebGLRenderingContext", "WebGLSampler", "WebGLShader",
+    "WebGLShaderPrecisionFormat", "WebGLSync", "WebGLTexture", "WebGLUniformLocation",
+    "WebKitCSSMatrix", "WheelEvent", "Window", "Worker", "XMLDocument", "XMLHttpRequest",
+    "XMLHttpRequestEventTarget", "XMLHttpRequestUpload", "XMLSerializer", "XPathEvaluator",
+    "XPathExpression", "XPathResult", "XSLTProcessor", "alert", "blur", "cancelAnimationFrame",
+    "captureEvents", "close", "closed", "confirm", "customElements", "devicePixelRatio", "document",
+    "event", "find", "focus", "frameElement", "frames", "getComputedStyle", "getSelection",
+    "history", "indexedDB", "isSecureContext", "length", "location", "locationbar", "matchMedia",
+    "menubar", "moveBy", "moveTo", "name", "onabort", "onafterprint", "onanimationend",
+    "onanimationiteration", "onanimationstart", "onbeforeprint", "onbeforeunload", "onblur",
+    "oncanplay", "oncanplaythrough", "onchange", "onclick", "oncontextmenu", "oncuechange",
+    "ondblclick", "ondrag", "ondragend", "ondragenter", "ondragleave", "ondragover", "ondragstart",
+    "ondrop", "ondurationchange", "onemptied", "onended", "onerror", "onfocus",
+    "ongotpointercapture", "onhashchange", "oninput", "oninvalid", "onkeydown", "onkeypress",
+    "onkeyup", "onlanguagechange", "onload", "onloadeddata", "onloadedmetadata", "onloadstart",
+    "onlostpointercapture", "onmessage", "onmousedown", "onmouseenter", "onmouseleave",
+    "onmousemove", "onmouseout", "onmouseover", "onmouseup", "onoffline", "ononline", "onpagehide",
+    "onpageshow", "onpause", "onplay", "onplaying", "onpointercancel", "onpointerdown",
+    "onpointerenter", "onpointerleave", "onpointermove", "onpointerout", "onpointerover",
+    "onpointerup", "onpopstate", "onprogress", "onratechange", "onrejectionhandled", "onreset",
+    "onresize", "onscroll", "onseeked", "onseeking", "onselect", "onstalled", "onstorage",
+    "onsubmit", "onsuspend", "ontimeupdate", "ontoggle", "ontransitioncancel", "ontransitionend",
+    "ontransitionrun", "ontransitionstart", "onunhandledrejection", "onunload", "onvolumechange",
+    "onwaiting", "onwebkitanimationend", "onwebkitanimationiteration", "onwebkitanimationstart",
+    "onwebkittransitionend", "onwheel", "open", "opener", "origin", "outerHeight", "outerWidth",
+    "parent", "personalbar", "postMessage", "print", "prompt", "releaseEvents",
+    "requestAnimationFrame", "resizeBy", "resizeTo", "screen", "screenLeft", "screenTop", "screenX",
+    "screenY", "scroll", "scrollBy", "scrollTo", "scrollbars", "self", "speechSynthesis", "status",
+    "statusbar", "stop", "toolbar", "top", "webkitURL", "window",
+];
+
+/// Nombres ligados por un patron de declaracion (var, parametro, catch).
+fn pat_names(p: &Pat, out: &mut HashSet<String>) {
+    struct Names<'a>(&'a mut HashSet<String>);
+    impl Visit for Names<'_> {
+        fn visit_binding_ident(&mut self, n: &BindingIdent) {
+            self.0.insert(n.id.sym.to_string());
+        }
+        // Los valores por defecto no declaran nada.
+        fn visit_expr(&mut self, _: &Expr) {}
+    }
+    p.visit_with(&mut Names(out));
 }
 
 impl StaticFlags {
@@ -53,6 +211,88 @@ fn is_symbol_to_primitive(e: &Expr) -> bool {
 }
 
 impl Visit for StaticFlags {
+    fn visit_with_stmt(&mut self, n: &WithStmt) {
+        self.with = true;
+        n.visit_children_with(self);
+    }
+
+    fn visit_class(&mut self, n: &Class) {
+        if let Some(sup) = &n.super_class {
+            let mut e = &**sup;
+            while let Expr::Paren(p) = e {
+                e = &p.expr;
+            }
+            let lit = match e {
+                Expr::Lit(Lit::Null(_)) => false,
+                Expr::Lit(_) | Expr::Array(_) | Expr::Object(_) | Expr::Tpl(_) => true,
+                _ => false,
+            };
+            if lit {
+                self.extends_literal = true;
+            }
+        }
+        n.visit_children_with(self);
+    }
+
+    fn visit_expr(&mut self, n: &Expr) {
+        if let Expr::Ident(i) = n {
+            self.refs.insert(i.sym.to_string());
+        }
+        n.visit_children_with(self);
+    }
+
+    fn visit_var_declarator(&mut self, n: &VarDeclarator) {
+        pat_names(&n.name, &mut self.declared);
+        n.visit_children_with(self);
+    }
+
+    fn visit_param(&mut self, n: &Param) {
+        pat_names(&n.pat, &mut self.declared);
+        n.visit_children_with(self);
+    }
+
+    fn visit_pat(&mut self, n: &Pat) {
+        n.visit_children_with(self);
+    }
+
+    fn visit_catch_clause(&mut self, n: &CatchClause) {
+        if let Some(p) = &n.param {
+            pat_names(p, &mut self.declared);
+        }
+        n.visit_children_with(self);
+    }
+
+    fn visit_class_decl(&mut self, n: &ClassDecl) {
+        self.declared.insert(n.ident.sym.to_string());
+        n.visit_children_with(self);
+    }
+
+    fn visit_class_expr(&mut self, n: &ClassExpr) {
+        if let Some(i) = &n.ident {
+            self.declared.insert(i.sym.to_string());
+        }
+        n.visit_children_with(self);
+    }
+
+    fn visit_fn_expr(&mut self, n: &FnExpr) {
+        if let Some(i) = &n.ident {
+            self.declared.insert(i.sym.to_string());
+        }
+        n.visit_children_with(self);
+    }
+
+    fn visit_import_default_specifier(&mut self, n: &ImportDefaultSpecifier) {
+        self.declared.insert(n.local.sym.to_string());
+    }
+
+    fn visit_import_named_specifier(&mut self, n: &ImportNamedSpecifier) {
+        self.declared.insert(n.local.sym.to_string());
+    }
+
+    fn visit_import_star_as_specifier(&mut self, n: &ImportStarAsSpecifier) {
+        self.declared.insert(n.local.sym.to_string());
+    }
+
     // Claves de objetos literales y de miembros de clase.
     fn visit_prop_name(&mut self, n: &PropName) {
         match n {
@@ -94,6 +334,7 @@ impl Visit for StaticFlags {
 
     fn visit_fn_decl(&mut self, n: &FnDecl) {
         self.check_name(&n.ident);
+        self.declared.insert(n.ident.sym.to_string());
         n.visit_children_with(self);
     }
 }
@@ -212,5 +453,23 @@ mod tests {
         assert_eq!(static_flags(&parse("class A { toString() {} }")), ["coercion"]);
         assert_eq!(static_flags(&parse("o[Symbol.toPrimitive] = g;")), ["coercion"]);
         assert!(static_flags(&parse("x.toString(); String(y); o.valueOf();")).is_empty());
+    }
+
+    /// M13: asunciones de oxc con sensor estatico.
+    #[test]
+    fn flags_estaticos_de_oxc() {
+        assert_eq!(static_flags(&parse("with (o) { x; }")), ["with"]);
+        assert_eq!(static_flags(&parse("console.log(typeof window, document.title);")), ["global_conocido"]);
+        // Declarado en el programa: no es el global.
+        assert!(static_flags(&parse("var window = {}; window.x = 1;")).is_empty());
+        assert!(static_flags(&parse("function f(document) { return document; }")).is_empty());
+        // Existe en node (o no esta en la lista de oxc): no cuenta.
+        assert!(static_flags(&parse("console.log(navigator, process, globalThis, foo);")).is_empty());
+        assert_eq!(static_flags(&parse("class A extends /x/ {}")), ["extends"]);
+        assert_eq!(static_flags(&parse("var B = class extends ([1]) {};")), ["extends"]);
+        assert!(static_flags(&parse("class A extends null {} class C extends A {}")).is_empty());
+        // La lista esta ordenada para binary_search.
+        let t = super::NODE_MISSING_OXC_GLOBALS;
+        assert!(t.windows(2).all(|w| w[0] < w[1]));
     }
 }

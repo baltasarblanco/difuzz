@@ -36,7 +36,12 @@ use std::time::Duration;
 use crate::known::fnv1a;
 use crate::runner::{Exec, Runner, Status};
 
-const MAGIC: &str = "difuzz-cache-a v1";
+/// M10: v2 guarda tambien el canal de control (`Exec::ctl`).
+const MAGIC: &str = "difuzz-cache-a v2";
+
+/// M3: tercera linea de una entrada envenenada (ver `CacheA::tombstone`).
+/// `decode` no la reconoce como `status`: es un miss.
+const TOMBSTONE: &str = "status volatil";
 
 pub struct CacheA {
     /// `None`: cache apagada (`--no-cache`), `run` corre siempre.
@@ -79,15 +84,42 @@ impl CacheA {
     }
 
     /// `runner.run(js)`, salvo que ya este en la cache. Suma 1 a `hits` si no
-    /// hubo que ejecutar.
-    pub fn run(&self, runner: &Runner, js: &str, hits: &mut usize) -> Exec {
+    /// hubo que ejecutar. M3: el `bool` dice si A salio de la cache (hit), para
+    /// que una divergencia se confirme corriendo A en fresco.
+    pub fn run(&self, runner: &Runner, js: &str, hits: &mut usize) -> (Exec, bool) {
         if let Some(a) = self.get(js) {
             *hits += 1;
-            return a;
+            return (a, true);
         }
         let a = runner.run(js);
         self.put(js, &a);
-        a
+        (a, false)
+    }
+
+    /// M3: lapida. La entrada de `js` dio una salida que una ejecucion fresca no
+    /// reproduce (depende de ppid, worker, cwd, otra corrida...): desde ahora es
+    /// un miss para `get` y `put` no la pisa.
+    pub fn tombstone(&self, js: &str) {
+        let Some(path) = self.entry(js) else {
+            return;
+        };
+        let tmp = path.with_file_name(format!(
+            ".tmp-{}-{}",
+            std::process::id(),
+            self.tmp_seq.fetch_add(1, Ordering::Relaxed)
+        ));
+        let text = format!("{MAGIC}\noraculo {}\n{TOMBSTONE}\n", self.oracle);
+        let ok = std::fs::write(&tmp, text).is_ok() && std::fs::rename(&tmp, &path).is_ok();
+        if !ok {
+            let _ = std::fs::remove_file(&tmp);
+        }
+    }
+
+    fn is_tombstone(&self, path: &Path) -> bool {
+        std::fs::read_to_string(path).is_ok_and(|t| {
+            t.lines().nth(1).and_then(|l| l.strip_prefix("oraculo ")) == Some(self.oracle.as_str())
+                && t.lines().nth(2) == Some(TOMBSTONE)
+        })
     }
 
     fn entry(&self, js: &str) -> Option<PathBuf> {
@@ -107,6 +139,7 @@ impl CacheA {
         if !matches!(a.status, Status::Exited(_))
             || a.stdout.contains(&self.own_paths)
             || a.stderr.contains(&self.own_paths)
+            || self.is_tombstone(&path)
         {
             return;
         }
@@ -123,7 +156,7 @@ impl CacheA {
     }
 }
 
-fn node_version() -> String {
+pub fn node_version() -> String {
     Command::new("node")
         .arg("--version")
         .output()
@@ -133,29 +166,31 @@ fn node_version() -> String {
 }
 
 /// ```text
-/// difuzz-cache-a v1
+/// difuzz-cache-a v2
 /// oraculo 1f0c...
 /// status 0
 /// elapsed_us 41230
 /// flags stack,proxy
-/// len 12 0 345
-/// <stdout><stderr><js>
+/// len 12 0 9 345
+/// <stdout><stderr><ctl><js>
 /// ```
-/// `len`: bytes de stdout, stderr y js, en ese orden, pegados tras el encabezado.
+/// `len`: bytes de stdout, stderr, ctl y js, en ese orden, pegados tras el encabezado.
 fn encode(oracle: &str, js: &str, a: &Exec) -> String {
     let code = match a.status {
         Status::Exited(c) => c,
         _ => unreachable!("put solo guarda Exited"),
     };
     format!(
-        "{MAGIC}\noraculo {oracle}\nstatus {code}\nelapsed_us {}\nflags {}\nlen {} {} {}\n{}{}{js}",
+        "{MAGIC}\noraculo {oracle}\nstatus {code}\nelapsed_us {}\nflags {}\nlen {} {} {} {}\n{}{}{}{js}",
         a.elapsed.as_micros(),
         a.flags.join(","),
         a.stdout.len(),
         a.stderr.len(),
+        a.ctl.len(),
         js.len(),
         a.stdout,
         a.stderr,
+        a.ctl,
     )
 }
 
@@ -182,15 +217,16 @@ fn decode(text: &str, oracle: &str, js: &str) -> Option<Exec> {
         .split(' ')
         .map(|n| n.parse().ok())
         .collect::<Option<_>>()?;
-    let [lo, le, lj] = lens[..] else {
+    let [lo, le, lc, lj] = lens[..] else {
         return None;
     };
-    if rest.len() != lo + le + lj {
+    if rest.len() != lo + le + lc + lj {
         return None;
     }
     let stdout = rest.get(..lo)?;
     let stderr = rest.get(lo..lo + le)?;
-    if rest.get(lo + le..)? != js {
+    let ctl = rest.get(lo + le..lo + le + lc)?;
+    if rest.get(lo + le + lc..)? != js {
         return None;
     }
     Some(Exec {
@@ -199,6 +235,7 @@ fn decode(text: &str, oracle: &str, js: &str) -> Option<Exec> {
         stderr: stderr.to_string(),
         flags,
         elapsed: Duration::from_micros(micros),
+        ctl: ctl.to_string(),
     })
 }
 
@@ -213,6 +250,7 @@ mod tests {
             stderr: "aviso\n".into(),
             flags: vec!["stack".into(), "proxy".into()],
             elapsed: Duration::from_micros(1234),
+            ctl: "dz\nflags proxy,stack\n".into(),
         }
     }
 
@@ -234,6 +272,7 @@ mod tests {
         assert_eq!(a.stderr, "aviso\n");
         assert_eq!(a.flags, ["stack", "proxy"]);
         assert_eq!(a.elapsed, Duration::from_micros(1234));
+        assert_eq!(a.ctl, "dz\nflags proxy,stack\n");
         // Otro texto: miss.
         assert!(c.get("console.log(2)").is_none());
         // Otro oraculo (otro preload, otro timeout): miss.
@@ -262,6 +301,23 @@ mod tests {
         l.status = Status::Exited(70);
         c.put("c", &l);
         assert_eq!(c.get("c").map(|e| e.status), Some(Status::Exited(70)));
+        std::fs::remove_dir_all(&d).unwrap();
+    }
+
+    /// M3: una entrada envenenada queda como miss y no se vuelve a escribir.
+    #[test]
+    fn lapida_es_miss_y_put_no_la_pisa() {
+        let d = tmp("lapida");
+        let c = CacheA::with_oracle(Some(d.clone()), "o".into());
+        c.put("js", &exec("1\n"));
+        assert!(c.get("js").is_some());
+        c.tombstone("js");
+        assert!(c.get("js").is_none());
+        c.put("js", &exec("2\n"));
+        assert!(c.get("js").is_none());
+        // Otro oraculo no ve la lapida como suya: puede escribir.
+        let c2 = CacheA::with_oracle(Some(d.clone()), "o2".into());
+        c2.put("js", &exec("3\n"));
         std::fs::remove_dir_all(&d).unwrap();
     }
 
