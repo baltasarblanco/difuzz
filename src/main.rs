@@ -1100,22 +1100,78 @@ struct Ctx<'a> {
 /// `class extends 1` atrapado a proposito tapaba un bug real (O5). Se cambia
 /// cada heredero literal por `null`, se minifica igual y se compara: si la
 /// divergencia sigue, `extends` no la explica (`false`). Si no hay nada que
-/// cambiar o algo falla, `true` (se conserva el flag, como antes).
-fn extends_matters(runner: &runner::Runner, recheck: (minify::Preset, minify::SourceKind), original: &str) -> bool {
+/// cambiar o algo falla, inconcluso (b1-b: antes `true`, se conservaba el flag).
+/// El veredicto es el de recheck::veredicto (camino incluido).
+fn extends_matters(
+    runner: &runner::Runner,
+    recheck: (minify::Preset, minify::SourceKind),
+    original: &str,
+    a: &runner::Exec,
+    b: &runner::Exec,
+) -> recheck::Recheck {
     let (preset, kind) = recheck;
     let Some(neutral) = backend::swc::neutralize_extends(original, kind) else {
-        return true;
+        return recheck::Recheck::Inconcluso("no pude neutralizar el heredero literal".into());
     };
     let cfg = preset.build(backend::Minifier::Oxc, kind);
     let minify::Outcome::Ok { original: o2, minified: m2, .. } = minify::prepare(&neutral, &cfg) else {
-        return true;
+        return recheck::Recheck::Inconcluso("no pude minificar la variante con `extends null`".into());
     };
     let a2 = runner.run(&o2);
     if !a2.completed() {
-        return true;
+        return recheck::Recheck::Inconcluso(format!("la variante con `extends null` no termino ({:?})", a2.status));
     }
     let b2 = runner.run(&m2);
-    matches!(oracle::compare(&a2, &b2), oracle::Verdict::Same)
+    recheck::veredicto(a, b, &a2, &b2)
+}
+
+/// b1-b: aplica a `flags` el resultado del re-chequeo de `flag`. Solo `Explica`
+/// lo deja; `NoExplica` lo cambia por `irrelevante` y `Inconcluso` por
+/// `inconcluso` mas una nota para meta.txt.
+fn apply_recheck(
+    flags: &mut Vec<&str>,
+    notes: &mut Vec<String>,
+    flag: &str,
+    (irrelevante, inconcluso): (&'static str, &'static str),
+    r: recheck::Recheck,
+) {
+    let reemplazo = match r {
+        recheck::Recheck::Explica => return,
+        recheck::Recheck::NoExplica => irrelevante,
+        recheck::Recheck::Inconcluso(n) => {
+            notes.push(format!("re-chequeo de {flag} inconcluso: {n}"));
+            inconcluso
+        }
+    };
+    flags.retain(|f| *f != flag);
+    flags.push(reemplazo);
+}
+
+/// b1-b (R2-H02, R1-H03): M16 concluyente. `None` si A no depende de la pila (o
+/// la corrida honda fallo por el fuzzer). La profundidad explica la divergencia
+/// solo si la corrida con mas pila termino sola y B difiere de A unicamente en
+/// lo que tambien cambia con mas pila: B da lo mismo que A con mas pila, o las
+/// tres salidas tienen las mismas lineas y cada linea en que B difiere de A es
+/// una que cambia con la pila. Antes un Timeout de la corrida honda (o un bug en
+/// otra linea) alcanzaba para mandar a known/.
+fn depth_recheck(a: &runner::Exec, b: &runner::Exec, deep: &runner::Exec) -> Option<recheck::Recheck> {
+    if matches!(deep.status, Status::Failed(_)) || same_exec(deep, a) {
+        return None;
+    }
+    if !deep.completed() {
+        return Some(recheck::Recheck::Inconcluso(format!(
+            "la corrida con mas pila ({}) no termino ({:?})",
+            runner::DEEP_STACK,
+            deep.status
+        )));
+    }
+    if same_exec(deep, b) || recheck::localizada(a, b, deep) {
+        Some(recheck::Recheck::Explica)
+    } else {
+        Some(recheck::Recheck::Inconcluso(
+            "el original depende de la pila, pero B difiere de A en lineas que no cambian con mas pila".into(),
+        ))
+    }
 }
 
 /// M17: oxc no soporta sloppy (D1 del CLAUDE.md). Ante una divergencia de oxc
@@ -1123,23 +1179,34 @@ fn extends_matters(runner: &runner::Runner, recheck: (minify::Preset, minify::So
 /// divergencia desaparece al minificarlo asi, es "solo sloppy" (`Ok(true)`). Si
 /// no es estricto-valido, `Err(nota)`: queda en div/ para confirmar en el
 /// carril B. Se minifica el original ya impreso: es el mismo programa.
-fn sloppy_only(runner: &runner::Runner, preset: minify::Preset, original: &str, a: &runner::Exec) -> Result<bool, &'static str> {
+/// b1-b (R1-H01): ademas el camino tiene que sostenerse (recheck::veredicto). Si
+/// en estricto el original toma otra rama, la divergencia puede "desaparecer"
+/// porque la rama con el bug no corre: eso es inconcluso (`Err`), no sloppy.
+fn sloppy_only(
+    runner: &runner::Runner,
+    preset: minify::Preset,
+    original: &str,
+    a: &runner::Exec,
+    b: &runner::Exec,
+) -> Result<bool, String> {
     let strict = format!("\"use strict\";\n{original}");
     if !runner.node_accepts(&strict) {
-        return Err("no es estricto-valido: confirmar en el carril B");
+        return Err("no es estricto-valido: confirmar en el carril B".into());
     }
     let cfg = preset.build(backend::Minifier::Oxc, minify::SourceKind::Script);
     let minify::Outcome::Ok { original: o2, minified: m2, .. } = minify::prepare(&strict, &cfg) else {
-        return Ok(false);
+        return Err("re-chequeo sloppy inconcluso: no pude minificar la variante estricta".into());
     };
     let a2 = runner.run(&o2);
-    // Si en estricto el original muere antes (y en sloppy no), no hay nada que
-    // comparar: no se lo da por sloppy.
-    if !a2.completed() || (a2.threw() && !a.threw()) {
-        return Ok(false);
+    if !a2.completed() {
+        return Err(format!("re-chequeo sloppy inconcluso: la variante estricta no termino ({:?})", a2.status));
     }
     let b2 = runner.run(&m2);
-    Ok(matches!(oracle::compare(&a2, &b2), oracle::Verdict::Same))
+    match recheck::veredicto(a, b, &a2, &b2) {
+        recheck::Recheck::Explica => Ok(true),
+        recheck::Recheck::NoExplica => Ok(false),
+        recheck::Recheck::Inconcluso(n) => Err(format!("re-chequeo sloppy inconcluso: {n}")),
+    }
 }
 
 /// Corre B y compara contra A (que ya termino con exit 0). Devuelve `true` si
@@ -1210,9 +1277,14 @@ fn compare_and_report(
             // motor. DESVIO de la propuesta: se prueba ante toda divergencia
             // confirmada, no solo si la salida dice "RangeError" (corpus-invocar/37
             // lo atrapa y no lo imprime). Cuesta una ejecucion por divergencia.
+            // b1-b: notas de los re-chequeos inconclusos (van a meta.txt).
+            let mut notes: Vec<String> = Vec::new();
             let deep = runner.run_with_args(original, &[runner::DEEP_STACK]);
-            if !matches!(deep.status, Status::Failed(_)) && !same_exec(&deep, &a) {
-                flags.push("profundidad");
+            // b1-b (R2-H02): solo un M16 concluyente pone el flag (depth_recheck).
+            match depth_recheck(&a, &b, &deep) {
+                None => {}
+                Some(recheck::Recheck::Explica) => flags.push("profundidad"),
+                Some(r) => apply_recheck(&mut flags, &mut notes, "profundidad", ("profundidad_irrelevante", "profundidad_inconcluso"), r),
             }
             let flags_b: Vec<&str> = b.flags.iter().map(String::as_str).collect();
             if names_cfg.is_some_and(|c| names_visible(original, &a.stdout) && names_only(runner, c, original, &a)) {
@@ -1220,35 +1292,50 @@ fn compare_and_report(
             }
             if flags.contains(&"extends") {
                 if let Some(rc) = ctx.oxc_recheck {
-                    if !extends_matters(runner, rc, original) {
-                        flags.retain(|f| *f != "extends");
-                        flags.push("extends_irrelevante");
-                    }
+                    let r = extends_matters(runner, rc, original, &a, &b);
+                    apply_recheck(&mut flags, &mut notes, "extends", ("extends_irrelevante", "extends_inconcluso"), r);
                 }
             }
             // Pendiente del fuego: `global_conocido` y `with` tambien se
             // re-chequean (recheck.rs), como `extends`. Solo oxc los clasifica.
             if let Some(rc) = ctx.oxc_recheck {
-                if flags.contains(&"global_conocido") && !recheck::globals_matter(runner, rc.1, original, minified) {
-                    flags.retain(|f| *f != "global_conocido");
-                    flags.push("global_conocido_irrelevante");
+                if flags.contains(&"global_conocido") {
+                    let r = recheck::globals_matter(runner, rc.1, original, minified, &a, &b);
+                    apply_recheck(
+                        &mut flags,
+                        &mut notes,
+                        "global_conocido",
+                        ("global_conocido_irrelevante", "global_conocido_inconcluso"),
+                        r,
+                    );
                 }
-                if flags.contains(&"with") && !recheck::with_matters(runner, rc, original) {
-                    flags.retain(|f| *f != "with");
-                    flags.push("with_irrelevante");
+                if flags.contains(&"with") {
+                    let r = recheck::with_matters(runner, rc, original, &a, &b);
+                    apply_recheck(&mut flags, &mut notes, "with", ("with_irrelevante", "with_inconcluso"), r);
                 }
             }
             let mut why = ctx.known.classify(rel, &flags);
-            let mut strict_note = None;
             if let (None, Some(preset)) = (&why, ctx.strict_recheck) {
-                match sloppy_only(runner, preset, original, &a) {
+                match sloppy_only(runner, preset, original, &a, &b) {
                     Ok(true) => {
                         flags.push("solo_sloppy");
                         why = Some("oxc: solo sloppy (no soportado); con \"use strict\" la divergencia desaparece".into());
                     }
                     Ok(false) => {}
-                    Err(nota) => strict_note = Some(nota.to_string()),
+                    Err(nota) => notes.push(nota),
                 }
+            }
+            // b1-b (R1-H03): un minificado que node no acepta nunca es asuncion:
+            // ninguna permite que el minifier produzca codigo invalido. Se
+            // clasifica sin flags (queda el backlog/ruta de SWC, que no son
+            // asunciones). Solo se paga `node --check` si iba a known/.
+            if why.is_some() && !runner.node_accepts(minified) && runner.node_accepts(original) {
+                let sin_flags = ctx.known.classify(rel, &[]);
+                if sin_flags.is_none() {
+                    flags.push("minificado_invalido");
+                    notes.push("node --check rechaza el minificado (y acepta el original): ninguna asuncion lo explica".into());
+                }
+                why = sin_flags;
             }
             // Una conocida que cambia de sintoma deja de estar cubierta.
             let drift = why.as_ref().and_then(|w| {
@@ -1262,6 +1349,11 @@ fn compare_and_report(
                 why = None;
                 stats.known_drift += 1;
             }
+            // b1-b: el drift va primero (como antes, cuando pisaba la nota de sloppy).
+            if let Some(d) = &drift {
+                notes.insert(0, d.clone());
+            }
+            let nota = (!notes.is_empty()).then(|| notes.join(" | "));
             if why.is_some() {
                 stats.known += 1;
             } else {
@@ -1278,7 +1370,7 @@ fn compare_and_report(
                 kind,
                 observed,
                 why.as_deref(),
-                drift.as_deref().or(strict_note.as_deref()),
+                nota.as_deref(),
                 &flags,
                 &flags_b,
                 if a_cached { "hit (confirmado con una corrida fresca)" } else { "miss" },
@@ -1648,25 +1740,108 @@ mod tests {
         std::fs::remove_dir_all(&d).unwrap();
     }
 
+    /// b1-b (R1-H03): un minificado que node no acepta nunca va a known/, tenga
+    /// los flags que tenga. Con el mismo flag y un minificado valido, sigue en known/.
+    #[test]
+    fn minificado_invalido_nunca_es_asuncion() {
+        use super::{backend::Minifier, cache, compare_and_report, known, oracle, runner, triage, Ctx, Stats};
+        use std::path::Path;
+        if std::process::Command::new("node").arg("--version").output().is_err() {
+            eprintln!("sin node en PATH: test omitido");
+            return;
+        }
+        let d = std::env::temp_dir().join(format!("difuzz-test-invalido-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        let reporter = oracle::Reporter::new(&d, "test".into(), runner::PRELOAD);
+        let known = known::Known::load(&d, &d, 0).with_backend(Minifier::Oxc);
+        let cache = cache::CacheA::new(None, &[]);
+        let triage = triage::Triage::load(&d);
+        let ctx = Ctx { reporter: &reporter, known: &known, cache: &cache, triage: &triage, strict_recheck: None, oxc_recheck: None };
+        let preload = runner::Preload::write_tagged("invalido").unwrap();
+        let r = runner::Runner::new(&preload, 989, std::time::Duration::from_secs(20));
+        // `coercion` es un flag estatico de todo el programa (05-coercion-miente).
+        let o = "class P { toString() { return \"p\"; } }\nconsole.log(1);\n";
+        let mut st = Stats::default();
+        assert!(compare_and_report(&ctx, &r, &mut st, Path::new("valido/input.js"), o, "console.log(2);\n", r.run(o), false, false, &["coercion"], None));
+        assert_eq!((st.known, st.divergences), (1, 0));
+        let mut st = Stats::default();
+        assert!(compare_and_report(&ctx, &r, &mut st, Path::new("invalido/input.js"), o, "console.log(1;\n", r.run(o), false, false, &["coercion"], None));
+        assert_eq!((st.known, st.divergences), (0, 1));
+        let meta = std::fs::read_to_string(d.join("div/invalido/meta.txt")).unwrap();
+        assert!(meta.contains("known: no\n") && meta.contains("nota: node --check rechaza el minificado"), "{meta}");
+        assert!(meta.contains("minificado_invalido"), "{meta}");
+        std::fs::remove_dir_all(&d).unwrap();
+    }
+
     /// M17: "solo sloppy" exige que el original sea estricto-valido y que la
     /// divergencia desaparezca en estricto. Un bug real (O1) no se esconde.
     #[test]
     fn oxc_solo_sloppy() {
-        use super::{minify::Preset, runner, sloppy_only};
+        use super::{backend::Minifier, minify, minify::Preset, runner, sloppy_only};
         if std::process::Command::new("node").arg("--version").output().is_err() {
             eprintln!("sin node en PATH: test omitido");
             return;
         }
         let preload = runner::Preload::write_tagged("m17").unwrap();
         let r = runner::Runner::new(&preload, 998, std::time::Duration::from_secs(20));
-        let sloppy = "function f() { return this === undefined; }\nconsole.log(f());\n";
-        let a = r.run(sloppy);
-        assert_eq!(a.stdout, "false\n");
-        assert_eq!(sloppy_only(&r, Preset::CarrilA, sloppy, &a), Ok(true));
+        // b1-b: A y B de verdad (oxc core_defaults), no solo la variante estricta.
+        let ab = |src: &str| {
+            let cfg = Preset::CoreDefaults.build(Minifier::Oxc, minify::SourceKind::Script);
+            let minify::Outcome::Ok { original, minified, .. } = minify::prepare(src, &cfg) else {
+                panic!("no minifica: {src}");
+            };
+            let (a, b) = (r.run(&original), r.run(&minified));
+            (original, a, b)
+        };
+        // terser/compress/dead_code/dead_code_2_should_warn (corpus completo): `g`
+        // es una funcion en bloque (Anexo B, solo sloppy). En sloppy `g()` da
+        // TypeError, en estricto ReferenceError: mismo punto, se acepta como sloppy.
+        let (o, a, b) = ab("function f(){g();x=10;throw new Error(`foo`);if(x){y();var x;function g(){}(function(){var q;function y(){}})()}}f();\n");
+        assert_eq!(a.stdout, "!dz throw TypeError\n");
+        assert_eq!(sloppy_only(&r, Preset::CoreDefaults, &o, &a, &b), Ok(true));
         let with = "with ({}) { console.log(1); }\n";
-        assert!(sloppy_only(&r, Preset::CarrilA, with, &r.run(with)).is_err());
-        let o1 = "const __proto__ = 0;\nconsole.log(Object.keys({ __proto__ }));\n";
-        assert_eq!(sloppy_only(&r, Preset::CoreDefaults, o1, &r.run(o1)), Ok(false));
+        assert!(sloppy_only(&r, Preset::CarrilA, with, &r.run(with), &r.run(with)).is_err());
+        let (o, a, b) = ab("const __proto__ = 0;\nconsole.log(Object.keys({ __proto__ }));\n");
+        assert_eq!(sloppy_only(&r, Preset::CoreDefaults, &o, &a, &b), Ok(false));
+        // b1-b (R1-H01, c4 10-rt-sloppy-miente): el bug de oxc (borra la IIFE con
+        // rest y default con efecto) esta en la rama sloppy. En estricto el
+        // original toma la otra rama: antes `Ok(true)` (known/), ahora inconcluso.
+        let (o, a, b) = ab("function rec(v) { console.log(v); }\nfunction f() { return this; }\nif (f() === undefined) {\n  console.log(\"estricto\");\n} else {\n  (function (...[value = rec(\"rest\")]) {})();\n}\nconsole.log(\"fin\");\n");
+        assert_eq!(a.stdout, "rest\nfin\n");
+        assert_ne!(b.stdout, a.stdout, "oxc ya no tiene el bug de 9460: buscar otro");
+        let s = sloppy_only(&r, Preset::CoreDefaults, &o, &a, &b);
+        assert!(s.as_ref().is_err_and(|n| n.contains("otro camino")), "{s:?}");
+    }
+
+    /// b1-b (R2-H02): M16 solo es concluyente si la corrida honda termina y B
+    /// difiere de A solo en lineas que dependen de la pila.
+    #[test]
+    fn profundidad_concluyente() {
+        use super::{depth_recheck, recheck::Recheck, runner::{Exec, Status}};
+        let ex = |status: Status, s: &str| Exec {
+            status,
+            stdout: s.into(),
+            stderr: String::new(),
+            flags: Vec::new(),
+            elapsed: std::time::Duration::ZERO,
+            ctl: String::new(),
+        };
+        let ok = |s: &str| ex(Status::Exited(0), s);
+        // A no depende de la pila: no hay flag.
+        assert_eq!(depth_recheck(&ok("1\nx\n"), &ok("2\nx\n"), &ok("1\nx\n")), None);
+        // Solo cambia la linea que depende de la pila: concluyente.
+        assert_eq!(depth_recheck(&ok("1200\nx\n"), &ok("1500\nx\n"), &ok("2400\nx\n")), Some(Recheck::Explica));
+        // B da lo mismo que A con mas pila (A se quedo sin pila, B no).
+        assert_eq!(depth_recheck(&ok("corto\n"), &ok("largo\n"), &ok("largo\n")), Some(Recheck::Explica));
+        // 07-profundidad-miente: ademas de la linea de la pila, B pierde otra.
+        let r = depth_recheck(&ok("playo 3\n[ '__proto__' ]\n"), &ok("playo 5\n[]\n"), &ok("hondo 1\n[ '__proto__' ]\n"));
+        assert!(matches!(r, Some(Recheck::Inconcluso(_))), "{r:?}");
+        // R2-H02: la corrida honda en Timeout no es evidencia de profundidad.
+        let r = depth_recheck(&ok("1\n"), &ok("2\n"), &ex(Status::Timeout, ""));
+        assert!(matches!(r, Some(Recheck::Inconcluso(ref n)) if n.contains("Timeout")), "{r:?}");
+        // Un Failed del fuzzer sigue sin opinar.
+        assert_eq!(depth_recheck(&ok("1\n"), &ok("2\n"), &ex(Status::Failed("x".into()), "")), None);
     }
 
     /// M31 (a): si invocar no termina (cuelgue, exit propio), la observacion se
