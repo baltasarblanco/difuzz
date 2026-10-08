@@ -44,15 +44,22 @@ impl Index {
         })
     }
 
-    /// M23: la corrida termino: el indice nuevo reemplaza al anterior.
+    /// M23: la corrida termino: el indice nuevo reemplaza al anterior. R2-H05:
+    /// y ya no hay una corrida cortada pendiente para esta celda.
     pub fn commit(&self) -> std::io::Result<()> {
         self.file.lock().unwrap_or_else(|e| e.into_inner()).flush()?;
-        std::fs::rename(&self.tmp, &self.dest)
+        std::fs::rename(&self.tmp, &self.dest)?;
+        let _ = std::fs::remove_file(incompleta_of(&self.dest));
+        Ok(())
     }
 
-    /// M23: corrida interrumpida: se descarta el indice a medias.
+    /// M23: corrida interrumpida: el indice a medias no reemplaza al anterior.
+    /// R2-H05: queda como `index-<celda>.tsv.incompleta`, la marca que lee
+    /// `--cruce` (un SIGKILL deja el `.tmp`, que tambien avisa).
     pub fn abandon(&self) {
-        let _ = std::fs::remove_file(&self.tmp);
+        if std::fs::rename(&self.tmp, incompleta_of(&self.dest)).is_err() {
+            let _ = std::fs::remove_file(&self.tmp);
+        }
     }
 
     pub fn record(&self, case: &str, dest: &str, kind: &str, hash: u64) {
@@ -68,6 +75,31 @@ impl Index {
 
 fn file_of(dir: &Path, cell: &str) -> PathBuf {
     dir.join(format!("index-{cell}.tsv"))
+}
+
+fn incompleta_of(dest: &Path) -> PathBuf {
+    PathBuf::from(format!("{}.incompleta", dest.display()))
+}
+
+/// R2-H05: celdas cuya ultima corrida no termino: `.incompleta` (cortada por
+/// SIGINT/SIGTERM) o `.tmp` (en curso, o muerta sin cierre: SIGKILL, abort).
+fn sin_terminar(dir: &Path) -> Vec<(String, &'static str)> {
+    let mut v: Vec<(String, &'static str)> = std::fs::read_dir(dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|e| {
+            let name = e.file_name().to_string_lossy().into_owned();
+            let cell = name.strip_prefix("index-")?;
+            if let Some(c) = cell.strip_suffix(".tsv.incompleta") {
+                Some((c.to_string(), "interrumpida"))
+            } else {
+                cell.strip_suffix(".tsv.tmp").map(|c| (c.to_string(), "en curso o muerta sin cierre"))
+            }
+        })
+        .collect();
+    v.sort();
+    v
 }
 
 struct Row {
@@ -208,7 +240,14 @@ fn kind_letter(kind: &str) -> char {
 /// puede cambiar entre celdas, p. ej. `delete_*` es Stdout en A y ThrowNew en
 /// B). Al final, cuantos hallazgos hay por celda y destino.
 pub fn cruce(dir: &Path) -> std::io::Result<String> {
-    let (cells, rows) = read_rows(dir)?;
+    let (cells, rows) = match read_rows(dir) {
+        // R2-H05: sin ninguna corrida completa, el error dice cuales se cortaron.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound && !sin_terminar(dir).is_empty() => {
+            let v: Vec<String> = sin_terminar(dir).into_iter().map(|(c, e)| format!("{c} ({e})")).collect();
+            return Err(std::io::Error::new(e.kind(), format!("{e}; corridas sin terminar: {}", v.join(", "))));
+        }
+        r => r?,
+    };
     let shorts: Vec<String> = cells.iter().map(|c| Cell::parse(c).short()).collect();
     let width = shorts.iter().map(String::len).max().unwrap_or(0).max(4) + 1;
     // caso -> kind por celda con div
@@ -263,12 +302,22 @@ pub fn cruce(dir: &Path) -> std::io::Result<String> {
     for c in &cells {
         let n = |d: &str| counts.get(&(c.as_str(), d)).copied().unwrap_or(0);
         out.push_str(&format!(
-            "{c}: div={} known={} panic={} lint={}\n",
+            "{c}: div={} known={} panic={} lint={} recursos={}\n",
             n("div"),
             n("known"),
             n("panic"),
-            n("lint")
+            n("lint"),
+            // b2-int (R1-H08 / R2-H04): timeout o memoria del minificador.
+            n("recursos")
         ));
+    }
+    let pendientes = sin_terminar(dir);
+    if !pendientes.is_empty() {
+        out.push_str("\n=== corridas sin terminar: la tabla usa la ultima corrida completa de la celda; su <out>/<celda>/ puede estar a medias (ver CORRIDA.txt)\n");
+        for (c, estado) in pendientes {
+            let nota = if cells.contains(&c) { "" } else { " (sin corrida completa: no esta en la tabla)" };
+            out.push_str(&format!("{c}: {estado}{nota}\n"));
+        }
     }
     Ok(out)
 }
@@ -291,6 +340,8 @@ mod tests {
         cfb.record("fixture__12214", "div", "ThrowNew", 2);
         ct.record("fixture__12214", "div", "ThrowNew", 2);
         s.record("fixture__x", "known", "Stdout", 3);
+        // b2-int: recursos/ (timeout o memoria del minificador) tambien se cuenta.
+        s.record("fixture__lento", "recursos", "Recursos", 4);
         for ix in [&ab, &ct, &cfb, &s] {
             ix.commit().unwrap();
         }
@@ -307,13 +358,21 @@ mod tests {
         assert_eq!(lines[2], "N              N              .              .              fixture__12214");
         assert_eq!(lines[3], ".              S              N              .              terser__delete_1");
         assert!(t.contains("oxc+core_defaults+tal_cual: div=2 known=0 panic=0 lint=0"));
-        assert!(t.contains("swc+core_defaults+tal_cual+mut3: div=0 known=1 panic=0 lint=0"));
+        assert!(t.contains("swc+core_defaults+tal_cual+mut3: div=0 known=1 panic=0 lint=0 recursos=1"));
+        assert!(t.contains("oxc+core_defaults+tal_cual: div=2 known=0 panic=0 lint=0 recursos=0"));
 
         // M23: una corrida cortada (abandon) deja el indice anterior intacto.
         let ct = Index::create(&d, "oxc+core_defaults+tal_cual").unwrap();
         ct.record("otro", "div", "Stdout", 9);
         ct.abandon();
-        assert_eq!(cruce(&d).unwrap(), t);
+        // R2-H05: la tabla es la misma y al final avisa que la ultima no termino.
+        let tc = cruce(&d).unwrap();
+        assert!(tc.starts_with(t.as_str()), "{tc}");
+        assert_eq!(&tc[t.len()..].lines().nth(2), &Some("oxc+core_defaults+tal_cual: interrumpida"), "{tc}");
+        // Una corrida en curso (o muerta por SIGKILL) deja el .tmp: tambien avisa.
+        let en_curso = Index::create(&d, "swc+carril_a+tal_cual").unwrap();
+        assert!(cruce(&d).unwrap().contains("\nswc+carril_a+tal_cual: en curso o muerta sin cierre (sin corrida completa: no esta en la tabla)\n"));
+        en_curso.abandon();
         // Correr de nuevo una celda reemplaza solo sus filas.
         let ct = Index::create(&d, "oxc+core_defaults+tal_cual").unwrap();
         ct.commit().unwrap();
@@ -321,12 +380,19 @@ mod tests {
         let t2 = cruce(&d).unwrap();
         assert!(t2.contains("oxc+core_defaults+tal_cual: div=0"));
         assert!(t2.contains("fixture__12214"));
+        // Y como termino, ya no figura entre las sin terminar (la otra si).
+        assert!(!t2.contains("oxc+core_defaults+tal_cual: interrumpida"), "{t2}");
+        assert!(t2.contains("swc+carril_a+tal_cual: interrumpida"), "{t2}");
         std::fs::remove_dir_all(&d).unwrap();
 
         // Sin indices: error, no una tabla vacia.
         let vacio = std::env::temp_dir().join(format!("difuzz-test-indice-vacio-{}", std::process::id()));
         std::fs::create_dir_all(&vacio).unwrap();
         assert!(cruce(&vacio).is_err());
+        // R2-H05: si solo hay corridas cortadas, el error las nombra.
+        Index::create(&vacio, "oxc+carril_a+tal_cual").unwrap().abandon();
+        let e = cruce(&vacio).unwrap_err().to_string();
+        assert!(e.ends_with("corridas sin terminar: oxc+carril_a+tal_cual (interrumpida)"), "{e}");
         std::fs::remove_dir_all(&vacio).unwrap();
     }
 }

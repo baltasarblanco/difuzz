@@ -165,7 +165,8 @@ fn reobserva_exports_despues_de_invocar() {
         return;
     }
     let preload = Preload::write_tagged("m31x").unwrap();
-    let r = Runner::new(&preload, 9989, std::time::Duration::from_secs(20)).with_kind(SourceKind::Module).with_invocar(true);
+    // Id propio: el 9989 lo usa tambien cache.rs (mismo cwd y script en paralelo).
+    let r = Runner::new(&preload, 9982, std::time::Duration::from_secs(20)).with_kind(SourceKind::Module).with_invocar(true);
     let e = r.observing().run("export let n = 0;\nexport function f() { n = 4; }\nexport const c = 1;\n");
     assert_eq!(e.status, Status::Exited(0), "{}", e.stderr);
     assert_eq!(e.stdout, "export c = 1\nexport f = fn\nexport n = 0\nexport f() = undefined\nexport n = 4 (tras invocar)\n");

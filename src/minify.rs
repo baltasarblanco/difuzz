@@ -47,12 +47,17 @@ impl Preset {
     /// La config del preset para un backend y un tipo de fuente. El carril
     /// (script o modulo) llega explicito: el backend lo recibe, no lo adivina.
     pub fn build(self, minifier: Minifier, kind: SourceKind) -> Config {
-        let oraculo = crate::subproceso::oraculo(minifier, self, kind, false);
+        // A6/R1-H12: el analisis separado del minifier (analisis::Analizado).
+        let remoto = crate::subproceso::activo();
+        let env = |b: Box<dyn Backend>| crate::analisis::envolver(b, minifier, kind, remoto);
+        // b2-int: el oraculo es SIEMPRE un hijo (tambien con --en-proceso), y
+        // en el hijo oxc no corre los chequeos: los pide su Analizado.
+        let oraculo = crate::subproceso::oraculo(minifier, self, kind, false).map(|b| crate::analisis::envolver(b, minifier, kind, true));
         // M34: salvo --en-proceso, la misma config pero minificando en un hijo.
-        if crate::subproceso::activo() {
-            return Config(Box::new(crate::subproceso::Remoto::new(minifier, self, kind, false)), oraculo);
+        if remoto {
+            return Config(env(Box::new(crate::subproceso::Remoto::new(minifier, self, kind, false))), oraculo);
         }
-        Config(minifier.build(self, kind), oraculo)
+        Config(env(minifier.build(self, kind)), oraculo)
     }
 }
 
@@ -137,11 +142,13 @@ impl Config {
     /// No es una celda: sirve para preguntar si una divergencia de core_defaults
     /// desaparece cuando los nombres no cambian (main::names_only).
     pub fn core_defaults_keep_names(minifier: Minifier, kind: SourceKind) -> Self {
-        let oraculo = crate::subproceso::oraculo(minifier, Preset::CoreDefaults, kind, true);
-        if crate::subproceso::activo() {
-            return Config(Box::new(crate::subproceso::Remoto::new(minifier, Preset::CoreDefaults, kind, true)), oraculo);
+        let remoto = crate::subproceso::activo();
+        let env = |b: Box<dyn Backend>| crate::analisis::envolver(b, minifier, kind, remoto);
+        let oraculo = crate::subproceso::oraculo(minifier, Preset::CoreDefaults, kind, true).map(|b| crate::analisis::envolver(b, minifier, kind, true));
+        if remoto {
+            return Config(env(Box::new(crate::subproceso::Remoto::new(minifier, Preset::CoreDefaults, kind, true))), oraculo);
         }
-        Config(minifier.build_core_defaults_keep_names(kind), oraculo)
+        Config(env(minifier.build_core_defaults_keep_names(kind)), oraculo)
     }
 
     /// M34: una config sobre un backend ya armado (el hijo de `--preparar`).
@@ -165,6 +172,8 @@ pub enum Outcome {
         static_flags: Vec<&'static str>,
         /// checks::dead_writes (original, minificado).
         dead_writes: (usize, usize),
+        /// R1-H13: si el analisis de arriba (parser de SWC) vio los tres textos.
+        analisis: crate::checks::Analisis,
     },
     /// El parser rechazo el fuente o lo acepto con errores recuperados.
     /// `esm`: en carril A, parsea como modulo (es del carril B); solo se cuenta.
@@ -207,11 +216,11 @@ fn prepare_con(backend: &dyn Backend, src: &str) -> Outcome {
 ///   con la nota, para no esconder nada.
 fn respaldo(src: &str, msg: String, oraculo: &dyn Backend) -> Outcome {
     match prepare_con(oraculo, src) {
-        Outcome::Ok { original, minified, static_flags, dead_writes } => {
+        Outcome::Ok { original, minified, static_flags, dead_writes, analisis } => {
             NOTA_ASSERTS.with(|n| {
                 n.borrow_mut().get_or_insert(NotaAsserts { panic: msg, minificado: minified.clone() });
             });
-            Outcome::Ok { original, minified, static_flags, dead_writes }
+            Outcome::Ok { original, minified, static_flags, dead_writes, analisis }
         }
         Outcome::Panic(m2) if m2 == msg => {
             Outcome::Panic(format!("{msg}\noraculo sin debug assertions: el mismo panic (es real, no solo de un debug_assert)"))
@@ -249,6 +258,12 @@ thread_local! {
     static PANIC_LOCATION: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
     /// R1-H05: ver `nota_asserts`. Por hilo: cada worker procesa un caso a la vez.
     static NOTA_ASSERTS: std::cell::RefCell<Option<NotaAsserts>> = const { std::cell::RefCell::new(None) };
+}
+
+/// A6/R1-H12: la ubicacion del ultimo panic de este hilo, y la borra
+/// (analisis::atrapar la usa para ver panics atrapados adentro del analisis).
+pub fn tomar_ubicacion_panic() -> Option<String> {
+    PANIC_LOCATION.with(|l| l.borrow_mut().take())
 }
 
 /// M22: llamado desde el panic hook. Corre en el hilo que entro en panico.
@@ -355,7 +370,9 @@ fn mentions_word(src: &str, word: &str) -> bool {
 }
 
 fn top_level_bindings(src: &str, kind: SourceKind) -> Option<Vec<String>> {
-    let program = crate::backend::swc::parse_for(src, kind)?;
+    // R1-H13: con errores recuperados tambien (el fuente ya lo acepto el
+    // backend; antes esos casos quedaban en mudos_sin_bindings sin aviso).
+    let program = crate::backend::swc::parse_para_analisis(src, kind).0?;
     let decls: Vec<&Decl> = match &program {
         Program::Script(s) => s
             .body
@@ -462,6 +479,193 @@ fn push_name(out: &mut Vec<String>, name: &str) {
     }
 }
 
+/// R1-H14: epilogo de la pasada ADICIONAL de bloques (main::pasada_bloques):
+/// `src` con una llamada al final que imprime SOLO los bindings top-level que
+/// `instrument` no ve (`bindings_en_bloques`). `None` si no hay ninguno.
+///
+/// Por que aparte y no sumados al epilogo normal: cada nombre observado es una
+/// referencia mas, y eso cambia lo que el minifier puede borrar o inlinear
+/// (R2-H01). El epilogo normal queda byte a byte igual; esta pasada corre
+/// despues, sobre el mismo fuente crudo, y solo agrega cobertura.
+pub fn instrument_bloques(src: &str, kind: SourceKind) -> Option<String> {
+    let (directos, extra) = catch_unwind(AssertUnwindSafe(|| {
+        GLOBALS.set(&Globals::new(), || (top_level_bindings(src, kind), bindings_en_bloques(src, kind)))
+    }))
+    .ok()?;
+    let directos = directos.unwrap_or_default();
+    let extra: Vec<String> = extra?.into_iter().filter(|n| !directos.contains(n)).collect();
+    if extra.is_empty() {
+        return None;
+    }
+    let mut args: Vec<String> = extra.iter().take(MAX_OBSERVED).map(|n| format!("[\"{n}\", {n}]")).collect();
+    if extra.len() > MAX_OBSERVED {
+        args.push(format!("[\"!dz truncados\", {}]", extra.len() - MAX_OBSERVED));
+    }
+    Some(format!("{src}\n;\n__difuzzObserve({});\n", args.join(", ")))
+}
+
+/// R1-H14: los bindings del scope top-level que no son declaraciones directas
+/// del programa: `var` adentro de bloques, `if`, loops (tambien la cabeza),
+/// `try`/`catch`/`finally`, `switch`, etiquetas y `with` (suben al scope
+/// top-level o de la funcion de `en_funcion`), y en script sloppy las
+/// funciones declaradas en bloques (Anexo B.3.3) o como cuerpo de un `if` o de
+/// una etiqueta (B.3.4, B.3.2). Una funcion de bloque no sube si choca con un
+/// `let`/`const`/`class`, la cabeza `let` de un loop o el parametro de un
+/// `catch` que la encierra (conservador: el nombre no se observa); tampoco las
+/// generadoras ni las `async`. No entra en funciones ni en expresiones.
+///
+/// Sin los `import` del carril B: son vinculos inmutables a otro modulo (que
+/// el minifier no reescribe) y observarlos agrega referencias y objetos ajenos.
+fn bindings_en_bloques(src: &str, kind: SourceKind) -> Option<Vec<String>> {
+    let program = crate::backend::swc::parse_para_analisis(src, kind).0?;
+    let stmts: Vec<&Stmt> = match &program {
+        Program::Script(s) => s.body.iter().collect(),
+        Program::Module(m) => m
+            .body
+            .iter()
+            .filter_map(|it| match it {
+                ModuleItem::Stmt(s) => Some(s),
+                _ => None,
+            })
+            .collect(),
+    };
+    let sloppy = kind == SourceKind::Script
+        && !stmts.iter().take_while(|s| s.can_precede_directive()).any(|s| s.is_use_strict());
+    let mut h = Bloques { anexo_b: sloppy, lexicos: Vec::new(), names: Vec::new() };
+    for st in stmts {
+        // Las declaraciones directas son de top_level_bindings.
+        if !matches!(st, Stmt::Decl(_)) {
+            h.cuerpo(st);
+        }
+    }
+    Some(h.names)
+}
+
+struct Bloques {
+    /// Script sloppy: las funciones de bloque suben (Anexo B).
+    anexo_b: bool,
+    /// Nombres lexicos de cada bloque (o cabeza de loop, o `catch`) abierto.
+    lexicos: Vec<Vec<String>>,
+    names: Vec<String>,
+}
+
+impl Bloques {
+    fn var(&mut self, v: &swc_ecma_ast::VarDecl) {
+        if v.kind == swc_ecma_ast::VarDeclKind::Var {
+            for d in &v.decls {
+                collect_pat(&d.name, &mut self.names);
+            }
+        }
+    }
+
+    /// La cabeza de un loop: un `var` sube; un `let`/`const` encierra el cuerpo.
+    fn cabeza(&mut self, v: Option<&swc_ecma_ast::VarDecl>) -> Vec<String> {
+        let mut lex = Vec::new();
+        if let Some(v) = v {
+            if v.kind == swc_ecma_ast::VarDeclKind::Var {
+                self.var(v);
+            } else {
+                for d in &v.decls {
+                    collect_pat(&d.name, &mut lex);
+                }
+            }
+        }
+        lex
+    }
+
+    fn funcion(&mut self, f: &swc_ecma_ast::FnDecl) {
+        let name = f.ident.sym.as_str();
+        if self.anexo_b
+            && !f.function.is_generator
+            && !f.function.is_async
+            && !self.lexicos.iter().any(|l| l.iter().any(|n| n == name))
+        {
+            push_name(&mut self.names, name);
+        }
+    }
+
+    /// Una sentencia suelta (cuerpo de `if`, loop, etiqueta, `with`, o una del
+    /// top-level que no es declaracion).
+    fn cuerpo(&mut self, st: &Stmt) {
+        use swc_ecma_ast::{ForHead, VarDeclOrExpr};
+        match st {
+            Stmt::Decl(Decl::Fn(f)) => self.funcion(f),
+            Stmt::Decl(Decl::Var(v)) => self.var(v),
+            Stmt::Block(b) => self.lista(b.stmts.iter()),
+            Stmt::With(w) => self.cuerpo(&w.body),
+            Stmt::Labeled(l) => self.cuerpo(&l.body),
+            Stmt::If(i) => {
+                self.cuerpo(&i.cons);
+                if let Some(alt) = &i.alt {
+                    self.cuerpo(alt);
+                }
+            }
+            // Todos los `case` comparten un bloque.
+            Stmt::Switch(sw) => self.lista(sw.cases.iter().flat_map(|c| c.cons.iter())),
+            Stmt::Try(t) => {
+                self.lista(t.block.stmts.iter());
+                if let Some(h) = &t.handler {
+                    let mut param = Vec::new();
+                    if let Some(p) = &h.param {
+                        collect_pat(p, &mut param);
+                    }
+                    self.lexicos.push(param);
+                    self.lista(h.body.stmts.iter());
+                    self.lexicos.pop();
+                }
+                if let Some(f) = &t.finalizer {
+                    self.lista(f.stmts.iter());
+                }
+            }
+            Stmt::While(w) => self.cuerpo(&w.body),
+            Stmt::DoWhile(w) => self.cuerpo(&w.body),
+            Stmt::For(f) => {
+                let v = match &f.init {
+                    Some(VarDeclOrExpr::VarDecl(v)) => Some(&**v),
+                    _ => None,
+                };
+                let lex = self.cabeza(v);
+                self.lexicos.push(lex);
+                self.cuerpo(&f.body);
+                self.lexicos.pop();
+            }
+            Stmt::ForIn(swc_ecma_ast::ForInStmt { left, body, .. }) | Stmt::ForOf(swc_ecma_ast::ForOfStmt { left, body, .. }) => {
+                let v = match left {
+                    ForHead::VarDecl(v) => Some(&**v),
+                    _ => None,
+                };
+                let lex = self.cabeza(v);
+                self.lexicos.push(lex);
+                self.cuerpo(body);
+                self.lexicos.pop();
+            }
+            _ => {}
+        }
+    }
+
+    /// Las sentencias de un bloque: sus `let`/`const`/`class` encierran a las
+    /// funciones de bloques mas adentro.
+    fn lista<'a>(&mut self, stmts: impl Iterator<Item = &'a Stmt> + Clone) {
+        let mut lex = Vec::new();
+        for st in stmts.clone() {
+            match st {
+                Stmt::Decl(Decl::Var(v)) if v.kind != swc_ecma_ast::VarDeclKind::Var => {
+                    for d in &v.decls {
+                        collect_pat(&d.name, &mut lex);
+                    }
+                }
+                Stmt::Decl(Decl::Class(c)) => push_name(&mut lex, c.ident.sym.as_str()),
+                _ => {}
+            }
+        }
+        self.lexicos.push(lex);
+        for st in stmts {
+            self.cuerpo(st);
+        }
+        self.lexicos.pop();
+    }
+}
+
 fn panic_message(payload: &Box<dyn Any + Send>) -> String {
     if let Some(s) = payload.downcast_ref::<&str>() {
         s.to_string()
@@ -509,13 +713,13 @@ mod tests {
                 if src.contains("eval") {
                     panic!("assertion failed: solo con debug assertions")
                 }
-                Outcome::Ok { original: src.into(), minified: src.into(), static_flags: Vec::new(), dead_writes: (0, 0) }
+                Outcome::Ok { original: src.into(), minified: src.into(), static_flags: Vec::new(), dead_writes: (0, 0), analisis: Default::default() }
             }
         }
         struct Npm;
         impl Backend for Npm {
             fn prepare(&self, src: &str) -> Outcome {
-                Outcome::Ok { original: src.into(), minified: "npm".into(), static_flags: vec!["with"], dead_writes: (1, 2) }
+                Outcome::Ok { original: src.into(), minified: "npm".into(), static_flags: vec!["with"], dead_writes: (1, 2), analisis: Default::default() }
             }
         }
         struct Real;
@@ -545,6 +749,28 @@ mod tests {
         assert!(nota_asserts().is_none());
     }
 
+    /// R1-H14: los bindings que suben al top-level desde bloques.
+    #[test]
+    fn bindings_en_bloques() {
+        use super::{bindings_en_bloques, instrument, instrument_bloques, SourceKind};
+        let src = "var d = 0;\nif (a) { var x = 1; function f() {} }\nfor (var i = 0; i < 1; i++) { var j; }\nfor (let L of []) { function L() {} }\ntry { var t; } catch (e) { var c; { function e() {} } } finally { var fin; }\n{ let g; { function g() {} } }\n{ function* gen() {} async function as() {} }\nswitch (1) { case 1: var s; function sw() {} }\nlab: { var [p, { q }] = [1, {}]; }\nfunction h() { var no; { var no2; } }\nwhile (0) var w;\nif (b) function annex() {}\n";
+        let got = bindings_en_bloques(src, SourceKind::Script).unwrap();
+        assert_eq!(got, ["x", "f", "i", "j", "t", "c", "fin", "s", "sw", "p", "q", "w", "annex"]);
+        // Estricto (directiva o modulo): las funciones de bloque no suben.
+        let strict = format!("\"use strict\";\n{}", src.replace("if (b) function annex() {}\n", ""));
+        assert_eq!(bindings_en_bloques(&strict, SourceKind::Script).unwrap(), ["x", "i", "j", "t", "c", "fin", "s", "p", "q", "w"]);
+        let m = "import z from 'z';\nexport let e1 = 1;\nif (z) { var v = 1; function nf() {} }\n";
+        assert_eq!(bindings_en_bloques(m, SourceKind::Module).unwrap(), ["v"]);
+        // El epilogo de bloques observa solo lo que el normal no ve.
+        let e = instrument_bloques("var a = 1;\nif (a) { var a = 2, b = 3; }\n", SourceKind::Script).unwrap();
+        assert!(e.ends_with("\n;\n__difuzzObserve([\"b\", b]);\n"), "{e}");
+        assert!(instrument_bloques("var a = 1;\n{ let b = 2; }\n", SourceKind::Script).is_none());
+        // R1-H13: un fuente que SWC parsea solo con errores recuperados (Anexo B
+        // como cuerpo de `if`) ya no se queda sin epilogo.
+        let n = instrument("function e() {\n if (x) function g() {}\n}\n", false, SourceKind::Script).unwrap();
+        assert!(n.contains("__difuzzObserve([\"e\", e])"), "{n}");
+    }
+
     #[test]
     fn ejes_de_la_matriz() {
         for p in [Preset::CarrilA, Preset::CoreDefaults] {
@@ -563,3 +789,4 @@ mod tests {
         assert!(!m.keep_fn_names && !m.keep_class_names);
     }
 }
+

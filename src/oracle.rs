@@ -183,7 +183,7 @@ impl Reporter {
     /// hallazgos viejos se mezclan con los nuevos y el `ls` miente (paso en la
     /// corrida del 21-sep, con 8 directorios de sobra).
     pub fn new(root: &Path, config_name: String, preload: &str) -> Reporter {
-        for sub in ["div", "known", "panic", "lint", "asserts"] {
+        for sub in ["div", "known", "panic", "lint", "asserts", "recursos"] {
             let _ = std::fs::remove_dir_all(root.join(sub));
         }
         write_all(root, &[("preload.cjs", preload)]);
@@ -333,6 +333,12 @@ impl Reporter {
             ),
             None => meta,
         };
+        // A6/R1-H12: el analisis de difuzz (no el minifier) fallo en este caso.
+        let notas = crate::analisis::notas();
+        let meta = if notas.is_empty() { meta } else { format!("{meta}
+analisis_de_difuzz_fallo:
+{}
+", notas.join("\n")) };
         write_all(
             &dir,
             &[
@@ -399,6 +405,21 @@ impl Reporter {
         write_all(&dir, &[("meta.txt", meta.as_str()), ("input.js", src)]);
     }
 
+    /// R1-H08 / R2-H04: el hijo minificador no termino a tiempo (`timeout`) o
+    /// paso el presupuesto de memoria (`memoria`). No es un panic: va a
+    /// `recursos/`, con la causa en el meta (el mensaje trae tiempo o RSS).
+    pub fn recurso(&self, case: &Path, src: &str, causa: &str, message: &str) {
+        let dir = self.case_dir("recursos", case);
+        self.index(&dir, "recursos", "Recursos", crate::known::fnv1a(&[causa]));
+        let meta = format!(
+            "case: {}\nkind: Recursos\ncausa: {causa}\nconfig: {}\n{}\n{message}\n",
+            case.display(),
+            self.config_name,
+            if self.versions.is_empty() { format!("debug_assertions: {}\n", debug_assertions()) } else { self.versions.clone() },
+        );
+        write_all(&dir, &[("meta.txt", meta.as_str()), ("input.js", src)]);
+    }
+
     /// R1-H05: el binario con debug assertions hizo panic, el oraculo sin ellos
     /// minifico y el caso NO divergio (o se descarto). No es un hallazgo de
     /// panic/ ni de div/: queda en `asserts/` como senal para los asserts.
@@ -426,7 +447,7 @@ impl Reporter {
     /// Agrega archivos a los directorios que ya existen para el caso (div, known,
     /// panic, lint). Lo usan las mutaciones: la variante va tal cual junto al hallazgo.
     pub fn attach(&self, case: &Path, files: &[(&str, &str)]) {
-        for prefix in ["div", "known", "panic", "lint"] {
+        for prefix in ["div", "known", "panic", "lint", "recursos"] {
             let dir = self.case_dir(prefix, case);
             if dir.is_dir() {
                 write_all(&dir, files);
@@ -447,6 +468,32 @@ impl Reporter {
         let name = if slug.is_empty() { "_root".to_string() } else { slug.join("__") };
         self.root.join(prefix).join(name)
     }
+}
+
+/// R1-H09: cada celda escribe en su propio directorio, `<out>/<celda>/`: dos
+/// celdas con el mismo `--out` ya no se borran los hallazgos (ni la tabla de
+/// sintomas) entre si, y otra corrida de la misma celda reemplaza solo lo suyo.
+/// En la raiz de `--out` quedan lo compartible: la cache de A (`cache-a`, por
+/// contenido) y `lint-triage.tsv` (por hash del minificado).
+pub fn dir_celda(out: &Path, cell: &str) -> PathBuf {
+    out.join(cell)
+}
+
+/// R1-H09: `--out` con hallazgos del formato anterior (sin directorio por
+/// celda). No se tocan; se avisa para que no se confundan con los nuevos.
+pub fn aviso_salida_vieja(out: &Path) -> Option<String> {
+    let viejos: Vec<&str> = ["div", "known", "panic", "lint", "asserts", "descartes.tsv", "known-sintomas.tsv"]
+        .into_iter()
+        .filter(|n| out.join(n).exists())
+        .collect();
+    (!viejos.is_empty()).then(|| {
+        format!(
+            "{} tiene {} de un difuzz anterior (sin directorio por celda): no los toco ni los uso; los hallazgos van a {}/<celda>/",
+            out.display(),
+            viejos.join(", "),
+            out.display()
+        )
+    })
 }
 
 /// R1-H05: el bloque del meta para un caso minificado por el oraculo.

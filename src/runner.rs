@@ -474,6 +474,8 @@ fn run_file(r: &Runner, script: &Path, start: Instant, timeout: Duration, opts: 
     // o normalmente, se mata el grupo entero: un hijo que hereda el stdout ya no
     // mantiene el pipe abierto ni queda huerfano.
     cmd.process_group(0);
+    // R1-H19: mientras este node corre, la cosecha de otro worker no toca a sus huerfanos.
+    let en_curso = crate::huerfanos::en_curso(&r.cwd);
     let mut child = match cmd
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -519,6 +521,7 @@ fn run_file(r: &Runner, script: &Path, start: Instant, timeout: Duration, opts: 
             }
         }
     };
+    drop(en_curso);
     // Tambien al terminar normalmente: lo que el programa dejo corriendo muere.
     // Riesgo aceptado: node ya fue cosechado y su pid podria reusarse, pero un
     // proceso nuevo solo tiene pgid == pid si se hace lider de grupo.

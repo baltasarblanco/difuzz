@@ -6,6 +6,9 @@
 # M7: sin `cd` ni rutas fijas; no borra el directorio de la celda (el reporter ya
 # limpia div/, known/, panic/ y lint/), asi sobreviven known-sintomas.tsv y
 # lint-triage.tsv entre corridas.
+# R1-H09: difuzz escribe cada celda en $OUT/<celda completa>/ (con backend y carril),
+# asi que todas comparten --out $OUT; correr MIN=swc y MIN=oxc en el mismo $OUT ya no
+# pisa hallazgos (los .log/.stats de aca si llevan solo el nombre corto de la celda).
 # uso: [BIN=...] [CORPUS=...] [MIN=swc|oxc] [CARRIL=a|b] matriz.sh [dir_salida]   (default: out-matriz)
 set -u
 BIN=${BIN:-$(dirname "$0")/../target/release/difuzz}
@@ -18,7 +21,7 @@ mkdir -p "$OUT"
 for cell in "${CELLS[@]}"; do
   echo "=== $MIN $cell carril $CARRIL"
   "$BIN" "$CORPUS" --minifier "$MIN" --carril "$CARRIL" --config "${cell%+*}" --forma "${cell#*+}" \
-    --out "$OUT/$cell" --cache "$OUT/cache-a" --indice "$OUT/indice" \
+    --out "$OUT" --cache "$OUT/cache-a" --indice "$OUT/indice" \
     2> "$OUT/$cell.log" > "$OUT/$cell.stats"
   printf '%s\n' "$(< "$OUT/$cell.stats")"
 done

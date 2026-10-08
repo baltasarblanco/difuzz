@@ -433,6 +433,96 @@ fn is_fresh(e: &Expr) -> bool {
     }
 }
 
+/// R1-H13: como le fue al parser de SWC con un texto que se analiza (los
+/// chequeos de arriba son sobre el AST de SWC; con otro backend se reparsea).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Parseo {
+    /// Parseo sin errores, segun el carril.
+    #[default]
+    Limpio,
+    /// Parseo con errores recuperados (o solo con el otro carril): el AST esta
+    /// entero y se analiza, pero se avisa. P. ej. `new.target` top-level en CJS,
+    /// una funcion como cuerpo de un `if` (Anexo B) o `delete x` en un modulo.
+    Recuperado,
+    /// No hubo AST: ese texto queda sin analizar.
+    Perdido,
+}
+
+/// R1-H13: el estado del analisis de los tres textos de un caso. Con el
+/// backend SWC siempre es `Limpio` (el analisis es sobre su propio AST).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Analisis {
+    /// Da los flags estaticos.
+    pub fuente: Parseo,
+    /// `original` y `minificado` dan el lint (dead_writes).
+    pub original: Parseo,
+    pub minificado: Parseo,
+}
+
+impl Analisis {
+    /// b2-int: los tres textos sin analizar (fallo el analisis entero: panic,
+    /// abort o memoria del hijo de analisis, o de los chequeos en el backend).
+    pub const PERDIDO: Analisis = Analisis { fuente: Parseo::Perdido, original: Parseo::Perdido, minificado: Parseo::Perdido };
+
+    pub fn limpio(&self) -> bool {
+        *self == Analisis::default()
+    }
+
+    pub fn perdido(&self) -> bool {
+        [self.fuente, self.original, self.minificado].contains(&Parseo::Perdido)
+    }
+
+    /// El lint compara las escrituras del original y del minificado: si falta
+    /// uno de los dos lados, la comparacion no dice nada (0 contra N).
+    pub fn lint_valido(&self) -> bool {
+        self.original != Parseo::Perdido && self.minificado != Parseo::Perdido
+    }
+
+    /// Para meta.txt. `None` si el analisis fue limpio.
+    pub fn nota(&self) -> Option<String> {
+        if self.limpio() {
+            return None;
+        }
+        let estado = |p: Parseo, efecto: &str| match p {
+            Parseo::Limpio => None,
+            Parseo::Recuperado => Some(format!("{efecto} con errores recuperados")),
+            Parseo::Perdido => Some(format!("{efecto}: SWC no lo parsea, sin analizar")),
+        };
+        let partes: Vec<String> = [
+            estado(self.fuente, "fuente (flags estaticos)"),
+            estado(self.original, "original (lint)"),
+            estado(self.minificado, "minificado (lint)"),
+        ]
+        .into_iter()
+        .flatten()
+        .collect();
+        Some(format!("analisis con el parser de SWC (R1-H13): {}", partes.join("; ")))
+    }
+
+    /// Para el protocolo del hijo de analisis (operacion `checks`, b2-int):
+    /// tres letras (`l`, `r`, `p`).
+    pub fn codigo(&self) -> String {
+        let c = |p: Parseo| match p {
+            Parseo::Limpio => 'l',
+            Parseo::Recuperado => 'r',
+            Parseo::Perdido => 'p',
+        };
+        [c(self.fuente), c(self.original), c(self.minificado)].iter().collect()
+    }
+
+    pub fn de_codigo(s: &str) -> Option<Analisis> {
+        let p = |c: char| match c {
+            'l' => Some(Parseo::Limpio),
+            'r' => Some(Parseo::Recuperado),
+            'p' => Some(Parseo::Perdido),
+            _ => None,
+        };
+        let mut it = s.chars();
+        let a = Analisis { fuente: p(it.next()?)?, original: p(it.next()?)?, minificado: p(it.next()?)? };
+        it.next().is_none().then_some(a)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{dead_writes, static_flags};
@@ -486,5 +576,24 @@ mod tests {
         // La lista esta ordenada para binary_search.
         let t = super::NODE_MISSING_OXC_GLOBALS;
         assert!(t.windows(2).all(|w| w[0] < w[1]));
+    }
+
+    /// R1-H13: el estado del analisis viaja por el protocolo y da la nota.
+    #[test]
+    fn analisis_codigo_y_nota() {
+        use super::{Analisis, Parseo};
+        let limpio = Analisis::default();
+        assert!(limpio.limpio() && limpio.lint_valido() && !limpio.perdido() && limpio.nota().is_none());
+        assert_eq!(limpio.codigo(), "lll");
+        let a = Analisis { fuente: Parseo::Recuperado, original: Parseo::Limpio, minificado: Parseo::Perdido };
+        assert_eq!(a.codigo(), "rlp");
+        assert_eq!(Analisis::de_codigo("rlp"), Some(a));
+        assert_eq!(Analisis::de_codigo("rl"), None);
+        assert_eq!(Analisis::de_codigo("rlpl"), None);
+        assert_eq!(Analisis::de_codigo("xll"), None);
+        assert!(a.perdido() && !a.lint_valido());
+        let n = a.nota().unwrap();
+        assert!(n.contains("fuente (flags estaticos) con errores recuperados") && n.contains("minificado (lint): SWC no lo parsea"), "{n}");
+        assert!(!n.contains("original"), "{n}");
     }
 }

@@ -21,7 +21,7 @@ impl Backend for ConAsserts {
 struct Oraculo(&'static str);
 impl Backend for Oraculo {
     fn prepare(&self, src: &str) -> Outcome {
-        Outcome::Ok { original: src.to_string(), minified: self.0.to_string(), static_flags: Vec::new(), dead_writes: (0, 0) }
+        Outcome::Ok { original: src.to_string(), minified: self.0.to_string(), static_flags: Vec::new(), dead_writes: (0, 0), analisis: Default::default() }
     }
 }
 

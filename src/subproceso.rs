@@ -9,6 +9,11 @@
 //! `Outcome::Panic` con la senal (va a `panic/`), el hijo se re-lanza en el
 //! caso siguiente y la corrida sigue.
 //!
+//! R1-H08 / R2-H04: si no contesta a tiempo o si los hijos del worker pasan el
+//! presupuesto de RSS (`configurar_memoria`, sondeo cada `SONDEO_MEMORIA`), el
+//! `Outcome::Panic` lleva `PREFIJO_TIMEOUT` o `PREFIJO_MEMORIA` y main lo manda
+//! a `recursos/` (`causa_recurso`), no a `panic/`.
+//!
 //! Protocolo (sin serde, todo medido en bytes):
 //! - el hijo saluda con la linea `SALUDO` (lo que venga antes se ignora: en los
 //!   tests el hijo es el binario de tests y libtest imprime su cabecera);
@@ -45,9 +50,9 @@
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::PathBuf;
 use std::process::{Child, ChildStdin, Command, Stdio};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{mpsc, Arc, Mutex, OnceLock};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::backend::{Backend, Minifier};
 use crate::minify::{Outcome, Preset, SourceKind};
@@ -63,7 +68,138 @@ const TIMEOUT_MINIFICAR: Duration = Duration::from_secs(60);
 /// RLIMIT_AS del hijo. La pila del hilo que minifica (256 MiB) es reserva
 /// virtual y cuenta aca. Al pasarse, el allocator de Rust aborta ("memory
 /// allocation of N bytes failed"): queda como hallazgo con SIGABRT.
+/// R2-H04: es el techo; con `configurar_memoria` el limite real es el
+/// presupuesto de RSS del worker (menor) y RLIMIT_AS queda de respaldo.
 const LIMITE_MEMORIA: u64 = 4 << 30;
+
+/// R2-H04: espacio de direcciones que el hijo reserva sin usarlo (pila de
+/// 256 MiB, arenas de malloc, el binario). MEDIDO: un hijo inactivo tiene
+/// VmSize 346608 kB y VmPeak 412132 kB con RSS de 10 a 57 MB. RLIMIT_AS =
+/// presupuesto de RSS + este margen, para que salte despues del sondeo.
+const MARGEN_VIRTUAL: u64 = 1 << 30;
+
+/// R2-H04: piso del presupuesto por worker. MEDIDO: en el corpus completo el
+/// pico de RSS de un hijo por caso fue 77 MB (swc) y 67 MB (oxc).
+const PRESUPUESTO_MINIMO: u64 = 256 << 20;
+
+/// R2-H04: cada cuanto el padre mira el RSS de los hijos mientras minifica.
+/// b2-int: tambien mientras el hijo de analisis analiza (analisis.rs).
+pub(crate) const SONDEO_MEMORIA: Duration = Duration::from_millis(50);
+
+/// b2-int (A6 + R2-H04): el presupuesto del worker se reparte entre sus
+/// hijos minificadores (config, keep_names, oraculos: `HIJOS_DEL_HILO`) y su
+/// hijo de analisis (analisis.rs), que se lleva 1/`PARTE_ANALISIS`. Cada parte
+/// se sondea por separado, mientras su hijo trabaja: un minificador no se mata
+/// por la memoria que retiene el analisis ni al reves (la causa queda bien
+/// atribuida), y la suma de las dos partes es el presupuesto del worker, asi
+/// que `jobs` x presupuesto sigue acotando a todos los hijos.
+const PARTE_ANALISIS: u64 = 4;
+
+/// b2-int: la parte de los minificadores de un presupuesto de worker.
+fn parte_minificadores(p: u64) -> u64 {
+    p - p / PARTE_ANALISIS
+}
+
+/// b2-int: la parte del hijo de analisis (0: sin configurar, sin sondeo).
+pub(crate) fn presupuesto_analisis() -> u64 {
+    PRESUPUESTO_WORKER.load(Ordering::SeqCst) / PARTE_ANALISIS
+}
+
+/// R1-H08 / R2-H04: primeras palabras del mensaje de un hijo que no termino a
+/// tiempo o que paso el limite de memoria. No son panics: `causa_recurso`.
+pub const PREFIJO_TIMEOUT: &str = "subproceso: timeout:";
+pub const PREFIJO_MEMORIA: &str = "subproceso: memoria:";
+
+/// R2-H04: presupuesto de RSS de los hijos de un worker, en bytes (0: sin
+/// configurar, como en los tests: solo RLIMIT_AS = LIMITE_MEMORIA).
+static PRESUPUESTO_WORKER: AtomicU64 = AtomicU64::new(0);
+
+thread_local! {
+    /// R2-H04: pids de los hijos lanzados desde este hilo. Un worker es un
+    /// hilo y sus hijos (config, keep_names, oraculos) comparten el presupuesto.
+    static HIJOS_DEL_HILO: std::cell::RefCell<Vec<u32>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// R2-H04: el presupuesto por worker: `--mem-hijo` si vino, si no la mitad de
+/// MemTotal repartida entre los workers (la otra mitad queda para node, difuzz
+/// y el resto de la maquina), con techo `LIMITE_MEMORIA` y piso
+/// `PRESUPUESTO_MINIMO`. Devuelve (bytes, de donde sale).
+fn presupuesto(mem_total: Option<u64>, jobs: usize, mem_hijo_mib: Option<u64>) -> (u64, String) {
+    if let Some(m) = mem_hijo_mib {
+        return (m.saturating_mul(1 << 20), "--mem-hijo".into());
+    }
+    let Some(total) = mem_total else {
+        return (LIMITE_MEMORIA, "sin /proc/meminfo: el techo".into());
+    };
+    let jobs = jobs.max(1) as u64;
+    let p = (total / 2 / jobs).min(LIMITE_MEMORIA);
+    if p < PRESUPUESTO_MINIMO {
+        let aviso = format!("aviso: MemTotal/2 / {jobs} workers da {} MiB, uso el piso: la suma pasa la mitad de la memoria (baja --jobs)", p >> 20);
+        return (PRESUPUESTO_MINIMO, aviso);
+    }
+    (p, format!("MemTotal/2 / {jobs} workers"))
+}
+
+/// MemTotal de `/proc/meminfo`, en bytes.
+fn mem_total() -> Option<u64> {
+    let s = std::fs::read_to_string("/proc/meminfo").ok()?;
+    let kb: u64 = s.lines().find_map(|l| l.strip_prefix("MemTotal:"))?.trim().trim_end_matches("kB").trim().parse().ok()?;
+    Some(kb * 1024)
+}
+
+/// R2-H04: fija el presupuesto de memoria de los hijos (main, una vez, con
+/// los workers reales). Devuelve la linea que main imprime.
+pub fn configurar_memoria(jobs: usize, mem_hijo_mib: Option<u64>) -> String {
+    let (p, de_donde) = presupuesto(mem_total(), jobs, mem_hijo_mib);
+    PRESUPUESTO_WORKER.store(p, Ordering::SeqCst);
+    let (min, ana) = (parte_minificadores(p), p / PARTE_ANALISIS);
+    format!(
+        "memoria de los hijos: {} MiB de RSS por worker ({de_donde}): {} MiB entre sus minificadores (RLIMIT_AS por hijo {} MiB) y {} MiB para su hijo de analisis (RLIMIT_AS {} MiB)",
+        p >> 20,
+        min >> 20,
+        limite_as(min) >> 20,
+        ana >> 20,
+        limite_as(ana) >> 20
+    )
+}
+
+/// R2-H04: RLIMIT_AS para un presupuesto de RSS (0: el techo de siempre).
+pub(crate) fn limite_as(presupuesto: u64) -> u64 {
+    if presupuesto == 0 {
+        LIMITE_MEMORIA
+    } else {
+        presupuesto.saturating_add(MARGEN_VIRTUAL)
+    }
+}
+
+/// R1-H08 / R2-H04: `Some("timeout")` o `Some("memoria")` si el mensaje de un
+/// `Outcome::Panic` es en realidad un hijo que no termino o que se quedo sin
+/// memoria. Mira la primera linea: el oraculo agrega las suyas despues.
+pub fn causa_recurso(msg: &str) -> Option<&'static str> {
+    if msg.starts_with(PREFIJO_TIMEOUT) {
+        Some("timeout")
+    } else if msg.starts_with(PREFIJO_MEMORIA) {
+        Some("memoria")
+    } else {
+        None
+    }
+}
+
+/// RSS de un proceso en bytes (`/proc/<pid>/statm`, campo 2 en paginas); 0 si
+/// ya no esta.
+pub(crate) fn rss(pid: u32) -> u64 {
+    // SAFETY: sysconf con una constante; no toca memoria.
+    let pagina = unsafe { libc::sysconf(libc::_SC_PAGESIZE) }.max(4096) as u64;
+    std::fs::read_to_string(format!("/proc/{pid}/statm"))
+        .ok()
+        .and_then(|s| s.split_whitespace().nth(1)?.parse::<u64>().ok())
+        .map_or(0, |p| p * pagina)
+}
+
+/// R2-H04: RSS de todos los hijos vivos de este hilo.
+fn rss_del_hilo() -> u64 {
+    HIJOS_DEL_HILO.try_with(|h| h.borrow().iter().map(|&p| rss(p)).sum()).unwrap_or(0)
+}
 
 /// Cuanto stderr del hijo se guarda para el mensaje del hallazgo (la cola).
 const COLA_STDERR: usize = 4096;
@@ -114,10 +250,15 @@ pub struct Remoto {
     local: Box<dyn Fn() -> Box<dyn Backend>>,
     hijo: Mutex<Option<Hijo>>,
     timeout: Duration,
+    /// R2-H04: presupuesto de RSS (bytes) de los hijos del worker; `None`: el
+    /// global (`configurar_memoria`). 0: sin sondeo.
+    presupuesto: Option<u64>,
 }
 
 struct Hijo {
     child: Child,
+    /// R2-H04: el RLIMIT_AS con el que se lanzo (para el mensaje).
+    limite_as: u64,
     stdin: ChildStdin,
     rx: mpsc::Receiver<std::io::Result<Outcome>>,
     stderr: Arc<Mutex<Vec<u8>>>,
@@ -134,6 +275,7 @@ impl Remoto {
             local: Box::new(move || local_backend(minifier, preset, kind, keep_names)),
             hijo: Mutex::new(None),
             timeout: TIMEOUT_MINIFICAR,
+            presupuesto: None,
         }
     }
 
@@ -148,7 +290,14 @@ impl Remoto {
             local: Box::new(|| Box::new(SinOraculo)),
             hijo: Mutex::new(None),
             timeout: TIMEOUT_MINIFICAR,
+            presupuesto: None,
         }
+    }
+
+    /// R2-H04: el presupuesto efectivo (0: sin limite de RSS).
+    fn presupuesto(&self) -> u64 {
+        // b2-int: la parte de los minificadores (el resto es del hijo de analisis).
+        self.presupuesto.unwrap_or_else(|| parte_minificadores(PRESUPUESTO_WORKER.load(Ordering::SeqCst)))
     }
 
     fn lanzar(&self) -> std::io::Result<Hijo> {
@@ -158,8 +307,11 @@ impl Remoto {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
-        preparar_hijo(&mut cmd);
+        let limite_as = limite_as(self.presupuesto());
+        preparar_hijo(&mut cmd, limite_as);
         let mut child = cmd.spawn()?;
+        let pid = child.id();
+        let _ = HIJOS_DEL_HILO.try_with(|h| h.borrow_mut().push(pid));
         let stdin = child.stdin.take().expect("stdin pedido como piped");
         let stdout = child.stdout.take().expect("stdout pedido como piped");
         let stderr_pipe = child.stderr.take().expect("stderr pedido como piped");
@@ -168,7 +320,7 @@ impl Remoto {
         let stderr = Arc::new(Mutex::new(Vec::new()));
         let buf = Arc::clone(&stderr);
         let stderr_hilo = std::thread::spawn(move || juntar_cola(stderr_pipe, buf));
-        Ok(Hijo { child, stdin, rx, stderr, stderr_hilo: Some(stderr_hilo) })
+        Ok(Hijo { child, limite_as, stdin, rx, stderr, stderr_hilo: Some(stderr_hilo) })
     }
 }
 
@@ -305,16 +457,16 @@ fn local_backend(minifier: Minifier, preset: Preset, kind: SourceKind, keep_name
 }
 
 /// Grupo propio, limite de memoria y (Linux) morir con el padre.
-fn preparar_hijo(cmd: &mut Command) {
+pub(crate) fn preparar_hijo(cmd: &mut Command, limite_as: u64) {
     use std::os::unix::process::CommandExt;
     cmd.process_group(0);
     // SAFETY: entre fork y exec solo se llaman setrlimit y prctl, que son
     // async-signal-safe (syscalls directas, sin allocar).
     unsafe {
-        cmd.pre_exec(|| {
+        cmd.pre_exec(move || {
             let lim = libc::rlimit {
-                rlim_cur: LIMITE_MEMORIA as libc::rlim_t,
-                rlim_max: LIMITE_MEMORIA as libc::rlim_t,
+                rlim_cur: limite_as as libc::rlim_t,
+                rlim_max: limite_as as libc::rlim_t,
             };
             // Si falla (p. ej. el limite duro ya es menor), el hijo corre igual.
             libc::setrlimit(libc::RLIMIT_AS, &lim);
@@ -343,9 +495,17 @@ impl Backend for Remoto {
             .and_then(|()| h.stdin.write_all(src.as_bytes()))
             .and_then(|()| h.stdin.flush());
         let r = match enviado {
-            Ok(()) => h.rx.recv_timeout(self.timeout),
+            Ok(()) => self.esperar(h),
             // EPIPE: el hijo ya no esta. Se diagnostica igual que una muerte.
-            Err(e) => Ok(Err(e)),
+            Err(e) => Ok(Ok(Err(e))),
+        };
+        let r = match r {
+            Ok(r) => r,
+            // R2-H04: paso el presupuesto de memoria del worker.
+            Err((rss_hilo, rss_hijo, limite)) => {
+                let h = slot.take().expect("hijo presente");
+                return Outcome::Panic(h.muerte(Causa::Memoria { rss_hilo, rss_hijo, limite }));
+            }
         };
         match r {
             Ok(Ok(o)) => o,
@@ -367,11 +527,41 @@ impl Backend for Remoto {
     }
 }
 
+impl Remoto {
+    /// Espera la respuesta del hijo hasta `timeout`. R2-H04: cada
+    /// `SONDEO_MEMORIA` suma el RSS de los hijos de este worker; si pasa el
+    /// presupuesto, `Err((rss del worker, rss del hijo, presupuesto))`.
+    #[allow(clippy::type_complexity)]
+    fn esperar(&self, h: &Hijo) -> Result<Result<std::io::Result<Outcome>, mpsc::RecvTimeoutError>, (u64, u64, u64)> {
+        let presupuesto = self.presupuesto();
+        let t0 = Instant::now();
+        loop {
+            let falta = self.timeout.saturating_sub(t0.elapsed());
+            if falta.is_zero() {
+                return Ok(Err(mpsc::RecvTimeoutError::Timeout));
+            }
+            let tramo = if presupuesto == 0 { falta } else { falta.min(SONDEO_MEMORIA) };
+            match h.rx.recv_timeout(tramo) {
+                Err(mpsc::RecvTimeoutError::Timeout) => {}
+                r => return Ok(r),
+            }
+            if presupuesto > 0 {
+                let total = rss_del_hilo();
+                if total > presupuesto {
+                    return Err((total, rss(h.child.id()), presupuesto));
+                }
+            }
+        }
+    }
+}
+
 /// Por que se da por perdido al hijo (el mensaje del hallazgo lo dice).
 enum Causa {
     /// EOF o pipe roto: murio solo (senal o exit).
     Murio,
     Timeout(Duration),
+    /// R2-H04: el RSS de los hijos del worker paso el presupuesto (bytes).
+    Memoria { rss_hilo: u64, rss_hijo: u64, limite: u64 },
     /// R1-H07: contesto algo ilegible; lo mata difuzz.
     Protocolo(String),
 }
@@ -386,8 +576,19 @@ impl Hijo {
         }
         let cola = String::from_utf8_lossy(&self.stderr.lock().unwrap_or_else(|e| e.into_inner())).into_owned();
         let mut msg = match (causa, st) {
-            (Causa::Timeout(t), _) => format!("subproceso: el minifier no termino en {} s (lento o colgado; hijo matado)", t.as_secs()),
+            // R1-H08: no es un panic; `causa_recurso` lo reconoce por el prefijo.
+            (Causa::Timeout(t), _) => format!("{PREFIJO_TIMEOUT} el minifier no termino en {:.1} s (lento o colgado; hijo matado)", t.as_secs_f64()),
+            (Causa::Memoria { rss_hilo, rss_hijo, limite }, _) => format!(
+                "{PREFIJO_MEMORIA} los hijos minificadores del worker pasaron su presupuesto de RSS: {} MiB > {} MiB (este hijo {} MiB; hijo matado)",
+                rss_hilo >> 20,
+                limite >> 20,
+                rss_hijo >> 20
+            ),
             (Causa::Protocolo(e), _) => format!("subproceso: error de protocolo con el hijo ({e}); hijo matado"),
+            // R2-H04: el allocator no pudo reservar (RLIMIT_AS, el respaldo del sondeo).
+            (Causa::Murio, Ok(st)) if cola.contains("memory allocation of") => {
+                format!("{PREFIJO_MEMORIA} el minifier no pudo reservar memoria (RLIMIT_AS {} MiB); {}", self.limite_as >> 20, describir(st))
+            }
             (Causa::Murio, Ok(st)) => describir(st),
             (Causa::Murio, Err(e)) => format!("subproceso: el hijo murio y no pude cosecharlo: {e}"),
         };
@@ -405,11 +606,13 @@ impl Drop for Hijo {
         // termina igual. kill no espera a que llegue el EOF.
         let _ = self.child.kill();
         let _ = self.child.wait();
+        let pid = self.child.id();
+        let _ = HIJOS_DEL_HILO.try_with(|h| h.borrow_mut().retain(|&p| p != pid));
     }
 }
 
 /// "murio por senal 6 (SIGABRT)" o "salio con codigo N".
-fn describir(st: std::process::ExitStatus) -> String {
+pub(crate) fn describir(st: std::process::ExitStatus) -> String {
     use std::os::unix::process::ExitStatusExt;
     match (st.signal(), st.code()) {
         (Some(s), _) => format!("subproceso: el minifier murio por senal {s} ({})", nombre_senal(s)),
@@ -461,7 +664,7 @@ fn leer_respuestas(mut r: impl BufRead, tx: mpsc::Sender<std::io::Result<Outcome
 }
 
 /// Junta el stderr del hijo, quedandose con la cola.
-fn juntar_cola(mut pipe: impl Read, buf: Arc<Mutex<Vec<u8>>>) {
+pub(crate) fn juntar_cola(mut pipe: impl Read, buf: Arc<Mutex<Vec<u8>>>) {
     let mut chunk = [0u8; 4096];
     loop {
         match pipe.read(&mut chunk) {
@@ -496,12 +699,17 @@ fn leer_outcome(r: &mut impl BufRead) -> std::io::Result<Outcome> {
     let campos: Vec<&str> = cab.trim_end_matches('\n').split(' ').collect();
     let num = |s: &str| s.parse::<usize>().map_err(|_| invalido(format!("cabecera: {cab:?}")));
     match campos[..] {
+        // b2-int (R1-H13): el estado del analisis NO viaja por este protocolo.
+        // Con oxc el hijo no corre los chequeos (`activar_checks_afuera`): el
+        // estado lo trae `analisis::Analizado` desde el hijo de analisis. Con swc
+        // el analisis es sobre su propio AST (limpio) y un fallo ya cruza como
+        // la marca `FALLO_ANALISIS`, de la que Analizado deriva `Perdido`.
         ["ok", dw0, dw1, flags, lo, lm] => {
             let (dw0, dw1, lo, lm) = (num(dw0)?, num(dw1)?, num(lo)?, num(lm)?);
             let static_flags = if flags == "-" { Vec::new() } else { flags.split(',').map(intern_flag).collect() };
             let original = leer_bytes(r, lo)?;
             let minified = leer_bytes(r, lm)?;
-            Ok(Outcome::Ok { original, minified, static_flags, dead_writes: (dw0, dw1) })
+            Ok(Outcome::Ok { original, minified, static_flags, dead_writes: (dw0, dw1), analisis: Default::default() })
         }
         ["parse", esm, script] => Ok(Outcome::ParseError { esm: esm == "1", script: script == "1" }),
         ["codegen"] => Ok(Outcome::CodegenError),
@@ -512,7 +720,7 @@ fn leer_outcome(r: &mut impl BufRead) -> std::io::Result<Outcome> {
 
 fn escribir_outcome(w: &mut impl Write, o: &Outcome) -> std::io::Result<()> {
     match o {
-        Outcome::Ok { original, minified, static_flags, dead_writes } => {
+        Outcome::Ok { original, minified, static_flags, dead_writes, .. } => {
             let flags = if static_flags.is_empty() { "-".to_string() } else { static_flags.join(",") };
             writeln!(w, "ok {} {} {flags} {} {}", dead_writes.0, dead_writes.1, original.len(), minified.len())?;
             w.write_all(original.as_bytes())?;
@@ -533,9 +741,10 @@ fn escribir_outcome(w: &mut impl Write, o: &Outcome) -> std::io::Result<()> {
 /// `flags_estaticos_conocidos` avisa si falta alguno.
 const FLAGS_ESTATICOS: [&str; 6] = ["callee", "redefine_global", "coercion", "with", "global_conocido", "extends"];
 
-fn intern_flag(s: &str) -> &'static str {
+pub(crate) fn intern_flag(s: &str) -> &'static str {
     FLAGS_ESTATICOS
         .iter()
+        .chain([&crate::analisis::FALLO_ANALISIS])
         .find(|f| **f == s)
         .copied()
         .unwrap_or_else(|| Box::leak(s.to_string().into_boxed_str()))
@@ -552,6 +761,8 @@ pub fn serve(args: &[String]) -> i32 {
     // El hook de main no llega aca (el subcomando sale antes): sin esto cada
     // panic del minifier se imprimiria en stderr, y se pierde la ubicacion (M22).
     std::panic::set_hook(Box::new(crate::minify::record_panic_location));
+    // A6/R1-H12: oxc no corre los chequeos con SWC en este hijo (analisis.rs).
+    crate::analisis::activar_checks_afuera();
     let salida = std::io::BufWriter::new(std::io::stdout());
     serve_con_pila(args, crate::WORKER_STACK, BufReader::new(std::io::stdin()), salida)
 }
@@ -635,10 +846,17 @@ mod tests {
             minified: "".into(),
             static_flags: vec!["with", "extends"],
             dead_writes: (1, 2),
+            analisis: crate::checks::Analisis::de_codigo("rlp").unwrap(),
         };
-        let Outcome::Ok { original, minified, static_flags, dead_writes } = ida_y_vuelta(&o) else { panic!() };
+        let Outcome::Ok { original, minified, static_flags, dead_writes, analisis } = ida_y_vuelta(&o) else { panic!() };
         assert_eq!((original.as_str(), minified.as_str(), dead_writes), ("a\nb ñ\n", "", (1, 2)));
         assert_eq!(static_flags, ["with", "extends"]);
+        // b2-int (R1-H13): el estado del analisis no cruza este pipe (lo trae
+        // analisis::Analizado del hijo de analisis): del hijo minificador sale limpio.
+        assert!(analisis.limpio());
+        let Outcome::Ok { analisis, minified, .. } = leer_outcome(&mut &b"ok 0 0 - 0 1\nx"[..]).unwrap() else { panic!() };
+        assert!(analisis.limpio() && minified == "x");
+        assert!(leer_outcome(&mut &b"ok 0 0 - 0 0 lll\n"[..]).is_err());
         assert!(matches!(ida_y_vuelta(&Outcome::ParseError { esm: true, script: false }), Outcome::ParseError { esm: true, script: false }));
         assert!(matches!(ida_y_vuelta(&Outcome::CodegenError), Outcome::CodegenError));
         let Outcome::Panic(m) = ida_y_vuelta(&Outcome::Panic("x\ny".into())) else { panic!() };
@@ -682,8 +900,8 @@ mod tests {
         for s in fuentes {
             let remoto = leer_outcome(&mut r).unwrap();
             match (remoto, crate::minify::prepare(s, &local)) {
-                (Outcome::Ok { original: o1, minified: m1, static_flags: f1, dead_writes: d1 }, Outcome::Ok { original: o2, minified: m2, static_flags: f2, dead_writes: d2 }) => {
-                    assert_eq!((o1, m1, f1, d1), (o2, m2, f2, d2));
+                (Outcome::Ok { original: o1, minified: m1, static_flags: f1, dead_writes: d1, analisis: a1 }, Outcome::Ok { original: o2, minified: m2, static_flags: f2, dead_writes: d2, analisis: a2 }) => {
+                    assert_eq!((o1, m1, f1, d1, a1), (o2, m2, f2, d2, a2));
                 }
                 (Outcome::ParseError { esm: e1, script: s1 }, Outcome::ParseError { esm: e2, script: s2 }) => assert_eq!((e1, s1), (e2, s2)),
                 _ => panic!("distinto para {s:?}"),
@@ -700,6 +918,17 @@ mod tests {
         };
         let args: Vec<String> = cfg.split(' ').map(String::from).collect();
         std::panic::set_hook(Box::new(crate::minify::record_panic_location));
+        // R1-H08 / R2-H04: un hijo lento o que come memoria, a pedido del test.
+        let num = |k: &str| std::env::var(k).ok().and_then(|v| v.parse::<usize>().ok());
+        if let Some(mib) = num("DIFUZZ_TEST_COMER_MIB") {
+            std::mem::forget(std::hint::black_box(vec![1u8; mib << 20]));
+        }
+        if let Some(mib) = num("DIFUZZ_TEST_RESERVAR_MIB") {
+            std::mem::forget(std::hint::black_box(Vec::<u8>::with_capacity(mib << 20)));
+        }
+        if let Some(ms) = num("DIFUZZ_TEST_DORMIR_MS") {
+            std::thread::sleep(Duration::from_millis(ms as u64));
+        }
         // Pila chica a proposito: un anidamiento moderado la desborda y el hijo
         // aborta de verdad (SIGABRT), como lo haria uno de 256 MiB con mas anidamiento.
         let salida = std::io::BufWriter::new(std::io::stdout());
@@ -708,20 +937,119 @@ mod tests {
     }
 
     fn remoto_de_test(minifier: Minifier, kind: SourceKind) -> Remoto {
+        remoto_de_test_con(minifier, kind, &[], Duration::from_secs(30), Some(0))
+    }
+
+    /// R1-H08 / R2-H04: con variables para el hijo, timeout y presupuesto propios.
+    fn remoto_de_test_con(minifier: Minifier, kind: SourceKind, env: &[(&str, &str)], timeout: Duration, presupuesto: Option<u64>) -> Remoto {
         let exe = std::env::current_exe().unwrap();
         let cfg = args_config(minifier, Preset::CarrilA, kind, false).join(" ");
+        let mut env: Vec<(String, String)> = env.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect();
+        env.push(("DIFUZZ_TEST_HIJO".into(), cfg));
         Remoto {
             lanzador: Lanzador {
                 exe,
                 args: ["--exact", "subproceso::tests::servidor_hijo", "--nocapture", "--test-threads", "1", "-q"]
                     .map(String::from)
                     .to_vec(),
-                env: vec![("DIFUZZ_TEST_HIJO".into(), cfg)],
+                env,
             },
             local: Box::new(move || local_backend(minifier, Preset::CarrilA, kind, false)),
             hijo: Mutex::new(None),
-            timeout: Duration::from_secs(30),
+            timeout,
+            presupuesto,
         }
+    }
+
+    /// R1-H08: un minifier que no contesta a tiempo no es un panic: el mensaje
+    /// lleva `PREFIJO_TIMEOUT` y `causa_recurso` lo separa (main lo manda a
+    /// `recursos/` con `causa: timeout`).
+    #[test]
+    fn timeout_del_minifier_es_recurso() {
+        let r = remoto_de_test_con(Minifier::Swc, SourceKind::Script, &[("DIFUZZ_TEST_DORMIR_MS", "20000")], Duration::from_millis(300), Some(0));
+        let t0 = Instant::now();
+        let Outcome::Panic(msg) = r.prepare("console.log(1);\n") else { panic!("tenia que vencer el timeout") };
+        assert!(t0.elapsed() < Duration::from_secs(10), "{:?}", t0.elapsed());
+        assert!(msg.starts_with(PREFIJO_TIMEOUT) && msg.contains("0.3 s"), "{msg}");
+        assert_eq!(causa_recurso(&msg), Some("timeout"));
+        // Un panic de verdad no es recurso.
+        assert_eq!(causa_recurso("subproceso: el minifier murio por senal 6 (SIGABRT)"), None);
+        assert_eq!(causa_recurso("byte index 1 is out of range"), None);
+    }
+
+    /// R2-H04: un hijo que pasa el presupuesto de RSS del worker se mata y el
+    /// caso queda con `PREFIJO_MEMORIA` (no "senal 6"); el siguiente caso usa un
+    /// hijo nuevo.
+    #[test]
+    fn memoria_del_hijo_es_recurso_y_sigue() {
+        if !std::path::Path::new("/proc/self/statm").exists() {
+            return;
+        }
+        let r = remoto_de_test_con(Minifier::Swc, SourceKind::Script, &[("DIFUZZ_TEST_COMER_MIB", "300"), ("DIFUZZ_TEST_DORMIR_MS", "20000")], Duration::from_secs(30), Some(128 << 20));
+        let t0 = Instant::now();
+        let Outcome::Panic(msg) = r.prepare("console.log(1);\n") else { panic!("tenia que pasar el presupuesto") };
+        assert!(t0.elapsed() < Duration::from_secs(15), "el sondeo no lo freno: {:?}", t0.elapsed());
+        assert!(msg.starts_with(PREFIJO_MEMORIA) && msg.contains("> 128 MiB"), "{msg}");
+        assert_eq!(causa_recurso(&msg), Some("memoria"));
+        assert!(HIJOS_DEL_HILO.with(|h| h.borrow().is_empty()), "el hijo muerto sigue anotado");
+        // Otro Remoto del mismo hilo minifica: el hijo matado ya no cuenta.
+        let r2 = remoto_de_test_con(Minifier::Swc, SourceKind::Script, &[], Duration::from_secs(30), Some(128 << 20));
+        assert!(matches!(r2.prepare("console.log(1 + 2);\n"), Outcome::Ok { ref minified, .. } if minified.contains("console.log")));
+    }
+
+    /// R1-H08 / R2-H04: el hallazgo queda en `recursos/<caso>/meta.txt` con la
+    /// causa explicita, y una corrida nueva sobre el mismo `--out` lo limpia.
+    #[test]
+    fn recurso_queda_en_recursos_con_su_causa() {
+        let d = std::env::temp_dir().join(format!("difuzz-test-recursos-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        let rep = crate::oracle::Reporter::new(&d, "swc+carril_a+tal_cual".into(), "");
+        let caso = std::path::Path::new("lento/input.js");
+        let msg = format!("{PREFIJO_TIMEOUT} el minifier no termino en 60.0 s (lento o colgado; hijo matado)");
+        rep.recurso(caso, "x;\n", causa_recurso(&msg).unwrap(), &msg);
+        let meta = std::fs::read_to_string(d.join("recursos/lento/meta.txt")).unwrap();
+        assert!(meta.contains("kind: Recursos\ncausa: timeout\n") && meta.contains(&msg), "{meta}");
+        assert!(!d.join("panic").exists());
+        drop(rep);
+        let _rep = crate::oracle::Reporter::new(&d, "otra".into(), "");
+        assert!(!d.join("recursos").exists(), "recursos/ de la corrida anterior quedo");
+        std::fs::remove_dir_all(&d).unwrap();
+    }
+
+    /// R2-H04: si lo que frena es RLIMIT_AS (una reserva grande sin tocar: el
+    /// RSS no sube y el sondeo no la ve), el allocator aborta y el mensaje dice
+    /// memoria, no solo "senal 6".
+    #[test]
+    fn rlimit_as_es_memoria() {
+        // presupuesto 64 MiB: RLIMIT_AS = 64 MiB + MARGEN_VIRTUAL; se piden 2 GiB.
+        let r = remoto_de_test_con(Minifier::Swc, SourceKind::Script, &[("DIFUZZ_TEST_RESERVAR_MIB", "2048")], Duration::from_secs(30), Some(64 << 20));
+        let Outcome::Panic(msg) = r.prepare("console.log(1);\n") else { panic!("tenia que abortar") };
+        assert!(msg.starts_with(PREFIJO_MEMORIA) && msg.contains("RLIMIT_AS 1088 MiB") && msg.contains("senal 6"), "{msg}");
+        assert_eq!(causa_recurso(&msg), Some("memoria"));
+    }
+
+    /// R2-H04: con `--jobs 16` la suma de los presupuestos no pasa la memoria
+    /// de la maquina (ni la mitad); `--mem-hijo` manda; techo y piso.
+    #[test]
+    fn presupuesto_con_jobs_16_no_pasa_la_memoria() {
+        let gib = 1u64 << 30;
+        for total in [8 * gib, 32 * gib, 33_557_385_216, 256 * gib] {
+            let (p, _) = presupuesto(Some(total), 16, None);
+            assert!(16 * p <= total / 2, "total {total}: 16 x {p}");
+            assert!(limite_as(p) > p);
+            // b2-int: las dos partes (minificadores y analisis) suman el presupuesto.
+            assert_eq!(parte_minificadores(p) + p / PARTE_ANALISIS, p);
+        }
+        // La maquina de verdad.
+        if let Some(total) = mem_total() {
+            let (p, de) = presupuesto(Some(total), 16, None);
+            assert!(16 * p <= total, "{de}: 16 x {p} > {total}");
+        }
+        assert_eq!(presupuesto(Some(32 * gib), 1, None).0, LIMITE_MEMORIA, "techo");
+        assert_eq!(presupuesto(Some(32 * gib), 16, Some(700)).0, 700 << 20, "--mem-hijo");
+        let (p, aviso) = presupuesto(Some(4 * gib), 64, None);
+        assert!(p == PRESUPUESTO_MINIMO && aviso.starts_with("aviso"), "{aviso}");
+        assert_eq!(limite_as(0), LIMITE_MEMORIA, "sin configurar: el de siempre");
     }
 
     /// Aceptacion de M34: un abort real del hijo (desborde de pila) es un

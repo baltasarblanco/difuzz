@@ -136,12 +136,23 @@ impl Backend for Oxc {
 
         // checks.rs es analisis sobre el AST de SWC: se reparsean los textos.
         let kind = if self.source_type.is_module() { SourceKind::Module } else { SourceKind::Script };
-        let (static_flags, dead_writes) = super::swc::checks_on_text(src, &original, &minified, kind);
+        // A6/R1-H12: en el hijo minificador no (los pide analisis::Analizado al
+        // hijo de analisis, que tambien trae el estado R1-H13 del analisis); en
+        // proceso, un fallo no es del minifier y deja los tres textos perdidos.
+        let (static_flags, dead_writes, analisis) = if crate::analisis::checks_afuera() {
+            (Vec::new(), (0, 0), Default::default())
+        } else {
+            crate::analisis::atrapar(|| super::swc::checks_on_text(src, &original, &minified, kind)).unwrap_or_else(|e| {
+                crate::analisis::fallo_en_backend(e);
+                (vec![crate::analisis::FALLO_ANALISIS], (0, 0), crate::checks::Analisis::PERDIDO)
+            })
+        };
         Outcome::Ok {
             original,
             minified,
             static_flags,
             dead_writes,
+            analisis,
         }
     }
 }
@@ -166,6 +177,7 @@ mod tests {
                 minified,
                 static_flags,
                 dead_writes,
+                ..
             } => (original, minified, static_flags, dead_writes),
             _ => panic!("oxc no preparo {src:?}"),
         }

@@ -119,14 +119,14 @@ pub fn globals_matter(
     a: &runner::Exec,
     b: &runner::Exec,
 ) -> Recheck {
-    let names = catch_unwind(AssertUnwindSafe(|| {
-        GLOBALS.set(&Globals::new(), || {
-            backend::swc::parse_for(original, kind).map(|p| crate::checks::known_globals_used(&p))
-        })
-    }))
-    .ok()
-    .flatten()
-    .unwrap_or_default();
+    // A6: el parseo con SWC va al hijo de analisis (analisis.rs).
+    let names = match crate::analisis::globals(original, kind) {
+        Ok(n) => n.unwrap_or_default(),
+        Err(e) => {
+            crate::analisis::registrar("re-chequeo de global_conocido", &e);
+            return Recheck::Inconcluso(format!("fallo el analisis de difuzz: {}", e.lines().next().unwrap_or_default()));
+        }
+    };
     if names.is_empty() {
         return Recheck::Inconcluso("no pude listar los globals (el parser de SWC no lee el original)".into());
     }
@@ -149,7 +149,14 @@ pub fn with_matters(
     b: &runner::Exec,
 ) -> Recheck {
     let (preset, kind) = recheck;
-    let Some(neutral) = neutralize_with(original, kind) else {
+    let neutral = match crate::analisis::sin_with(original, kind) {
+        Ok(n) => n,
+        Err(e) => {
+            crate::analisis::registrar("re-chequeo de with", &e);
+            return Recheck::Inconcluso(format!("fallo el analisis de difuzz: {}", e.lines().next().unwrap_or_default()));
+        }
+    };
+    let Some(neutral) = neutral else {
         return Recheck::Inconcluso("no pude neutralizar el `with` (no parsea con SWC o no lo encuentro)".into());
     };
     let cfg = preset.build(backend::Minifier::Oxc, kind);

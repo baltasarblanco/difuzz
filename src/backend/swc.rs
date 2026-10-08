@@ -23,6 +23,7 @@ use swc_ecma_transforms_base::{
 };
 
 use super::Backend;
+use crate::checks::{Analisis, Parseo};
 use crate::minify::{Outcome, SourceKind};
 
 pub struct Swc {
@@ -182,10 +183,19 @@ fn prepare_inner(src: &str, cfg: &Swc) -> Outcome {
     let program = parsed
         .apply(paren_remover(None))
         .apply(resolver(unresolved_mark, top_level_mark, false));
-    let static_flags = crate::checks::static_flags(&program);
+    // R1-H12: los chequeos son analisis de difuzz, no del minifier: un panic
+    // suyo no es hallazgo (analisis::atrapar; la marca la saca Analizado).
+    let mut fallo: Option<String> = None;
+    let static_flags = crate::analisis::atrapar(|| crate::checks::static_flags(&program)).unwrap_or_else(|e| {
+        fallo.get_or_insert(e);
+        Vec::new()
+    });
 
     let original = program.clone().apply(fixer(None));
-    let dead_original = crate::checks::dead_writes(&original);
+    let dead_original = crate::analisis::atrapar(|| crate::checks::dead_writes(&original)).unwrap_or_else(|e| {
+        fallo.get_or_insert(e);
+        0
+    });
     let original = match emit(cm.clone(), &original) {
         Ok(s) => s,
         Err(_) => return Outcome::CodegenError,
@@ -204,7 +214,19 @@ fn prepare_inner(src: &str, cfg: &Swc) -> Outcome {
         },
     )
     .apply(fixer(None));
-    let dead_minified = crate::checks::dead_writes(&minified);
+    let dead_minified = crate::analisis::atrapar(|| crate::checks::dead_writes(&minified)).unwrap_or_else(|e| {
+        fallo.get_or_insert(e);
+        0
+    });
+    // b2-int (R1-H13): con SWC el analisis es sobre su propio AST (limpio),
+    // salvo que los chequeos fallen: entonces los tres textos quedan perdidos.
+    let (static_flags, dead_original, dead_minified, analisis) = match fallo {
+        Some(e) => {
+            crate::analisis::fallo_en_backend(e);
+            (vec![crate::analisis::FALLO_ANALISIS], 0, 0, Analisis::PERDIDO)
+        }
+        None => (static_flags, dead_original, dead_minified, Analisis::default()),
+    };
     let minified = match emit(cm, &minified) {
         Ok(s) => s,
         Err(_) => return Outcome::CodegenError,
@@ -215,6 +237,7 @@ fn prepare_inner(src: &str, cfg: &Swc) -> Outcome {
         minified,
         static_flags,
         dead_writes: (dead_original, dead_minified),
+        analisis,
     }
 }
 
@@ -325,22 +348,76 @@ fn emit(cm: Lrc<SourceMap>, program: &Program) -> Result<String, String> {
 ///
 /// M14: se parsea segun el carril (`kind`). Antes siempre como script: en el
 /// carril B un modulo con import/export no parseaba y quedaba sin flags ni lint.
+///
+/// R1-H13: ya no en silencio. Cada texto se parsea con `parse_para_analisis`
+/// (acepta errores recuperados) y el estado de los tres vuelve en `Analisis`:
+/// main lo cuenta en las stats y lo anota en meta.txt. Un panic de SWC deja
+/// todo `Perdido`.
 pub fn checks_on_text(
     src: &str,
     original: &str,
     minified: &str,
     kind: SourceKind,
-) -> (Vec<&'static str>, (usize, usize)) {
+) -> (Vec<&'static str>, (usize, usize), Analisis) {
+    let perdido = Analisis { fuente: Parseo::Perdido, original: Parseo::Perdido, minificado: Parseo::Perdido };
     catch_unwind(AssertUnwindSafe(|| {
         GLOBALS.set(&Globals::new(), || {
-            let static_flags =
-                parse_for(src, kind).map_or_else(Vec::new, |p| crate::checks::static_flags(&p));
-            let dead =
-                |text: &str| parse_for(text, kind).map_or(0, |p| crate::checks::dead_writes(&p));
-            (static_flags, (dead(original), dead(minified)))
+            let (p, fuente) = parse_para_analisis(src, kind);
+            let static_flags = p.map_or_else(Vec::new, |p| crate::checks::static_flags(&p));
+            let dead = |text: &str| {
+                let (p, estado) = parse_para_analisis(text, kind);
+                (p.map_or(0, |p| crate::checks::dead_writes(&p)), estado)
+            };
+            let ((d0, original), (d1, minificado)) = (dead(original), dead(minified));
+            (static_flags, (d0, d1), Analisis { fuente, original, minificado })
         })
     }))
-    .unwrap_or_default()
+    .unwrap_or((Vec::new(), (0, 0), perdido))
+}
+
+/// R1-H13: parse para ANALIZAR (flags, lint, bindings del epilogo), no para
+/// minificar. Primero como `parse_for` (segun el carril, sin errores). Si no:
+/// el mismo carril aceptando errores recuperados (el parser de SWC marca como
+/// recuperables `new.target` top-level, una funcion de Anexo B como cuerpo de
+/// un `if`, `delete x` en estricto; el AST esta entero), y por ultimo el otro
+/// carril. MEDIDO en el corpus de SWC con oxc: eso recupera todos los textos
+/// que el revisor 1 encontro perdidos salvo un minificado (fixture 12214, error
+/// fatal en los dos carriles).
+pub fn parse_para_analisis(src: &str, kind: SourceKind) -> (Option<Program>, Parseo) {
+    let cm: Lrc<SourceMap> = Default::default();
+    let fm = cm.new_source_file(FileName::Anon.into(), src.to_string());
+    if let Some(p) = parse_program(&fm, kind) {
+        return (Some(p), Parseo::Limpio);
+    }
+    let otro = match kind {
+        SourceKind::Script => SourceKind::Module,
+        SourceKind::Module => SourceKind::Script,
+    };
+    for k in [kind, otro] {
+        if let Some(p) = parse_tolerante(&fm, k) {
+            return (Some(p), Parseo::Recuperado);
+        }
+    }
+    (None, Parseo::Perdido)
+}
+
+/// Como `parse_program`, pero acepta errores recuperados.
+fn parse_tolerante(fm: &SourceFile, kind: SourceKind) -> Option<Program> {
+    let mut recovered = Vec::new();
+    match kind {
+        SourceKind::Script => parse_file_as_script(
+            fm,
+            Syntax::Es(EsSyntax { allow_return_outside_function: true, ..Default::default() }),
+            EsVersion::latest(),
+            None,
+            &mut recovered,
+        )
+        .ok()
+        .map(Program::Script),
+        SourceKind::Module => parse_file_as_module(fm, Syntax::default(), EsVersion::latest(), None, &mut recovered)
+            .ok()
+            .map(Program::Module),
+    }
 }
 
 #[cfg(test)]
@@ -376,6 +453,28 @@ mod tests {
         // M19: `return` top-level es CommonJS valido en el carril A, no en el B.
         assert!(matches!(Swc::carril_a().prepare("console.log(1);\nreturn;\n"), Outcome::Ok { .. }));
         assert!(matches!(cfg.prepare("console.log(1);\nreturn;\n"), Outcome::ParseError { .. }));
+    }
+
+    /// R1-H13: lo que SWC solo parsea con errores recuperados (o con el otro
+    /// carril) se analiza igual y se avisa; lo que no parsea queda `Perdido`.
+    #[test]
+    fn analisis_no_es_silencioso() {
+        use super::checks_on_text;
+        use crate::checks::Parseo::{Limpio, Perdido, Recuperado};
+        // `new.target` top-level (CJS valido, SWC lo marca como recuperado).
+        let (_, _, a) = checks_on_text("new.target;\n", "new.target;\n", "x = {", SourceKind::Script);
+        assert_eq!((a.fuente, a.original, a.minificado), (Recuperado, Recuperado, Perdido));
+        // Anexo B como cuerpo de un `if`: los flags se calculan igual.
+        let (flags, _, a) = checks_on_text("if (x) function f() { return arguments.callee; }\n", "1;", "1;", SourceKind::Script);
+        assert_eq!((flags, a.fuente, a.original), (vec!["callee"], Recuperado, Limpio));
+        // `delete x` en un modulo (estricto): el lint cuenta igual.
+        let (_, dead, a) = checks_on_text("1;", "1;", "delete x; [1][0] = 2;", SourceKind::Module);
+        assert_eq!((dead, a.minificado), ((0, 1), Recuperado));
+        // `with` en un modulo no parsea como modulo: se analiza como script.
+        let (flags, _, a) = checks_on_text("with (o) { x; }", "1;", "1;", SourceKind::Module);
+        assert_eq!((flags, a.fuente), (vec!["with"], Recuperado));
+        let (_, _, a) = checks_on_text("1;", "1;", "1;", SourceKind::Module);
+        assert!(a.limpio());
     }
 
     /// M13: los herederos literales pasan a `null`; los demas no se tocan.
