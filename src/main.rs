@@ -326,8 +326,10 @@ struct Stats {
     /// con el mismo kind no se reporta (`inherited`). No se suma en `merge`.
     skip_kind: Option<oracle::Kind>,
     inherited: usize,
-    /// M31 (a): observaciones con `--invocar` que no terminaron y se repitieron
-    /// sin invocar. Va en una linea aparte (solo con `--invocar`).
+    /// M31 (a): observaciones con `--invocar` que no terminaron. R2-H01: en el
+    /// epilogo, la pasada de invocacion (adicional) sin salida: vale la normal;
+    /// en el envoltorio de modulos, la que se repitio sin invocar. Va en una
+    /// linea aparte (solo con `--invocar`).
     invocar_retry: usize,
 }
 
@@ -792,7 +794,13 @@ fn process_case(
     let (a, a_cached) = ctx.cache.run(runner, &original, &mut stats.cache_hits);
     // Un SyntaxError antes de imprimir nada puede ser que node no acepta el
     // original como script: entonces no es un caso.
-    if a.threw() && a.stdout.starts_with("!dz throw SyntaxError") && !runner.node_accepts(&original) {
+    // R2-H03: tambien un RangeError que `node --check` reproduce: V8 no pudo
+    // compilar el fuente (anidamiento extremo: 20000 `[`). Un RangeError en
+    // runtime (recursion, `new Array(-1)`) pasa `node --check` y se compara.
+    if a.threw()
+        && (a.stdout.starts_with("!dz throw SyntaxError") || a.stdout.starts_with("!dz throw RangeError"))
+        && !runner.node_accepts(&original)
+    {
         stats.a_invalid += 1;
         ctx.reporter.discard(rel, "invalido", a.elapsed);
         return;
@@ -895,7 +903,11 @@ fn observe_epilogue(
     // Segunda pasada con el epilogo observador.
     // El epilogo se agrega al fuente crudo y despues se aplica la forma: asi
     // queda dentro de la funcion y ve los bindings.
-    let Some(instrumented) = minify::instrument(raw, invocar, cli.kind).map(|s| cli.forma.apply(&s)) else {
+    // R2-H01: esta pasada es SIEMPRE la de sin `--invocar` (epilogo_normal):
+    // cualquier referencia que agregue el epilogo cambia lo que el minifier
+    // puede optimizar (la re-observacion de M31 c le impedia a oxc inlinear y
+    // se perdia 6422/2). `--invocar` es una pasada adicional (invoke_pass).
+    let Some(instrumented) = epilogo_normal(raw, cli) else {
         if had_globals {
             stats.observed_globals += 1;
             stats.same += 1;
@@ -925,12 +937,6 @@ fn observe_epilogue(
     };
     let (a, a_cached) = ctx.cache.run(runner, &original, &mut stats.cache_hits);
     if !a.ok_with_output() {
-        // M31 (a): una funcion invocada que no termina o sale con otro codigo
-        // no tiene que llevarse la observacion: se reintenta sin invocar.
-        if invocar {
-            stats.invocar_retry += 1;
-            return observe_epilogue(ctx, runner, cfg, names_cfg, cli, stats, rel, raw, had_globals, false);
-        }
         stats.observed_not_ok += 1;
         ctx.reporter.discard(rel, "observado_sin_salida", a.elapsed);
         return;
@@ -939,9 +945,66 @@ fn observe_epilogue(
     if a.threw() {
         stats.threw += 1;
     }
-    if !compare_and_report(ctx, runner, stats, rel, &original, &minified, a, a_cached, true, &static_flags, names_cfg) {
-        stats.same += 1;
+    if compare_and_report(ctx, runner, stats, rel, &original, &minified, a, a_cached, true, &static_flags, names_cfg) {
+        return;
     }
+    if invocar && invoke_pass(ctx, runner, cfg, names_cfg, cli, stats, rel, raw, &instrumented) {
+        return;
+    }
+    stats.same += 1;
+}
+
+/// R2-H01: el epilogo de la pasada observada normal. No depende de `--invocar`:
+/// es byte a byte el de una corrida sin `--invocar`.
+fn epilogo_normal(raw: &str, cli: &Cli) -> Option<String> {
+    minify::instrument(raw, false, cli.kind).map(|s| cli.forma.apply(&s))
+}
+
+/// R2-H01: la pasada de `--invocar`, ADICIONAL a la normal y solo si esa dio
+/// iguales: el epilogo que invoca las funciones y re-observa (M31) sobre el
+/// mismo fuente crudo, minificado y comparado aparte. Devuelve `true` si cerro
+/// el caso (divergencia, conocida, panic, falla del runner). M31 (a): si el
+/// original con este epilogo no termina bien (una funcion invocada se cuelga o
+/// sale con otro codigo), vale la pasada normal (`invocar_retry`).
+#[allow(clippy::too_many_arguments)]
+fn invoke_pass(
+    ctx: &Ctx,
+    runner: &runner::Runner,
+    cfg: &minify::Config,
+    names_cfg: Option<&minify::Config>,
+    cli: &Cli,
+    stats: &mut Stats,
+    rel: &Path,
+    raw: &str,
+    normal: &str,
+) -> bool {
+    let Some(instrumented) = minify::instrument(raw, true, cli.kind).map(|s| cli.forma.apply(&s)) else {
+        return false;
+    };
+    // M31 (b): sin por donde invocar, el epilogo es el normal: ya se comparo.
+    if instrumented == normal {
+        return false;
+    }
+    let (original, minified, static_flags) = match minify::prepare(&instrumented, cfg) {
+        minify::Outcome::Ok {
+            original,
+            minified,
+            static_flags,
+            ..
+        } => (original, minified, static_flags),
+        minify::Outcome::Panic(msg) => {
+            stats.panics += 1;
+            ctx.reporter.panic(rel, &instrumented, &msg);
+            return true;
+        }
+        minify::Outcome::ParseError { .. } | minify::Outcome::CodegenError => return false,
+    };
+    let (a, a_cached) = ctx.cache.run(runner, &original, &mut stats.cache_hits);
+    if !a.ok_with_output() {
+        stats.invocar_retry += 1;
+        return false;
+    }
+    compare_and_report(ctx, runner, stats, rel, &original, &minified, a, a_cached, true, &static_flags, names_cfg)
 }
 
 /// Carril B, programa mudo: segunda pasada por el envoltorio que serializa el
@@ -1638,6 +1701,136 @@ mod tests {
         let mut st = Stats::default();
         observe_epilogue(&ctx, &r, &cfg, None, &cli, &mut st, rel, "var k = 1;\nfunction f() { return k; }\n", false, true);
         assert_eq!((st.invocar_retry, st.observed), (0, 1));
+        std::fs::remove_dir_all(&d).unwrap();
+    }
+
+    /// R2-H01: con `--invocar`, el epilogo de la pasada normal es byte a byte el
+    /// de sin `--invocar` (el de 9f100ab sin la opcion), en los dos carriles y
+    /// las dos formas; el de invocacion es otro texto y va en otra pasada.
+    #[test]
+    fn invocar_no_cambia_el_epilogo_normal() {
+        use super::{epilogo_normal, minify, Cli};
+        let p = |v: &[&str]| Cli::parse(v.iter().map(|s| s.to_string()).collect()).unwrap();
+        let fuentes = [
+            "import assert from 'assert'; let result='FAIL'; const unused={...{get prop(){result='PASS'}}}; assert.strictEqual(result,'PASS');\n",
+            "var k = 1;\nfunction f() { k = 2; }\n",
+            "let o = { n: 0 };\nconst inc = () => o.n++;\nclass C {}\n",
+            "module.exports = { f() { return 1; } };\n",
+        ];
+        let mut comparadas = 0;
+        for carril in ["a", "b"] {
+            for forma in ["tal_cual", "en_funcion"] {
+                let sin = p(&["c", "--carril", carril, "--forma", forma]);
+                let con = p(&["c", "--carril", carril, "--forma", forma, "--invocar"]);
+                assert!(con.invocar && !sin.invocar);
+                for raw in fuentes {
+                    let normal = epilogo_normal(raw, &con);
+                    assert_eq!(normal, epilogo_normal(raw, &sin), "{carril} {forma} {raw}");
+                    let referencia = minify::instrument(raw, false, sin.kind).map(|s| sin.forma.apply(&s));
+                    assert_eq!(normal, referencia, "{carril} {forma} {raw}");
+                    if let Some(n) = normal {
+                        assert!(!n.contains("__difuzzObserveInvocar") && !n.contains("__difuzzObserveDespues"), "{n}");
+                        let inv = minify::instrument(raw, true, con.kind).map(|s| con.forma.apply(&s)).unwrap();
+                        assert_ne!(n, inv);
+                        comparadas += 1;
+                    }
+                }
+            }
+        }
+        assert!(comparadas >= 12, "{comparadas}");
+    }
+
+    /// R2-H03: un original que V8 no puede compilar (RangeError al parsear
+    /// 6000 `[` anidados; MEDIDO con node 24: 3000 compila, 3500 no; `node --check` lo rechaza igual) es descarte
+    /// `invalido` en los dos backends y carriles, no un ThrowLost en div/. Un
+    /// RangeError en runtime pasa `node --check` y se sigue comparando.
+    #[test]
+    fn original_que_node_no_compila_es_invalido() {
+        use super::{backend::Minifier, cache, known, minify, oracle, process_case, runner, triage, Cli, Ctx, Stats, WORKER_STACK};
+        if std::process::Command::new("node").arg("--version").output().is_err() {
+            eprintln!("sin node en PATH: test omitido");
+            return;
+        }
+        // La pila de un worker: parsear 20000 niveles en el hilo del test no entra.
+        std::thread::Builder::new()
+            .stack_size(WORKER_STACK)
+            .spawn(|| {
+                let d = std::env::temp_dir().join(format!("difuzz-test-h03-{}", std::process::id()));
+                let _ = std::fs::remove_dir_all(&d);
+                let corpus = d.join("corpus");
+                for (caso, js) in [
+                    ("anidado", format!("var a = {}{};console.log(1)\n", "[".repeat(6000), "]".repeat(6000))),
+                    ("runtime", "Number(process.argv.length).toFixed(200);\n".to_string()),
+                ] {
+                    std::fs::create_dir_all(corpus.join(caso)).unwrap();
+                    std::fs::write(corpus.join(caso).join("input.js"), js).unwrap();
+                }
+                let preload = runner::Preload::write_tagged("h03").unwrap();
+                let cache = cache::CacheA::new(None, &[]);
+                let triage = triage::Triage::load(&d);
+                let known = known::Known::load(&d, &d, 0);
+                for (m, minifier) in [("swc", Minifier::Swc), ("oxc", Minifier::Oxc)] {
+                    for (k, kind) in [("a", minify::SourceKind::Script), ("b", minify::SourceKind::Module)] {
+                        let out = d.join(format!("out-{m}-{k}"));
+                        std::fs::create_dir_all(&out).unwrap();
+                        let reporter = oracle::Reporter::new(&out, "test".into(), runner::PRELOAD).with_kind(kind);
+                        let ctx = Ctx { reporter: &reporter, known: &known, cache: &cache, triage: &triage, strict_recheck: None, oxc_recheck: None };
+                        let cli = Cli::parse(
+                            [corpus.to_str().unwrap(), "--minifier", m, "--carril", k, "--no-cache"].iter().map(|s| s.to_string()).collect(),
+                        )
+                        .unwrap();
+                        let cfg = minify::Preset::CarrilA.build(minifier, kind);
+                        let r = runner::Runner::new(&preload, 992, std::time::Duration::from_secs(10)).with_kind(kind);
+                        let mut st = Stats::default();
+                        process_case(&ctx, &r, &cfg, None, &cli, &mut st, &corpus.join("anidado/input.js"));
+                        assert_eq!((st.a_invalid, st.divergences, st.same), (1, 0, 0), "{m}/{k}: {}", st.line());
+                        let mut st = Stats::default();
+                        process_case(&ctx, &r, &cfg, None, &cli, &mut st, &corpus.join("runtime/input.js"));
+                        assert_eq!((st.a_invalid, st.threw, st.same), (0, 1, 1), "{m}/{k}: {}", st.line());
+                    }
+                }
+                std::fs::remove_dir_all(&d).unwrap();
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    /// R2-H01, de punta a punta: oxc/B con `--invocar` detecta el patron de
+    /// 6422/2 (spread con getter que el inlining corre despues del assert), que
+    /// la re-observacion de M31 (c) tapaba cuando reemplazaba a la normal.
+    #[test]
+    fn invocar_no_pierde_el_bug_de_inlining() {
+        use super::{backend::Minifier, cache, known, minify, observe_epilogue, oracle, runner, triage, Cli, Ctx, Stats};
+        use std::path::Path;
+        if std::process::Command::new("node").arg("--version").output().is_err() {
+            eprintln!("sin node en PATH: test omitido");
+            return;
+        }
+        let d = std::env::temp_dir().join(format!("difuzz-test-h01-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        let reporter = oracle::Reporter::new(&d, "test".into(), runner::PRELOAD).with_kind(minify::SourceKind::Module);
+        let known = known::Known::load(&d, &d, 0);
+        let cache = cache::CacheA::new(None, &[]);
+        let triage = triage::Triage::load(&d);
+        let ctx = Ctx { reporter: &reporter, known: &known, cache: &cache, triage: &triage, strict_recheck: None, oxc_recheck: None };
+        let cfg = minify::Preset::CoreDefaults.build(Minifier::Oxc, minify::SourceKind::Module);
+        let preload = runner::Preload::write_tagged("h01").unwrap();
+        let r = runner::Runner::new(&preload, 991, std::time::Duration::from_secs(10)).with_kind(minify::SourceKind::Module);
+        let rel = Path::new("x/input.js");
+        let raw = "import assert from 'assert'; let result='FAIL'; const unused={...{get prop(){result='PASS'}}}; assert.strictEqual(result,'PASS');\n";
+        for args in [&["c", "--minifier", "oxc", "--carril", "b", "--no-cache"][..], &["c", "--minifier", "oxc", "--carril", "b", "--no-cache", "--invocar"]] {
+            let cli = Cli::parse(args.iter().map(|s| s.to_string()).collect()).unwrap();
+            let mut st = Stats::default();
+            observe_epilogue(&ctx, &r, &cfg, None, &cli, &mut st, rel, raw, false, cli.invocar);
+            assert_eq!((st.observed, st.divergences, st.same, st.invocar_retry), (1, 1, 0, 0), "{args:?}");
+        }
+        // Un caso sin bug: con --invocar se compara dos veces y cuenta una sola.
+        let cli = Cli::parse(["c", "--minifier", "oxc", "--carril", "b", "--no-cache", "--invocar"].iter().map(|s| s.to_string()).collect()).unwrap();
+        let mut st = Stats::default();
+        observe_epilogue(&ctx, &r, &cfg, None, &cli, &mut st, rel, "let k = 1;\nexport {};\nfunction f() { k = 2; }\nf;\n", false, true);
+        assert_eq!((st.observed, st.divergences, st.same), (1, 0, 1));
         std::fs::remove_dir_all(&d).unwrap();
     }
 
