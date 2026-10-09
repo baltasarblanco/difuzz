@@ -132,8 +132,18 @@ fn corrida_cortada_queda_marcada() {
     let b = base("corte");
     let (corpus, out, idx) = (b.join("corpus"), b.join("out"), b.join("idx"));
     // Cada caso tarda ~1 s por ejecucion: con --jobs 1 la corrida dura >10 s.
+    // Atomics.wait duerme 1 s de reloj real. No un bucle sobre Date.now(): el
+    // preload congela Date (preload.js:27) y el bucle no termina nunca; tras el
+    // SIGKILL de abajo ese node queda huerfano (pasa a init, nadie lo mata) y
+    // gira al 100% de una CPU para siempre. MEDIDO 08-oct: 50 de esos node
+    // acumulados por las corridas de la suite, ~39 CPU de carga, y los tests
+    // con tiempos fallaban por la carga (b3-b, inestable/).
     for i in 0..6 {
-        caso(&corpus, &format!("lento{i}"), "var t = Date.now();\nwhile (Date.now() - t < 1000);\nconsole.log('listo');\n");
+        caso(
+            &corpus,
+            &format!("lento{i}"),
+            "Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 1000);\nconsole.log('listo');\n",
+        );
     }
     let args = [
         corpus.to_str().unwrap(),
@@ -173,6 +183,12 @@ fn corrida_cortada_queda_marcada() {
     let t0 = Instant::now();
     while !std::fs::read_to_string(&marca).is_ok_and(|t| t.starts_with("estado: incompleta\n")) {
         assert!(t0.elapsed() < Duration::from_secs(60), "la marca no volvio a incompleta");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    // El indice (.tmp) se crea despues de la marca: esperarlo antes del SIGKILL
+    // (MEDIDO b3-b: bajo carga 1,5 s no siempre alcanzaba).
+    while !ix(".tmp").is_file() {
+        assert!(t0.elapsed() < Duration::from_secs(60), "no aparecio el .tmp del indice");
         std::thread::sleep(Duration::from_millis(50));
     }
     std::thread::sleep(Duration::from_millis(1500));

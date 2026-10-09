@@ -272,24 +272,41 @@ mod tests {
         };
         // Sin cota absoluta de tiempo (fallaba bajo carga): lo que se mide es
         // que no se espere READ_GRACE (1 s) de mas sobre un programa trivial.
-        let base = (0..2)
-            .map(|_| {
-                let t0 = Instant::now();
-                assert_eq!(r.run("console.log(1);\n").status, Status::Exited(0));
-                t0.elapsed()
-            })
-            .max()
-            .unwrap();
+        let base = || {
+            (0..2)
+                .map(|_| {
+                    let t0 = Instant::now();
+                    assert_eq!(r.run("console.log(1);\n").status, Status::Exited(0));
+                    t0.elapsed()
+                })
+                .max()
+                .unwrap()
+        };
         for stdio in ["ignore", "inherit"] {
             let js = format!(
                 "const c = require('child_process').spawn('sleep', ['30'], {{ detached: true, stdio: '{stdio}' }});\nc.unref();\nconsole.log(c.pid);\n"
             );
-            let t0 = Instant::now();
-            let e = r.run(&js);
-            assert_eq!(e.status, Status::Exited(0), "{}", e.stderr);
-            let pid: i32 = e.stdout.trim().parse().unwrap();
-            assert!(!vivo(pid), "stdio {stdio}: el sleep {pid} sigue vivo");
-            assert!(t0.elapsed() < base + Duration::from_millis(800), "stdio {stdio}: tardo {:?} (base {base:?})", t0.elapsed());
+            // Hasta 3 intentos para la cota de tiempo, cada uno contra una base
+            // medida justo antes: bajo carga un arranque de node puede tardar
+            // mas que el margen (la base y el intento son ejecuciones distintas).
+            // Esperar READ_GRACE es sistematico: si el runner lo espera, falla en
+            // los 3. Que el sleep no sobreviva se exige en cada intento.
+            let mut tiempos = Vec::new();
+            for _ in 0..3 {
+                let base = base();
+                let t0 = Instant::now();
+                let e = r.run(&js);
+                let t = t0.elapsed();
+                assert_eq!(e.status, Status::Exited(0), "{}", e.stderr);
+                let pid: i32 = e.stdout.trim().parse().unwrap();
+                assert!(!vivo(pid), "stdio {stdio}: el sleep {pid} sigue vivo");
+                tiempos.push((t, base));
+                if t < base + Duration::from_millis(800) {
+                    break;
+                }
+            }
+            let (t, base) = *tiempos.last().unwrap();
+            assert!(t < base + Duration::from_millis(800), "stdio {stdio}: tardo de mas en los 3 intentos (tiempo, base): {tiempos:?}");
         }
     }
 

@@ -8,6 +8,7 @@
 
 pub mod oxc;
 pub mod swc;
+#[cfg(test)] mod version_tests;
 
 use crate::minify::{Outcome, Preset, SourceKind};
 
