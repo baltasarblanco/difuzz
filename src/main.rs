@@ -12,6 +12,8 @@ mod checks;
 mod clasificar;
 mod corpus;
 mod corrida;
+#[cfg(test)]
+mod e2e_tests;
 mod emitir;
 mod huerfanos;
 mod indice;
@@ -27,6 +29,8 @@ mod recheck;
 mod runner;
 mod stubs;
 mod subproceso;
+#[cfg(test)]
+mod test_util;
 mod triage;
 
 use std::path::{Path, PathBuf};
@@ -1791,6 +1795,9 @@ mod tests {
     fn minificado_identico_no_corre_b() {
         use super::{cache, compare_and_report, known, oracle, runner, triage, Ctx, Stats};
         use std::path::Path;
+        if !crate::test_util::requiere_node() {
+            return;
+        }
         let d = std::env::temp_dir().join(format!("difuzz-test-identico-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
@@ -1806,7 +1813,7 @@ mod tests {
             medido: None,
         };
         let preload = runner::Preload::write_tagged("identico").unwrap();
-        let r = runner::Runner::new(&preload, 999, std::time::Duration::from_secs(5));
+        let r = runner::Runner::new(&preload, crate::test_util::id_runner(), std::time::Duration::from_secs(5));
         // A inventado: si B corriera de verdad, imprimiria "1" y divergeria.
         let a = || runner::Exec {
             status: runner::Status::Exited(0),
@@ -1847,8 +1854,7 @@ mod tests {
     fn minificado_invalido_nunca_es_asuncion() {
         use super::{backend::Minifier, cache, compare_and_report, known, oracle, runner, triage, Ctx, Stats};
         use std::path::Path;
-        if std::process::Command::new("node").arg("--version").output().is_err() {
-            eprintln!("sin node en PATH: test omitido");
+        if !crate::test_util::requiere_node() {
             return;
         }
         let d = std::env::temp_dir().join(format!("difuzz-test-invalido-{}", std::process::id()));
@@ -1860,7 +1866,7 @@ mod tests {
         let triage = triage::Triage::load(&d);
         let ctx = Ctx { reporter: &reporter, known: &known, cache: &cache, triage: &triage, medido: None };
         let preload = runner::Preload::write_tagged("invalido").unwrap();
-        let r = runner::Runner::new(&preload, 989, std::time::Duration::from_secs(20));
+        let r = runner::Runner::new(&preload, crate::test_util::id_runner(), std::time::Duration::from_secs(20));
         // `coercion` es un flag estatico de todo el programa (05-coercion-miente).
         let o = "class P { toString() { return \"p\"; } }\nconsole.log(1);\n";
         let mut st = Stats::default();
@@ -1887,8 +1893,7 @@ mod tests {
     fn invocar_que_no_termina_reintenta_sin_invocar() {
         use super::{backend::Minifier, cache, known, minify, observe_epilogue, oracle, runner, triage, Cli, Ctx, Stats};
         use std::path::Path;
-        if std::process::Command::new("node").arg("--version").output().is_err() {
-            eprintln!("sin node en PATH: test omitido");
+        if !crate::test_util::requiere_node() {
             return;
         }
         let d = std::env::temp_dir().join(format!("difuzz-test-m31a-{}", std::process::id()));
@@ -1902,7 +1907,7 @@ mod tests {
         let cli = Cli::parse(["c", "--invocar", "--no-cache"].iter().map(|s| s.to_string()).collect()).unwrap();
         let cfg = minify::Preset::CarrilA.build(Minifier::Swc, minify::SourceKind::Script);
         let preload = runner::Preload::write_tagged("m31a").unwrap();
-        let r = runner::Runner::new(&preload, 990, std::time::Duration::from_millis(1500));
+        let r = runner::Runner::new(&preload, crate::test_util::id_runner(), std::time::Duration::from_millis(1500));
         let rel = Path::new("x/input.js");
         for raw in ["var k = 1;\nfunction f() { while (true) {} }\n", "var k = 1;\nfunction f() { process.exit(3); }\n"] {
             let mut st = Stats::default();
@@ -1961,8 +1966,7 @@ mod tests {
         use super::{cache, epilogo_normal, known, minify, observe_epilogue, oracle, runner, triage, Cli, Ctx, Stats};
         use crate::backend::Backend;
         use std::path::Path;
-        if std::process::Command::new("node").arg("--version").output().is_err() {
-            eprintln!("sin node en PATH: test omitido");
+        if !crate::test_util::requiere_node() {
             return;
         }
         /// "Minifica" cambiando `= 2` por `= 3`: un bug que solo se ve en `b`.
@@ -1983,9 +1987,7 @@ mod tests {
         let cli = Cli::parse(["c", "--no-cache"].iter().map(|s| s.to_string()).collect()).unwrap();
         let cfg = minify::Config::from_backend(Box::new(Rompe));
         let preload = runner::Preload::write_tagged("h14").unwrap();
-        // b2-int: id propio (el 991 lo usa tambien el test de R2-H03: mismo
-        // script y cwd en paralelo).
-        let r = runner::Runner::new(&preload, 994, std::time::Duration::from_secs(20));
+        let r = runner::Runner::new(&preload, crate::test_util::id_runner(), std::time::Duration::from_secs(20));
         let raw = "var a = 1;\nif (a) { var b = 2; }\n";
         let normal = epilogo_normal(raw, &cli).unwrap().unwrap();
         assert!(normal.contains("[\"a\", a]") && !normal.contains("\"b\""), "{normal}");
@@ -2012,8 +2014,7 @@ mod tests {
     #[test]
     fn original_que_node_no_compila_es_invalido() {
         use super::{backend::Minifier, cache, known, minify, oracle, process_case, runner, triage, Cli, Ctx, Stats, WORKER_STACK};
-        if std::process::Command::new("node").arg("--version").output().is_err() {
-            eprintln!("sin node en PATH: test omitido");
+        if !crate::test_util::requiere_node() {
             return;
         }
         // La pila de un worker: parsear 20000 niveles en el hilo del test no entra.
@@ -2045,7 +2046,7 @@ mod tests {
                         )
                         .unwrap();
                         let cfg = minify::Preset::CarrilA.build(minifier, kind);
-                        let r = runner::Runner::new(&preload, 992, std::time::Duration::from_secs(10)).with_kind(kind);
+                        let r = runner::Runner::new(&preload, crate::test_util::id_runner(), std::time::Duration::from_secs(10)).with_kind(kind);
                         let mut st = Stats::default();
                         process_case(&ctx, &r, &cfg, None, &cli, &mut st, &corpus.join("anidado/input.js"));
                         assert_eq!((st.a_invalid, st.divergences, st.same), (1, 0, 0), "{m}/{k}: {}", st.line());
@@ -2068,8 +2069,7 @@ mod tests {
     #[test]
     fn analisis_que_falla_no_es_panic_del_minifier() {
         use super::{analisis, backend::Minifier, cache, known, minify, oracle, process_case, runner, triage, Cli, Ctx, Stats};
-        if std::process::Command::new("node").arg("--version").output().is_err() {
-            eprintln!("sin node en PATH: test omitido");
+        if !crate::test_util::requiere_node() {
             return;
         }
         let d = std::env::temp_dir().join(format!("difuzz-test-a6-{}", std::process::id()));
@@ -2090,7 +2090,7 @@ mod tests {
             let ctx = Ctx { reporter: &reporter, known: &known, cache: &cache, triage: &triage, medido: None };
             let cli = Cli::parse([corpus.to_str().unwrap(), "--minifier", m, "--no-cache", "--mutaciones", "1"].iter().map(|s| s.to_string()).collect()).unwrap();
             let cfg = minify::Preset::CarrilA.build(minifier, minify::SourceKind::Script);
-            let r = runner::Runner::new(&preload, 993, std::time::Duration::from_secs(10));
+            let r = runner::Runner::new(&preload, crate::test_util::id_runner(), std::time::Duration::from_secs(10));
             analisis::tomar_notas();
             analisis::forzar_panic(true);
             let mut st = Stats::default();
@@ -2120,8 +2120,7 @@ mod tests {
     fn invocar_no_pierde_el_bug_de_inlining() {
         use super::{backend::Minifier, cache, known, minify, observe_epilogue, oracle, runner, triage, Cli, Ctx, Stats};
         use std::path::Path;
-        if std::process::Command::new("node").arg("--version").output().is_err() {
-            eprintln!("sin node en PATH: test omitido");
+        if !crate::test_util::requiere_node() {
             return;
         }
         let d = std::env::temp_dir().join(format!("difuzz-test-h01-{}", std::process::id()));
@@ -2134,7 +2133,7 @@ mod tests {
         let ctx = Ctx { reporter: &reporter, known: &known, cache: &cache, triage: &triage, medido: None };
         let cfg = minify::Preset::CoreDefaults.build(Minifier::Oxc, minify::SourceKind::Module);
         let preload = runner::Preload::write_tagged("h01").unwrap();
-        let r = runner::Runner::new(&preload, 991, std::time::Duration::from_secs(10)).with_kind(minify::SourceKind::Module);
+        let r = runner::Runner::new(&preload, crate::test_util::id_runner(), std::time::Duration::from_secs(10)).with_kind(minify::SourceKind::Module);
         let rel = Path::new("x/input.js");
         let raw = "import assert from 'assert'; let result='FAIL'; const unused={...{get prop(){result='PASS'}}}; assert.strictEqual(result,'PASS');\n";
         for args in [&["c", "--minifier", "oxc", "--carril", "b", "--no-cache"][..], &["c", "--minifier", "oxc", "--carril", "b", "--no-cache", "--invocar"]] {

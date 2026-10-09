@@ -1,7 +1,8 @@
 //! R1-H05: el oraculo sin debug assertions, de punta a punta por `process_case`
 //! (reporter, runner y node de verdad), con backends falsos: uno que hace panic
 //! como un `debug_assert!` y un oraculo que minifica o que tambien falla.
-//! Sin `node` en el PATH los tests de punta a punta avisan y salen.
+//! Sin `node` en el PATH los tests de punta a punta fallan (salvo
+//! `DIFUZZ_SIN_NODE=1`: ver test_util.rs).
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -31,10 +32,6 @@ impl Backend for TambienFalla {
     fn prepare(&self, _: &str) -> Outcome {
         Outcome::Panic("byte index 1 is out of range".into())
     }
-}
-
-fn hay_node() -> bool {
-    std::process::Command::new("node").arg("--version").output().is_ok_and(|o| o.status.success())
 }
 
 /// Corre un caso (`console.log(1);`) por `process_case` con `cfg` y devuelve
@@ -67,12 +64,11 @@ fn leer(p: &Path) -> String {
 /// Panic solo con asserts, el oraculo minifica y diverge: div/ con la nota, nada en panic/.
 #[test]
 fn solo_asserts_se_compara_y_diverge() {
-    if !hay_node() {
-        eprintln!("sin node en el PATH: test salteado");
+    if !crate::test_util::requiere_node() {
         return;
     }
     let cfg = Config::con_oraculo(Box::new(ConAsserts), Box::new(Oraculo("console.log(2);\n")));
-    let (st, base) = correr("div", 9101, &cfg);
+    let (st, base) = correr("div", crate::test_util::id_runner(), &cfg);
     let out = base.join("out");
     assert_eq!((st.panics, st.divergences, st.same, st.solo_asserts, st.solo_asserts_sin_div), (0, 1, 0, 1, 0));
     assert!(!out.join("panic").exists() && !out.join("asserts").exists());
@@ -87,12 +83,11 @@ fn solo_asserts_se_compara_y_diverge() {
 /// Panic solo con asserts que no diverge: no es hallazgo; queda en asserts/.
 #[test]
 fn solo_asserts_sin_divergencia_va_a_asserts() {
-    if !hay_node() {
-        eprintln!("sin node en el PATH: test salteado");
+    if !crate::test_util::requiere_node() {
         return;
     }
     let cfg = Config::con_oraculo(Box::new(ConAsserts), Box::new(Oraculo("console.log(1)\n")));
-    let (st, base) = correr("igual", 9102, &cfg);
+    let (st, base) = correr("igual", crate::test_util::id_runner(), &cfg);
     let out = base.join("out");
     assert_eq!((st.panics, st.divergences, st.same, st.solo_asserts, st.solo_asserts_sin_div), (0, 0, 1, 1, 1));
     assert!(!out.join("panic").exists() && !out.join("div").exists());
@@ -106,7 +101,7 @@ fn solo_asserts_sin_divergencia_va_a_asserts() {
 #[test]
 fn panic_real_sigue_en_panic() {
     let cfg = Config::con_oraculo(Box::new(ConAsserts), Box::new(TambienFalla));
-    let (st, base) = correr("real", 9103, &cfg);
+    let (st, base) = correr("real", crate::test_util::id_runner(), &cfg);
     let out = base.join("out");
     assert_eq!((st.panics, st.divergences, st.same, st.solo_asserts), (1, 0, 0, 0));
     let meta = leer(&out.join("panic/caso/meta.txt"));

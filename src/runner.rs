@@ -689,14 +689,13 @@ mod tests {
         use crate::minify::SourceKind;
         use std::time::Duration;
 
-        if std::process::Command::new("node").arg("--version").output().is_err() {
-            eprintln!("sin node en PATH: test omitido");
+        if !crate::test_util::requiere_node() {
             return;
         }
         let path = std::env::temp_dir().join(format!("difuzz-test-{}-preload.cjs", std::process::id()));
         std::fs::write(&path, super::PRELOAD).unwrap();
         let preload = Preload { path };
-        let runner = Runner::new(&preload, 9999, Duration::from_secs(20)).with_kind(SourceKind::Module);
+        let runner = Runner::new(&preload, crate::test_util::id_runner(), Duration::from_secs(20)).with_kind(SourceKind::Module);
 
         // Top-level await, `this` de modulo, un flag del sensor y un export en TDZ.
         let js = "export const a = [1, 2];\nexport let t;\nawait new Promise((r) => setTimeout(r, 10));\nt = typeof this;\nnew Proxy({}, {});\n";
@@ -725,23 +724,48 @@ mod tests {
     }
 
     /// M2: un hijo que hereda el stdout no estira el timeout ni queda huerfano.
+    /// 9d: sin cota absoluta (la de 1500 ms fallaba bajo carga). Si el runner no
+    /// matara el grupo, el `sleep` retendria el pipe y el runner esperaria
+    /// READ_GRACE (1 s) de mas: se compara contra el mismo timeout sin hijo,
+    /// medido antes y despues de cada intento, con margen READ_GRACE / 2. Hasta 3
+    /// intentos (un pico de carga es aleatorio; esperar READ_GRACE es sistematico
+    /// y falla en los 3). Que el `sleep` no sobreviva se exige en cada intento.
     #[test]
     fn timeout_mata_el_grupo_y_no_espera_al_hijo() {
-        use super::{Preload, Runner, Status};
+        use super::{Preload, Runner, Status, READ_GRACE};
         use std::time::{Duration, Instant};
 
-        if std::process::Command::new("node").arg("--version").output().is_err() {
-            eprintln!("sin node en PATH: test omitido");
+        if !crate::test_util::requiere_node() {
             return;
         }
         let path = std::env::temp_dir().join(format!("difuzz-test-{}-preload-m2.cjs", std::process::id()));
         std::fs::write(&path, super::PRELOAD).unwrap();
         let preload = Preload { path };
-        let runner = Runner::new(&preload, 9998, Duration::from_millis(500));
-        let t0 = Instant::now();
-        let e = runner.run("require('child_process').spawn('sleep',['5'],{stdio:'inherit'});\nwhile(true){}\n");
-        assert_eq!(e.status, Status::Timeout);
-        assert!(t0.elapsed() < Duration::from_millis(1500), "tardo {:?}", t0.elapsed());
+        let runner = Runner::new(&preload, crate::test_util::id_runner(), Duration::from_millis(500));
+        let medir = |js: &str| {
+            let t0 = Instant::now();
+            let e = runner.run(js);
+            assert_eq!(e.status, Status::Timeout, "{js}");
+            (e, t0.elapsed())
+        };
+        let vivo = |pid: i32| std::fs::read(format!("/proc/{pid}/cmdline")).is_ok_and(|c| c.starts_with(b"sleep\0"));
+        let sin_hijo = "while(true){}\n";
+        let con_hijo = "const c = require('child_process').spawn('sleep',['5'],{stdio:'inherit'});\nconsole.log(c.pid);\nwhile(true){}\n";
+        let mut tiempos = Vec::new();
+        for _ in 0..3 {
+            let (_, antes) = medir(sin_hijo);
+            let (e, t) = medir(con_hijo);
+            let (_, despues) = medir(sin_hijo);
+            let pid: i32 = e.stdout.trim().parse().unwrap_or_else(|_| panic!("sin pid del sleep: {:?}", e.stdout));
+            assert!(!vivo(pid), "el sleep {pid} sigue vivo: el grupo no se mato");
+            let base = (antes + despues) / 2;
+            tiempos.push((t, base));
+            if t < base + READ_GRACE / 2 {
+                break;
+            }
+        }
+        let (t, base) = *tiempos.last().unwrap();
+        assert!(t < base + READ_GRACE / 2, "espero al hijo en los 3 intentos (tiempo, base): {tiempos:?}");
     }
 
     /// M9: en el carril A, un require no atrapado de algo que no existe es
@@ -750,14 +774,13 @@ mod tests {
     fn require_inexistente_es_enlace() {
         use super::{Preload, Runner, Status, LINK_EXIT};
         use std::time::Duration;
-        if std::process::Command::new("node").arg("--version").output().is_err() {
-            eprintln!("sin node en PATH: test omitido");
+        if !crate::test_util::requiere_node() {
             return;
         }
         let path = std::env::temp_dir().join(format!("difuzz-test-{}-preload-m9.cjs", std::process::id()));
         std::fs::write(&path, super::PRELOAD).unwrap();
         let preload = Preload { path };
-        let runner = Runner::new(&preload, 9997, Duration::from_secs(20));
+        let runner = Runner::new(&preload, crate::test_util::id_runner(), Duration::from_secs(20));
         let e = runner.run("console.log(1);\nrequire('./no-existe-difuzz');\n");
         assert_eq!(e.status, Status::Exited(LINK_EXIT), "stdout: {}", e.stdout);
         let ok = runner.run("try { require('./no-existe-difuzz'); } catch (e) { console.log(e.code); }\n");
@@ -770,14 +793,13 @@ mod tests {
     fn canal_de_control_no_se_falsifica() {
         use super::{Preload, Runner, Status};
         use std::time::Duration;
-        if std::process::Command::new("node").arg("--version").output().is_err() {
-            eprintln!("sin node en PATH: test omitido");
+        if !crate::test_util::requiere_node() {
             return;
         }
         let path = std::env::temp_dir().join(format!("difuzz-test-{}-preload-m10.cjs", std::process::id()));
         std::fs::write(&path, super::PRELOAD).unwrap();
         let preload = Preload { path };
-        let r = Runner::new(&preload, 9996, Duration::from_secs(20));
+        let r = Runner::new(&preload, crate::test_util::id_runner(), Duration::from_secs(20));
         // exit 70 propio: no lanzo, no termino "solo".
         let e = r.run("console.log(1);\nprocess.exit(70);\n");
         assert_eq!(e.status, Status::Exited(70));
@@ -811,21 +833,21 @@ mod tests {
     fn cada_ejecucion_en_un_cwd_vacio() {
         use super::{Preload, Runner, Status};
         use std::time::Duration;
-        if std::process::Command::new("node").arg("--version").output().is_err() {
-            eprintln!("sin node en PATH: test omitido");
+        if !crate::test_util::requiere_node() {
             return;
         }
         let path = std::env::temp_dir().join(format!("difuzz-test-{}-preload-m11.cjs", std::process::id()));
         std::fs::write(&path, super::PRELOAD).unwrap();
         let preload = Preload { path };
-        let r = Runner::new(&preload, 9995, Duration::from_secs(20));
-        let js = "const fs = require('fs');\nconsole.log(fs.existsSync('x.txt'), process.cwd().endsWith('-w9995-cwd'), process.env.HOME === process.cwd(), Object.keys(process.env).sort().join());\nfs.writeFileSync('x.txt', '1');\n";
-        let e1 = r.run(js);
+        let id = crate::test_util::id_runner();
+        let r = Runner::new(&preload, id, Duration::from_secs(20));
+        let js = format!("const fs = require('fs');\nconsole.log(fs.existsSync('x.txt'), process.cwd().endsWith('-w{id}-cwd'), process.env.HOME === process.cwd(), Object.keys(process.env).sort().join());\nfs.writeFileSync('x.txt', '1');\n");
+        let e1 = r.run(&js);
         assert_eq!(e1.status, Status::Exited(0), "{}", e1.stderr);
         assert_eq!(e1.stdout, "false true true HOME,PATH,TMPDIR,TZ\n");
-        assert_eq!(r.run(js).stdout, e1.stdout);
+        assert_eq!(r.run(&js).stdout, e1.stdout);
         drop(r);
-        assert!(!super::run_dir().join(format!("difuzz-{}-w9995-cwd", std::process::id())).exists());
+        assert!(!super::run_dir().join(format!("difuzz-{}-w{id}-cwd", std::process::id())).exists());
     }
 
     /// M12: un modulo mudo sin exports se observa con el epilogo (parseado como
@@ -835,14 +857,13 @@ mod tests {
         use super::{Preload, Runner, Status};
         use crate::minify::{instrument, SourceKind};
         use std::time::Duration;
-        if std::process::Command::new("node").arg("--version").output().is_err() {
-            eprintln!("sin node en PATH: test omitido");
+        if !crate::test_util::requiere_node() {
             return;
         }
         let path = std::env::temp_dir().join(format!("difuzz-test-{}-preload-m12.cjs", std::process::id()));
         std::fs::write(&path, super::PRELOAD).unwrap();
         let preload = Preload { path };
-        let r = Runner::new(&preload, 9994, Duration::from_secs(20)).with_kind(SourceKind::Module);
+        let r = Runner::new(&preload, crate::test_util::id_runner(), Duration::from_secs(20)).with_kind(SourceKind::Module);
         let mudo = "const o = { a: 1 };\nlet n = await Promise.resolve(2);\nfunction f() { return n; }\n";
         let epi = instrument(mudo, false, SourceKind::Module).expect("un modulo con bindings se observa");
         let e = r.run(&epi);
@@ -860,14 +881,13 @@ mod tests {
     fn argumentos_extra_de_node() {
         use super::{Preload, Runner};
         use std::time::Duration;
-        if std::process::Command::new("node").arg("--version").output().is_err() {
-            eprintln!("sin node en PATH: test omitido");
+        if !crate::test_util::requiere_node() {
             return;
         }
         let path = std::env::temp_dir().join(format!("difuzz-test-{}-preload-m16.cjs", std::process::id()));
         std::fs::write(&path, super::PRELOAD).unwrap();
         let preload = Preload { path };
-        let r = Runner::new(&preload, 9993, Duration::from_secs(20));
+        let r = Runner::new(&preload, crate::test_util::id_runner(), Duration::from_secs(20));
         let js = "console.log(process.execArgv.filter((a) => a.startsWith('--stack')).join());\n";
         assert_eq!(r.run(js).stdout, "\n");
         assert_eq!(r.run_with_args(js, &[super::DEEP_STACK]).stdout, format!("{}\n", super::DEEP_STACK));
@@ -878,14 +898,13 @@ mod tests {
     fn preload_fija_lo_no_determinista() {
         use super::{Preload, Runner, Status};
         use std::time::Duration;
-        if std::process::Command::new("node").arg("--version").output().is_err() {
-            eprintln!("sin node en PATH: test omitido");
+        if !crate::test_util::requiere_node() {
             return;
         }
         let path = std::env::temp_dir().join(format!("difuzz-test-{}-preload-m20.cjs", std::process::id()));
         std::fs::write(&path, super::PRELOAD).unwrap();
         let preload = Preload { path };
-        let r = Runner::new(&preload, 9992, Duration::from_secs(20));
+        let r = Runner::new(&preload, crate::test_util::id_runner(), Duration::from_secs(20));
         let js = "const c = require('crypto'), os = require('os');\nconst t0 = process.hrtime();\nconsole.log(process.pid, process.ppid, process.hrtime(t0), process.hrtime.bigint(), process.uptime());\nconsole.log(c.randomUUID(), crypto.randomUUID(), c.randomBytes(4).toString('hex'), crypto.getRandomValues(new Uint8Array(3)).join(), c.randomInt(10));\nconsole.log(process.memoryUsage().rss, process.memoryUsage.rss(), os.freemem(), os.uptime());\n";
         let a = r.run(js);
         assert_eq!(a.status, Status::Exited(0), "{}", a.stderr);
@@ -899,12 +918,11 @@ mod tests {
     fn excepcion_con_mensaje_por_el_canal() {
         use super::{Preload, Runner};
         use std::time::Duration;
-        if std::process::Command::new("node").arg("--version").output().is_err() {
-            eprintln!("sin node en PATH: test omitido");
+        if !crate::test_util::requiere_node() {
             return;
         }
         let preload = Preload::write_tagged("m21").unwrap();
-        let r = Runner::new(&preload, 9991, Duration::from_secs(20));
+        let r = Runner::new(&preload, crate::test_util::id_runner(), Duration::from_secs(20));
         let e = r.run("function f(callback) { callback(); }\nf(1);\n");
         assert!(e.threw());
         let exc = e.exc().expect("exc en el canal");

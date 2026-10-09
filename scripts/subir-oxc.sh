@@ -19,7 +19,9 @@
 #               `cargo update -p` de esos crates; en src/ y tests/, "oxc_minifier VIEJA" ->
 #               "oxc_minifier VERSION" (Minifier::version() en src/backend/mod.rs, el test
 #               info_del_oraculo de src/subproceso.rs y un comentario de src/oracle.rs). Deja
-#               DIR_SALIDA/lock.diff (paquetes del Cargo.lock que cambiaron)
+#               DIR_SALIDA/lock.diff (paquetes del Cargo.lock que cambiaron). Tambien
+#               probe/package.json: "oxc-minify": "VIEJA" -> "VERSION" (C1 de tests/muestra exige la
+#               version npm == la del crate); su package-lock.json lo sube el paso 10 (RED=1)
 #   4 compilar  cargo build --release && cargo build --profile oraculo (el oraculo TAMBIEN: valida al
 #               binario principal por la version de los minifiers); copia a DIR_SALIDA/bin-nuevo/.
 #               Si no compila (cambio de API de oxc) FRENA con codigo 3: arreglar el fuente en
@@ -27,8 +29,9 @@
 #               correr el mismo comando. Los arreglos quedan en el parche del paso 11.
 #   5 identidad `difuzz --preparar --info` de los cuatro binarios: version de oxc y debug_assertions
 #   6 tests     cargo test y cargo clippy --all-targets -- -D warnings en el worktree (no frena)
-#   7 golden    GOLDEN/verificar.sh con el binario base y con el nuevo; celdas que cambian (no frena,
-#               NO toca esperado.tsv: si oxc arreglo un bug del golden, lo avisa)
+#   7 golden    GOLDEN/verificar.sh y ACEPTACION/verificar.sh con el binario base y con el nuevo;
+#               celdas que cambian (no frena, NO toca ningun esperado.tsv: si oxc arreglo un bug del
+#               golden o de la aceptacion, lo avisa)
 #   8 arnes     ARNES (comparar-binarios.sh) base contra nuevo sobre el corpus completo, ignorando la
 #               linea "backend: oxc_minifier ..." (si no, todos los meta.txt difieren)
 #   9 informe   DIR_SALIDA/diferencias.tsv e INFORME.txt: por celda, hallazgos (div/, panic/) que
@@ -36,8 +39,11 @@
 #               `--emitir` con los dos binarios y dice si el minificado cambio (si no cambio, la
 #               diferencia no viene de oxc) y una pista de triage
 #  10 red       solo con RED=1: npm install oxc-minify@VERSION en DIR_SALIDA/npm y corre
-#               los repro de ENVIAR.md (REPRO/*.mjs) comparando con sus .out; con gh, compara
-#               crates/oxc_minifier/docs/ASSUMPTIONS.md entre los tags crates_vVIEJA y crates_vVERSION
+#               los repro de ENVIAR.md (REPRO/*.mjs) comparando con sus .out; sube oxc-minify en
+#               probe/ del worktree (npm install --save-exact: package.json y package-lock.json) y
+#               corre C1 de la muestra (cargo test c1_igual_a_oxc_minify_de_npm -- --ignored); con
+#               gh, compara crates/oxc_minifier/docs/ASSUMPTIONS.md entre los tags crates_vVIEJA y
+#               crates_vVERSION
 #  11 parche    git diff del worktree -> DIR_SALIDA/subida-oxc-VERSION.patch; borra el worktree con
 #               `git worktree remove --force` (el parche ya lo guarda) salvo MANTENER=1
 #
@@ -53,8 +59,9 @@
 #   CELDAS     celdas del arnes separadas por ';' (default "oxc a;oxc b;oxc b --invocar;swc a;swc b";
 #              las de swc son control: cambiar oxc no deberia moverlas)
 #   ARNES_ARGS opciones extra para el arnes (p. ej. "--reusar" o "--base-de DIR/base")
-#   ARNES      default <arbol principal>/.claude/trabajo-08oct/b3-b/arnes/comparar-binarios.sh
-#   GOLDEN     default <arbol principal>/.claude/trabajo-08oct/b2-int/golden (GOLDEN=no para saltearlo)
+#   ARNES      default REPO/scripts/comparar-binarios.sh
+#   GOLDEN     default REPO/tests/golden (GOLDEN=no para saltearlo)
+#   ACEPTACION default REPO/tests/aceptacion/rechequeos (ACEPTACION=no para saltearla)
 #   ENVIAR     default <arbol principal>/.claude/trabajo-07oct/oxc/ENVIAR.md
 #   REPRO      default <arbol principal>/.claude/trabajo-07oct/oxc/probe-npm/repro
 #   RED=1      correr el paso 10 (npm y gh; NPM=1 es sinonimo)          MANTENER=1  no borrar el worktree
@@ -77,7 +84,8 @@ done
 
 REPO=$(realpath "${REPO:-$(dirname "$0")/..}") || exit 2
 REPO=$(git -C "$REPO" rev-parse --show-toplevel) || exit 2
-# Los documentos de trabajo (.claude/, fuera de git) viven en el arbol principal, no en otro worktree.
+# Los documentos de trabajo (.claude/, fuera de git: ENVIAR.md y sus repro) viven en el arbol
+# principal, no en otro worktree. Golden, aceptacion y arnes estan en git (REPO).
 PRINCIPAL=$(dirname "$(git -C "$REPO" rev-parse --path-format=absolute --git-common-dir)")
 REV=${REV:-HEAD}
 REV_ID=$(git -C "$REPO" rev-parse --short "$REV^{commit}") || { echo "REV invalido: $REV" >&2; exit 2; }
@@ -88,8 +96,9 @@ CORPUS=${CORPUS:-/home/baltasarblanco/swc-main/crates/swc_ecma_minifier/tests}
 JOBS=${JOBS:-8}
 CELDAS=${CELDAS:-oxc a;oxc b;oxc b --invocar;swc a;swc b}
 ARNES_ARGS=${ARNES_ARGS:-}
-ARNES=${ARNES:-$PRINCIPAL/.claude/trabajo-08oct/b3-b/arnes/comparar-binarios.sh}
-GOLDEN=${GOLDEN:-$PRINCIPAL/.claude/trabajo-08oct/b2-int/golden}
+ARNES=${ARNES:-$REPO/scripts/comparar-binarios.sh}
+GOLDEN=${GOLDEN:-$REPO/tests/golden}
+ACEPTACION=${ACEPTACION:-$REPO/tests/aceptacion/rechequeos}
 ENVIAR=${ENVIAR:-$PRINCIPAL/.claude/trabajo-07oct/oxc/ENVIAR.md}
 REPRO=${REPRO:-$PRINCIPAL/.claude/trabajo-07oct/oxc/probe-npm/repro}
 RED=${RED:-${NPM:-0}}
@@ -222,6 +231,17 @@ if ! hecho subir; then
   # algo (comentarios, mensajes de tests). Se lista para leerlo a mano.
   rg -n -F "$VIEJA" "$WT/src" "$WT/tests" "$WT/Cargo.toml" 2>/dev/null | sd -F "$WT/" '' > "$OUT/menciones-vieja.txt"
   [[ -s $OUT/menciones-vieja.txt ]] && pendiente "$(rg -c '' "$OUT/menciones-vieja.txt") lineas de src/ y tests/ siguen nombrando $VIEJA (comentarios y mensajes; ver $OUT/menciones-vieja.txt)"
+  # 9e: C1 (tests/muestra) exige oxc-minify de npm == Minifier::Oxc.version(): se mueven juntos.
+  pj=$WT/probe/package.json
+  if rg -q "\"oxc-minify\": *\"${VERSION//./\\.}\"" "$pj" 2>/dev/null; then
+    say "  probe/package.json: oxc-minify ya en $VERSION"
+  elif rg -q "\"oxc-minify\": *\"${VIEJA//./\\.}\"" "$pj" 2>/dev/null; then
+    sd "(\"oxc-minify\": *)\"${VIEJA//./\\.}\"" "\${1}\"$VERSION\"" "$pj" || fallar "sd $pj"
+    say "  probe/package.json: oxc-minify $VIEJA -> $VERSION"
+  else
+    pendiente "probe/package.json no fija oxc-minify $VIEJA: C1 (tests/muestra) exige la version del crate; revisarlo a mano"
+  fi
+  [[ $RED == 1 ]] || pendiente "probe/package-lock.json sigue en oxc-minify $VIEJA: correr con RED=1 (paso 10: npm install en probe/ y C1) o hacer npm install --save-exact oxc-minify@$VERSION en probe/ a mano"
   marcar subir
 fi
 diff_lock
@@ -280,33 +300,40 @@ golden_tabla() {
     for ((i = 0; i < ${#cel[@]}; i++)); do printf '%s|%s\t%s %s\n' "${w[0]}" "${cel[i]}" "${w[2*i+1]}" "${w[2*i+2]}"; done
   done < "$1"
 }
-if [[ $GOLDEN != no ]] && ! hecho golden; then
-  say "== 7 golden ($GOLDEN)"
-  [[ -x $GOLDEN/verificar.sh ]] || fallar "no encuentro $GOLDEN/verificar.sh (GOLDEN=no para saltearlo)"
-  for lado in base nuevo; do
-    rm -rf "$OUT/golden/$lado"; mkdir -p "$OUT/golden"
-    "$GOLDEN/verificar.sh" "$OUT/bin-$lado/difuzz" "$OUT/golden/$lado" > "$OUT/golden/$lado.log" 2>&1
-    rc=$?
-    say "  $lado: rc=$rc $(rg -N -o 'comparaciones=[0-9]+ fallas=[0-9]+' "$OUT/golden/$lado.log")"
+if ! hecho golden; then
+  # El golden (tests/golden) y la aceptacion de los re-chequeos (tests/aceptacion/rechequeos) usan
+  # el mismo verificar.sh y la misma tabla de salida.
+  for suite in golden aceptacion; do
+    dir=$GOLDEN; [[ $suite == aceptacion ]] && dir=$ACEPTACION
+    if [[ $dir == no ]]; then say "== 7 $suite: salteado (${suite^^}=no)"; continue; fi
+    say "== 7 $suite ($dir)"
+    [[ -x $dir/verificar.sh ]] || fallar "no encuentro $dir/verificar.sh (${suite^^}=no para saltearlo)"
+    so=$OUT/$suite
+    for lado in base nuevo; do
+      rm -rf "${so:?}/$lado"; mkdir -p "$so"
+      "$dir/verificar.sh" "$OUT/bin-$lado/difuzz" "$so/$lado" > "$so/$lado.log" 2>&1
+      rc=$?
+      say "  $lado: rc=$rc $(rg -N -o 'comparaciones=[0-9]+ fallas=[0-9]+' "$so/$lado.log")"
+    done
+    golden_tabla "$so/base.log" | sort > "$TMPDIR/gb"; golden_tabla "$so/nuevo.log" | sort > "$TMPDIR/gn"
+    # Lineas de modos y de stats (no son de la tabla).
+    rg -N '^(MAL|modo|celda) ' "$so/base.log" | sort > "$TMPDIR/gmb"
+    rg -N '^(MAL|modo|celda) ' "$so/nuevo.log" | sort > "$TMPDIR/gmn"
+    {
+      echo "# $suite: celdas cuyo resultado cambia de base a nuevo (caso|celda, base, nuevo)"
+      join -t $'\t' -a1 -a2 -e '<falta>' -o 0,1.2,2.2 "$TMPDIR/gb" "$TMPDIR/gn" | while IFS=$'\t' read -r k b n; do
+        [[ $b == "$n" ]] || printf '%s\t%s\t%s\n' "$k" "$b" "$n"; done
+      diff "$TMPDIR/gmb" "$TMPDIR/gmn" | rg '^[<>]' | sd '^<' 'base:' | sd '^>' 'nuevo:'
+    } > "$so/cambios.tsv"
+    (($(rg -c '' "$TMPDIR/gb" || echo 0) > 0)) || pendiente "$suite: no pude leer la tabla de $so/base.log"
+    nc=$(rg -c -v '^#' "$so/cambios.tsv" || echo 0)
+    if ((nc)); then
+      pendiente "el $suite cambia en $nc celdas/lineas ($so/cambios.tsv). Si es un fix de oxc confirmado, hay que actualizar $dir/esperado.tsv (y su README) A MANO; si no, es una regresion"
+      rg -N -v '^#' "$so/cambios.tsv" | tee -a "$LOG"
+    else
+      say "  $suite sin cambios entre base y nuevo"
+    fi
   done
-  golden_tabla "$OUT/golden/base.log" | sort > "$TMPDIR/gb"; golden_tabla "$OUT/golden/nuevo.log" | sort > "$TMPDIR/gn"
-  # Lineas de modos y de stats (no son de la tabla).
-  rg -N '^(MAL|modo|celda) ' "$OUT/golden/base.log" | sort > "$TMPDIR/gmb"
-  rg -N '^(MAL|modo|celda) ' "$OUT/golden/nuevo.log" | sort > "$TMPDIR/gmn"
-  {
-    echo "# golden: celdas cuyo resultado cambia de base a nuevo (caso|celda, base, nuevo)"
-    join -t $'\t' -a1 -a2 -e '<falta>' -o 0,1.2,2.2 "$TMPDIR/gb" "$TMPDIR/gn" | while IFS=$'\t' read -r k b n; do
-      [[ $b == "$n" ]] || printf '%s\t%s\t%s\n' "$k" "$b" "$n"; done
-    diff "$TMPDIR/gmb" "$TMPDIR/gmn" | rg '^[<>]' | sd '^<' 'base:' | sd '^>' 'nuevo:'
-  } > "$OUT/golden/cambios.tsv"
-  (($(rg -c '' "$TMPDIR/gb" || echo 0) > 0)) || pendiente "golden: no pude leer la tabla de $OUT/golden/base.log"
-  nc=$(rg -c -v '^#' "$OUT/golden/cambios.tsv" || echo 0)
-  if ((nc)); then
-    pendiente "el golden cambia en $nc celdas/lineas ($OUT/golden/cambios.tsv). Si es un fix de oxc confirmado, hay que actualizar $GOLDEN/esperado.tsv (y su README) A MANO; si no, es una regresion"
-    rg -N -v '^#' "$OUT/golden/cambios.tsv" | tee -a "$LOG"
-  else
-    say "  golden sin cambios entre base y nuevo"
-  fi
   marcar golden
 fi
 
@@ -457,6 +484,17 @@ if [[ $RED == 1 ]] && ! hecho npm; then
       pendiente "repro $b de ENVIAR.md da otra salida con oxc-minify@$VERSION (diff $REPRO/$b.out $OUT/npm/repro/$b.out): el bug pudo cambiar o arreglarse"
     fi
   done
+  # 9e: probe/ del worktree con oxc-minify@VERSION (package.json y package-lock.json) y C1 de la
+  # muestra (tests/muestra/auditoria.rs: el crate imprime lo mismo que oxc-minify de npm).
+  if [[ -d $WT ]]; then
+    npm install --prefix "$WT/probe" --save-exact --no-audit --no-fund "oxc-minify@$VERSION" > "$LOGS/npm-probe.log" 2>&1 \
+      || fallar "npm install en probe/ (ver $LOGS/npm-probe.log)"
+    cargo test --manifest-path "$WT/Cargo.toml" c1_igual_a_oxc_minify_de_npm -- --ignored > "$LOGS/c1.log" 2>&1; rc=$?
+    rg -N '^test result:' "$LOGS/c1.log" | tee -a "$LOG"
+    if ((rc)); then pendiente "C1 (oxc-minify@$VERSION de npm contra el crate, tests/muestra) falla (rc $rc): ver $LOGS/c1.log"; else say "  C1 verde"; fi
+  else
+    pendiente "sin worktree ($WT): no pude subir oxc-minify en probe/ ni correr C1 (volver a correr con MANTENER=1 desde el paso 10)"
+  fi
   # Las asunciones de oxc (tablas de backend/oxc.rs) salen de este archivo, que NO viaja en el
   # crate publicado: se compara su blob entre los tags del repo de oxc.
   if command -v gh >/dev/null; then

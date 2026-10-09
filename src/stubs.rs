@@ -141,22 +141,21 @@ mod tests {
     #[test]
     fn stubs_en_node() {
         use crate::runner::{Preload, Runner, Status, LINK_EXIT};
-        if std::process::Command::new("node").arg("--version").output().is_err() {
-            eprintln!("sin node en PATH: test omitido");
+        if !crate::test_util::requiere_node() {
             return;
         }
         let preload = Preload::write_tagged("m30").unwrap();
         let js = "import d, { a, \"x-y\" as z } from './no-existe.mjs';\nimport * as ns from 'pkg-que-no-existe';\nconst dyn = await import('./otro-no.mjs');\nconsole.log(typeof d, typeof a, String(a.b.c), +a, a === a, a.b === a.b, Object.keys(ns).join(), z() === z(), typeof dyn.default, a.then);\na.k = 5;\nconsole.log(a.k, [...a].length, new d() === new d());\n";
-        let off = Runner::new(&preload, 9988, std::time::Duration::from_secs(20)).with_kind(SourceKind::Module);
+        let off = Runner::new(&preload, crate::test_util::id_runner(), std::time::Duration::from_secs(20)).with_kind(SourceKind::Module);
         assert_eq!(off.run(js).status, Status::Exited(LINK_EXIT));
-        let r = Runner::new(&preload, 9987, std::time::Duration::from_secs(20)).with_kind(SourceKind::Module).with_stubs(true);
+        let r = Runner::new(&preload, crate::test_util::id_runner(), std::time::Duration::from_secs(20)).with_kind(SourceKind::Module).with_stubs(true);
         r.set_stubs(&manifest(js, SourceKind::Module));
         let e = r.run(js);
         assert_eq!(e.status, Status::Exited(0), "{}\n{}", e.stdout, e.stderr);
         assert_eq!(e.stdout, "function function [stub ./no-existe.mjs.a.b.c] 0 true true default true function undefined\n5 0 true\n");
         assert!(e.flags.is_empty(), "{:?}", e.flags);
         // Carril A: require de algo que no existe.
-        let ra = Runner::new(&preload, 9986, std::time::Duration::from_secs(20)).with_stubs(true);
+        let ra = Runner::new(&preload, crate::test_util::id_runner(), std::time::Duration::from_secs(20)).with_stubs(true);
         ra.set_stubs(&manifest("", SourceKind::Script));
         let e = ra.run("const m = require('./no-existe-cjs');\nconsole.log(typeof m, String(m.x), m.__esModule);\n");
         assert_eq!((e.status, e.stdout.as_str()), (Status::Exited(0), "function [stub ./no-existe-cjs.x] undefined\n"));

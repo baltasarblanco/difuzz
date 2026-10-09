@@ -3,6 +3,7 @@
   "private": true,
   "description": "Probe de difuzz contra @swc/core publicado, con opciones por defecto",
   "dependencies": {
-    "@swc/core": "1.16.2"
+    "@swc/core": "1.16.2",
+    "oxc-minify": "0.153.0"
   }
 }

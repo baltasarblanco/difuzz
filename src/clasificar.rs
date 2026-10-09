@@ -464,12 +464,11 @@ mod tests {
     fn oxc_solo_sloppy() {
         use super::sloppy_only;
         use crate::{backend::Minifier, minify, minify::Preset, runner};
-        if std::process::Command::new("node").arg("--version").output().is_err() {
-            eprintln!("sin node en PATH: test omitido");
+        if !crate::test_util::requiere_node() {
             return;
         }
         let preload = runner::Preload::write_tagged("m17").unwrap();
-        let r = runner::Runner::new(&preload, 998, std::time::Duration::from_secs(20));
+        let r = runner::Runner::new(&preload, crate::test_util::id_runner(), std::time::Duration::from_secs(20));
         // b1-b: A y B de verdad (oxc core_defaults), no solo la variante estricta.
         let ab = |src: &str| {
             let cfg = Preset::CoreDefaults.build(Minifier::Oxc, minify::SourceKind::Script);
@@ -538,8 +537,7 @@ mod tests {
         use super::Medido;
         use crate::{backend::Minifier, cache, compare_and_report, known, minify, oracle, runner, triage, Ctx, Stats};
         use std::path::Path;
-        if std::process::Command::new("node").arg("--version").output().is_err() {
-            eprintln!("sin node en PATH: test omitido");
+        if !crate::test_util::requiere_node() {
             return;
         }
         let d = std::env::temp_dir().join(format!("difuzz-test-viol-{}", std::process::id()));
@@ -553,7 +551,7 @@ mod tests {
         let medido = Some(Medido { minifier: Minifier::Oxc, preset, kind });
         let ctx = Ctx { reporter: &reporter, known: &known, cache: &cache, triage: &triage, medido };
         let preload = runner::Preload::write_tagged("viol-pap").unwrap();
-        let r = runner::Runner::new(&preload, 9972, std::time::Duration::from_secs(20));
+        let r = runner::Runner::new(&preload, crate::test_util::id_runner(), std::time::Duration::from_secs(20));
         let cfg = preset.build(Minifier::Oxc, kind);
         let tdz = "try { x; console.log(\"sin tdz\"); } catch (e) { console.log(\"tdz\"); }\nlet x = 1;\n";
         for (rel, src, known_div) in [("pos", tdz.to_string(), (1, 0)), ("neg", format!("{tdz}console.log(delete (0 / 0));\n"), (0, 1))] {

@@ -358,14 +358,13 @@ mod tests {
     fn pasada_observada_cacheada_con_su_tag() {
         use crate::minify::SourceKind;
         use crate::runner::Preload;
-        if Command::new("node").arg("--version").output().is_err() {
-            eprintln!("sin node en PATH: test omitido");
+        if !crate::test_util::requiere_node() {
             return;
         }
         let d = tmp("observar");
         let c = CacheA::with_oracle(Some(d.clone()), "o".into());
         let preload = Preload::write_tagged("m28").unwrap();
-        let r = Runner::new(&preload, 9990, Duration::from_secs(20)).with_kind(SourceKind::Module);
+        let r = Runner::new(&preload, crate::test_util::id_runner(), Duration::from_secs(20)).with_kind(SourceKind::Module);
         let obs = r.observing();
         let js = "export const a = 1;\n";
         let mut hits = 0;
@@ -378,7 +377,7 @@ mod tests {
         assert!(hit && o2.stdout == o1.stdout);
         assert_eq!(hits, 1);
         // Con --invocar el envoltorio cambia: otra entrada.
-        let inv = Runner::new(&preload, 9989, Duration::from_secs(20)).with_kind(SourceKind::Module).with_invocar(true);
+        let inv = Runner::new(&preload, crate::test_util::id_runner(), Duration::from_secs(20)).with_kind(SourceKind::Module).with_invocar(true);
         assert!(!c.run(&inv.observing(), js, &mut hits).1);
         // La lapida de la observada no toca la cruda.
         c.tombstone(&obs, js);

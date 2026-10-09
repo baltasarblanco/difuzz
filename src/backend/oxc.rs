@@ -344,3 +344,6 @@ mod tests {
         assert_eq!(dead_writes.0, 1);
     }
 }
+
+// 9e: A1/A2/C1 sobre la muestra fija; hijo de este modulo para armar un Oxc sin optimizar.
+#[cfg(test)] #[path = "../../tests/muestra/auditoria.rs"] mod muestra;

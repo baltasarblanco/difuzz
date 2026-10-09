@@ -1,28 +1,25 @@
 //! Mejora 7: `__difuzzObserveInvocar` del preload, corrido en node de verdad.
-//! Sin `node` en el PATH el test no tiene que fallar: avisa y sale.
+//! Sin `node` en el PATH los tests fallan (salvo `DIFUZZ_SIN_NODE=1`: ver
+//! test_util.rs).
 
-use std::process::Command;
-
-use crate::runner::PRELOAD;
-
-/// Corre `js` con el preload y devuelve (exit code, stdout).
+/// Corre `js` con el preload y devuelve (exit code, stdout). `None` si node no
+/// se pudo lanzar. R1-H17: por el `Runner` real (entorno minimo, cwd vacio,
+/// grupo de procesos, timeout, canal de control), no un `node` a mano.
 fn run_node(tag: &str, js: &str) -> Option<(i32, String)> {
-    let dir = std::env::temp_dir().join(format!("difuzz-invocar-{}-{tag}", std::process::id()));
-    std::fs::create_dir_all(&dir).ok()?;
-    let preload = dir.join("preload.cjs");
-    let script = dir.join("caso.cjs");
-    std::fs::write(&preload, PRELOAD).ok()?;
-    std::fs::write(&script, js).ok()?;
-    let out = Command::new("node")
-        .arg("--no-warnings")
-        .arg("--require")
-        .arg(&preload)
-        .arg(&script)
-        .env("TZ", "UTC")
-        .output();
-    let _ = std::fs::remove_dir_all(&dir);
-    let out = out.ok()?;
-    Some((out.status.code().unwrap_or(-1), String::from_utf8_lossy(&out.stdout).into_owned()))
+    use crate::runner::{Preload, Runner, Status};
+    // Un id por llamada (registro de test_util): el runner arma con el id sus
+    // rutas (script, ctl, cwd) y los tests corren en paralelo.
+    let preload = Preload::write_tagged(&format!("invocar-{tag}")).ok()?;
+    let r = Runner::new(&preload, crate::test_util::id_runner(), std::time::Duration::from_secs(20));
+    let e = r.run(js);
+    match e.status {
+        Status::Exited(code) => Some((code, e.stdout)),
+        Status::Failed(f) => {
+            eprintln!("runner: {f}");
+            None
+        }
+        Status::Timeout | Status::Signal => Some((-1, e.stdout)),
+    }
 }
 
 #[test]
@@ -46,9 +43,11 @@ function t() { return this === undefined ? 'u' : typeof this; }
     // Sin var/let/const, ni la llamada (no cambia lo que el minifier puede borrar).
     let solo_fn = crate::minify::instrument("function foo() { var { x } = foo; }\n", true, crate::minify::SourceKind::Script).unwrap();
     assert!(!solo_fn.contains("Despues"), "{solo_fn}");
-    let Some((code, stdout)) = run_node("a", &epilogo) else {
-        eprintln!("sin node en el PATH: test salteado");
+    if !crate::test_util::requiere_node() {
         return;
+    }
+    let Some((code, stdout)) = run_node("a", &epilogo) else {
+        panic!("run_node({:?}) no pudo correr node", "a");
     };
     assert_eq!(code, 0, "{stdout}");
     assert_eq!(
@@ -82,9 +81,11 @@ fn sin_invocar_la_salida_no_cambia() {
         panic!("instrument no observo nada");
     };
     assert!(epilogo.ends_with("__difuzzObserve([\"f\", f], [\"k\", k]);\n"));
-    let Some((code, stdout)) = run_node("b", &epilogo) else {
-        eprintln!("sin node en el PATH: test salteado");
+    if !crate::test_util::requiere_node() {
         return;
+    }
+    let Some((code, stdout)) = run_node("b", &epilogo) else {
+        panic!("run_node({:?}) no pudo correr node", "b");
     };
     assert_eq!((code, stdout.as_str()), (0, "f = fn\nk = 7\n"));
 }
@@ -95,9 +96,11 @@ fn sin_invocar_la_salida_no_cambia() {
 fn error_observado_sin_mensaje() {
     let src = "var e = new TypeError('callback is not a function');\nclass Mio extends RangeError {}\nvar m = new Mio('x');\nfunction f() { return new Error('local'); }\n";
     let epilogo = crate::minify::instrument(src, true, crate::minify::SourceKind::Script).expect("observa e, Mio, m, f");
-    let Some((code, stdout)) = run_node("m6", &epilogo) else {
-        eprintln!("sin node en el PATH: test salteado");
+    if !crate::test_util::requiere_node() {
         return;
+    }
+    let Some((code, stdout)) = run_node("m6", &epilogo) else {
+        panic!("run_node({:?}) no pudo correr node", "m6");
     };
     assert_eq!(code, 0, "{stdout}");
     assert_eq!(stdout, "e = Error(TypeError)\nMio = fn\nm = Error(RangeError)\nf = fn\nMio() throws TypeError\nf() = Error(Error)\n");
@@ -112,9 +115,11 @@ fn invocar_no_se_sombrea() {
     let src = "function __difuzzObserveInvocar() { console.log('mia'); }\nvar k = 1;\nfunction f() { return 2; }\n";
     let epi = instrument(src, true, SourceKind::Script).unwrap();
     assert!(epi.contains("\nglobalThis[\"__difuzzObserveInvocar\"]([\"__difuzzObserveInvocar\", __difuzzObserveInvocar], "), "{epi}");
-    let Some((code, stdout)) = run_node("m31b", &epi) else {
-        eprintln!("sin node en el PATH: test salteado");
+    if !crate::test_util::requiere_node() {
         return;
+    }
+    let Some((code, stdout)) = run_node("m31b", &epi) else {
+        panic!("run_node({:?}) no pudo correr node", "m31b");
     };
     // (Se invoca la del programa como un binding mas: imprime `mia`.)
     assert_eq!((code, stdout.as_str()), (0, "__difuzzObserveInvocar = fn\nk = 1\nf = fn\nmia\n__difuzzObserveInvocar() = undefined\nf() = 2\n"), "{epi}");
@@ -138,9 +143,11 @@ fn reobserva_despues_de_invocar() {
     use crate::minify::{instrument, SourceKind};
     let src = "var k = 1;\nvar o = { n: 0 };\nvar s = 'x';\nfunction inc() { k++; o.n = 5; }\n";
     let epi = instrument(src, true, SourceKind::Script).unwrap();
-    let Some((code, stdout)) = run_node("m31c", &epi) else {
-        eprintln!("sin node en el PATH: test salteado");
+    if !crate::test_util::requiere_node() {
         return;
+    }
+    let Some((code, stdout)) = run_node("m31c", &epi) else {
+        panic!("run_node({:?}) no pudo correr node", "m31c");
     };
     assert_eq!(
         (code, stdout.as_str()),
@@ -160,13 +167,11 @@ fn reobserva_despues_de_invocar() {
 fn reobserva_exports_despues_de_invocar() {
     use crate::minify::SourceKind;
     use crate::runner::{Preload, Runner, Status};
-    if Command::new("node").arg("--version").output().is_err() {
-        eprintln!("sin node en el PATH: test salteado");
+    if !crate::test_util::requiere_node() {
         return;
     }
     let preload = Preload::write_tagged("m31x").unwrap();
-    // Id propio: el 9989 lo usa tambien cache.rs (mismo cwd y script en paralelo).
-    let r = Runner::new(&preload, 9982, std::time::Duration::from_secs(20)).with_kind(SourceKind::Module).with_invocar(true);
+    let r = Runner::new(&preload, crate::test_util::id_runner(), std::time::Duration::from_secs(20)).with_kind(SourceKind::Module).with_invocar(true);
     let e = r.observing().run("export let n = 0;\nexport function f() { n = 4; }\nexport const c = 1;\n");
     assert_eq!(e.status, Status::Exited(0), "{}", e.stderr);
     assert_eq!(e.stdout, "export c = 1\nexport f = fn\nexport n = 0\nexport f() = undefined\nexport n = 4 (tras invocar)\n");
@@ -182,9 +187,11 @@ fn observa_module_exports() {
     assert!(instrument(src, false, SourceKind::Module).is_none());
     let epi = instrument(src, false, SourceKind::Script).expect("observa module.exports");
     assert!(epi.ends_with("__difuzzObserveCjs(module.exports, false);\n"), "{epi}");
-    let Some((code, stdout)) = run_node("m36", &epi) else {
-        eprintln!("sin node en el PATH: test salteado");
+    if !crate::test_util::requiere_node() {
         return;
+    }
+    let Some((code, stdout)) = run_node("m36", &epi) else {
+        panic!("run_node({:?}) no pudo correr node", "m36");
     };
     assert_eq!((code, stdout.as_str()), (0, "module.exports = {\"a\": 1, \"f\": fn}\n"));
     let inv = Forma::EnFuncion.apply(&instrument(src, true, SourceKind::Script).unwrap());

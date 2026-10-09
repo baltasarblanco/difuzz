@@ -1,0 +1,72 @@
+# caso	celda	clase esperada
+# celda = <minifier>-<carril>-<preset>; clase = div:<kind> | panic | known | lint | descarte:<causa> | igual
+# Cada clase esta justificada en golden/README.md. Una celda sin fila para un caso espera "igual".
+oxc-o1	oxc-a-core_defaults	div:ThrowNew
+oxc-o1	oxc-a-carril_a	div:ThrowNew
+oxc-o1	oxc-b-core_defaults	div:ThrowNew
+oxc-o1	oxc-b-carril_a	div:ThrowNew
+oxc-o2-casos	oxc-b-core_defaults	div:ThrowNew
+oxc-o2-casos	oxc-b-carril_a	div:ThrowNew
+oxc-o2-typeof	oxc-a-core_defaults	div:Stdout
+oxc-o2-typeof	oxc-a-carril_a	div:Stdout
+oxc-o2-typeof	oxc-b-core_defaults	div:ThrowNew
+oxc-o2-typeof	oxc-b-carril_a	div:ThrowNew
+oxc-n6422-2-log	oxc-a-core_defaults	div:Stdout
+oxc-n6422-2-log	oxc-a-carril_a	div:Stdout
+oxc-n6422-2-log	oxc-b-core_defaults	div:Stdout
+oxc-n6422-2-log	oxc-b-carril_a	div:Stdout
+oxc-n6422-2-fixture	oxc-a-core_defaults	descarte:parse_esm
+oxc-n6422-2-fixture	oxc-a-carril_a	descarte:parse_esm
+oxc-n6422-2-fixture	swc-a-core_defaults	descarte:parse_esm
+oxc-n6422-2-fixture	swc-a-carril_a	descarte:parse_esm
+oxc-n6422-2-fixture	oxc-b-core_defaults	div:ThrowNew
+oxc-n6422-2-fixture	oxc-b-carril_a	div:ThrowNew
+oxc-n6422-2-fixture	swc-b-core_defaults	div:ThrowNew
+oxc-n6422-2-fixture	swc-b-carril_a	div:ThrowNew
+oxc-o3a	oxc-a-core_defaults	div:ThrowNew
+oxc-o3a	oxc-a-carril_a	div:ThrowNew
+oxc-o3a	oxc-b-core_defaults	div:ThrowNew
+oxc-o3a	oxc-b-carril_a	div:ThrowNew
+oxc-o3b	oxc-a-core_defaults	div:ThrowNew
+oxc-o3b	oxc-a-carril_a	div:ThrowNew
+oxc-o3b	oxc-b-core_defaults	div:ThrowNew
+oxc-o3b	oxc-b-carril_a	div:ThrowNew
+oxc-o3c-binding	oxc-a-core_defaults	div:ThrowNew
+oxc-o3c-binding	oxc-a-carril_a	div:ThrowNew
+oxc-o3c-binding	oxc-b-core_defaults	div:ThrowNew
+oxc-o3c-binding	oxc-b-carril_a	div:ThrowNew
+oxc-o4	oxc-a-core_defaults	div:Stdout
+oxc-o4	oxc-a-carril_a	div:Stdout
+oxc-o4	oxc-b-core_defaults	div:ThrowNew
+oxc-o4	oxc-b-carril_a	div:ThrowNew
+oxc-o5	oxc-a-core_defaults	div:Stdout
+oxc-o5	oxc-a-carril_a	div:Stdout
+oxc-o5	oxc-b-core_defaults	div:Stdout
+oxc-o5	oxc-b-carril_a	div:Stdout
+oxc-o6	oxc-a-core_defaults	panic
+oxc-o6	oxc-a-carril_a	panic
+oxc-o6	oxc-b-core_defaults	panic
+oxc-o6	oxc-b-carril_a	panic
+# b1-c (R1-H05, 08-oct): O7 es un debug_assert de oxc. Con el oraculo sin debug assertions el
+# caso se compara con el minificado de npm (`eval(),console.log(\`ok\`);`): eval() sin argumentos
+# da undefined directo o indirecto, asi que no diverge y queda en asserts/. Sin oraculo (aviso al
+# arrancar) vuelve a ser panic.
+# b5 (09-oct): verificar.sh ahora mira asserts/ (antes lo leia como "igual").
+oxc-o7	oxc-a-core_defaults	asserts
+oxc-o7	oxc-a-carril_a	asserts
+oxc-o7	oxc-b-core_defaults	asserts
+oxc-o7	oxc-b-carril_a	asserts
+# b5 (09-oct, R1-H05): eval indirecto -> directo (revision-1/pruebas/c6-corpus/eval-indirecto). Con
+# debug assertions oxc hace panic (el debug_assert que tapaba el bug); el oraculo sin ellas da el
+# minificado de npm, que cambia `var e = eval; e("x")` por `eval("x")`: `global/local` contra
+# `local/local` (Stdout) en las 4 celdas de oxc, con `solo_debug_assertions: si` en el meta.
+# swc no lo toca: igual. Sin oraculo seria panic en las 4 de oxc.
+oxc-eval-indirecto	oxc-a-core_defaults	div:Stdout
+oxc-eval-indirecto	oxc-a-carril_a	div:Stdout
+oxc-eval-indirecto	oxc-b-core_defaults	div:Stdout
+oxc-eval-indirecto	oxc-b-carril_a	div:Stdout
+swc-s1-use-strict	swc-a-core_defaults	div:Stdout
+swc-s1-use-strict	swc-a-carril_a	div:Stdout
+swc-s3-neg-zero-member	swc-a-carril_a	div:ThrowNew
+swc-s3-neg-zero-member	swc-b-core_defaults	div:ThrowType
+swc-s3-neg-zero-member	swc-b-carril_a	div:ThrowType

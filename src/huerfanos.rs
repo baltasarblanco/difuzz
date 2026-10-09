@@ -245,28 +245,18 @@ mod tests {
         false
     }
 
-    fn hay_node() -> bool {
-        let ok = std::process::Command::new("node").arg("--version").output().is_ok();
-        if !ok {
-            eprintln!("sin node en PATH: test omitido");
-        }
-        ok
-    }
-
     /// Un hijo `detached` del programa no sobrevive a la ejecucion, y con
     /// `stdio: 'inherit'` no hace esperar READ_GRACE.
     #[test]
     fn hijo_detached_no_sobrevive() {
         use crate::runner::{Preload, Runner, Status};
         use std::time::{Duration, Instant};
-        if !hay_node() || !en_proceso_aparte("huerfanos::tests::hijo_detached_no_sobrevive") {
+        if !crate::test_util::requiere_node() || !en_proceso_aparte("huerfanos::tests::hijo_detached_no_sobrevive") {
             return;
         }
         assert!(super::activar());
         let preload = Preload::write_tagged("subreaper").unwrap();
-        // Id propio: con el 9988 compartia cwd y ctl con `stubs_en_node` y, en
-        // paralelo, uno borraba el cwd del otro (spawn node: ENOENT).
-        let r = Runner::new(&preload, 9984, Duration::from_secs(20));
+        let r = Runner::new(&preload, crate::test_util::id_runner(), Duration::from_secs(20));
         let vivo = |pid: i32| {
             std::fs::read(format!("/proc/{pid}/cmdline")).is_ok_and(|c| c.starts_with(b"sleep\x0030"))
         };
@@ -320,12 +310,12 @@ mod tests {
     fn no_mata_huerfanos_de_un_node_en_curso() {
         use crate::runner::{Preload, Runner, Status};
         use std::time::Duration;
-        if !hay_node() || !en_proceso_aparte("huerfanos::tests::no_mata_huerfanos_de_un_node_en_curso") {
+        if !crate::test_util::requiere_node() || !en_proceso_aparte("huerfanos::tests::no_mata_huerfanos_de_un_node_en_curso") {
             return;
         }
         assert!(super::activar());
         let preload = Preload::write_tagged("subreaper-h19").unwrap();
-        let rb = Runner::new(&preload, 9983, Duration::from_secs(20));
+        let rb = Runner::new(&preload, crate::test_util::id_runner(), Duration::from_secs(20));
         // Un nieto en el grupo de node y otro que hace setsid (otra sesion).
         let js = "const { spawn } = require('child_process');\nconst fs = require('fs');\nspawn('sh', ['-c', '(sleep 0.5; echo x > grupo) &'], { stdio: 'ignore' });\nspawn('sh', ['-c', 'setsid sh -c \\'sleep 0.5; echo x > sesion\\' &'], { stdio: 'ignore' });\nsetTimeout(() => console.log(fs.existsSync('grupo'), fs.existsSync('sesion')), 1500);\n";
         let fin = std::sync::atomic::AtomicBool::new(false);

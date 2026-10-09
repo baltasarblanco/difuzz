@@ -471,12 +471,11 @@ mod tests {
     /// Con node: el re-chequeo saca el flag solo si la divergencia sigue.
     #[test]
     fn rechequeos_en_node() {
-        if std::process::Command::new("node").arg("--version").output().is_err() {
-            eprintln!("sin node en PATH: test omitido");
+        if !crate::test_util::requiere_node() {
             return;
         }
         let preload = Preload::write_tagged("rechk").unwrap();
-        let r = Runner::new(&preload, 9985, std::time::Duration::from_secs(20));
+        let r = Runner::new(&preload, crate::test_util::id_runner(), std::time::Duration::from_secs(20));
         // Divergencia por leer `window` (oxc borra la lectura): con window
         // definido desaparece: el flag se conserva.
         let o = "try { window; console.log(1); } catch (e) { console.log(2); }\n";
@@ -545,12 +544,11 @@ mod tests {
     #[test]
     fn violaciones_atrapadas_en_node() {
         use crate::minify::{self, SourceKind};
-        if std::process::Command::new("node").arg("--version").output().is_err() {
-            eprintln!("sin node en PATH: test omitido");
+        if !crate::test_util::requiere_node() {
             return;
         }
         let preload = Preload::write_tagged("viol").unwrap();
-        let r = Runner::new(&preload, 9970, std::time::Duration::from_secs(20));
+        let r = Runner::new(&preload, crate::test_util::id_runner(), std::time::Duration::from_secs(20));
         let cfg = Preset::CoreDefaults.build(Minifier::Oxc, SourceKind::Script);
         let caso = |src: &str| {
             let minify::Outcome::Ok { original, minified, .. } = minify::prepare(src, &cfg) else {
@@ -588,12 +586,11 @@ mod tests {
     /// coercion de Symbol no atrapada se ubica igual.
     #[test]
     fn sensor_de_violaciones_solo_observa() {
-        if std::process::Command::new("node").arg("--version").output().is_err() {
-            eprintln!("sin node en PATH: test omitido");
+        if !crate::test_util::requiere_node() {
             return;
         }
         let preload = Preload::write_tagged("viol2").unwrap();
-        let r = Runner::new(&preload, 9971, std::time::Duration::from_secs(20));
+        let r = Runner::new(&preload, crate::test_util::id_runner(), std::time::Duration::from_secs(20));
         let e = r.run("let n = 0;\nfor (let i = 0; i < 300; i++) { try { y; } catch (e) { n++; } }\nconsole.log(n);\nlet y;\n");
         assert_eq!(e.stdout, "300\n");
         assert!(e.flags.iter().any(|f| f == "tdz_atrapada"), "{:?}", e.flags);
@@ -612,7 +609,7 @@ mod tests {
         assert!(e.ctl.starts_with("sensor_caido\n"), "{}", e.ctl);
         // Una recursion que atrapa en cada nivel: con el sensor no termina a tiempo
         // (cada throw recorre la pila); se repite sin el y da lo de siempre.
-        let rec = Runner::new(&preload, 9971, std::time::Duration::from_secs(4));
+        let rec = Runner::new(&preload, crate::test_util::id_runner(), std::time::Duration::from_secs(4));
         let e = rec.run("function foo(){try{foo()}catch(ex){let x=10;const y=10;class Zee{}}console.log(x,y,Zee)};try{foo()}catch(e){console.log(\"fin\")}\n");
         assert_eq!((e.status.clone(), e.stdout.as_str()), (crate::runner::Status::Exited(0), "fin\n"));
         assert!(e.ctl.starts_with("sensor_caido\n"), "{}", e.ctl);
@@ -626,7 +623,7 @@ mod tests {
         assert!(e.stdout.contains("f() throws ReferenceError"), "{}", e.stdout);
         assert!(e.flags.iter().any(|f| f == "tdz") && !e.flags.iter().any(|f| f == "tdz_atrapada"), "{:?}", e.flags);
         // Carril B: el programa es el modulo que importa el envoltorio.
-        let m = Runner::new(&preload, 9971, std::time::Duration::from_secs(20)).with_kind(SourceKind::Module);
+        let m = Runner::new(&preload, crate::test_util::id_runner(), std::time::Duration::from_secs(20)).with_kind(SourceKind::Module);
         let e = m.run("try { x; } catch {}\nexport let x = 1;\n");
         assert_eq!(super::violaciones(&e), ["tdz 0:6"], "{}", e.ctl);
         // ... y una no atrapada: V8 pausa como "atrapada" (el rechazo del import lo

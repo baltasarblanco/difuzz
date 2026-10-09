@@ -837,7 +837,7 @@ fn bucle(backend: Box<dyn Backend>, mut entrada: impl BufRead, mut salida: impl 
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     fn ida_y_vuelta(o: &Outcome) -> Outcome {
@@ -874,8 +874,30 @@ mod tests {
     }
 
     /// Todos los flags que puede dar checks::static_flags vuelven a su constante.
+    /// 9d (R1-H17): antes solo se miraba lo que daba un programa de ejemplo, y
+    /// un flag nuevo que ese programa no dispara pasaba sin aviso. Ahora la
+    /// lista sale del fuente de `checks::static_flags` (cada `out.push("...")`)
+    /// y tiene que ser exactamente FLAGS_ESTATICOS.
     #[test]
     fn flags_estaticos_conocidos() {
+        let fuente = include_str!("checks.rs");
+        let cuerpo = &fuente[fuente.find("pub fn static_flags(").expect("checks::static_flags")..];
+        let cuerpo = &cuerpo[..cuerpo.find("\n}\n").expect("fin de checks::static_flags")];
+        let mut en_checks: Vec<&str> = cuerpo
+            .match_indices("out.push(\"")
+            .map(|(i, p)| {
+                let resto = &cuerpo[i + p.len()..];
+                &resto[..resto.find('"').expect("literal cerrado")]
+            })
+            .collect();
+        // Otra forma de agregar flags (extend, insert, push de algo que no es un
+        // literal) no la ve este test: que falle y se actualice.
+        assert_eq!(cuerpo.matches("out.").count(), en_checks.len(), "static_flags agrega flags de otra forma:\n{cuerpo}");
+        en_checks.sort_unstable();
+        let mut lista = FLAGS_ESTATICOS.to_vec();
+        lista.sort_unstable();
+        assert_eq!(en_checks, lista, "los flags de checks::static_flags no son FLAGS_ESTATICOS");
+        // Y el programa de ejemplo los dispara todos (el fuente no miente).
         let p = crate::backend::swc::parse_for(
             "with (o) {} arguments.callee; function g(NaN) {} var o = { valueOf() {} }; window; class A extends 1 {}",
             SourceKind::Script,
@@ -948,7 +970,8 @@ mod tests {
     }
 
     /// R1-H08 / R2-H04: con variables para el hijo, timeout y presupuesto propios.
-    fn remoto_de_test_con(minifier: Minifier, kind: SourceKind, env: &[(&str, &str)], timeout: Duration, presupuesto: Option<u64>) -> Remoto {
+    /// 9c: tambien lo usa e2e_tests (el hijo minificador real, para recursos/).
+    pub(crate) fn remoto_de_test_con(minifier: Minifier, kind: SourceKind, env: &[(&str, &str)], timeout: Duration, presupuesto: Option<u64>) -> Remoto {
         let exe = std::env::current_exe().unwrap();
         let cfg = args_config(minifier, Preset::CarrilA, kind, false).join(" ");
         let mut env: Vec<(String, String)> = env.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect();
@@ -971,12 +994,26 @@ mod tests {
     /// R1-H08: un minifier que no contesta a tiempo no es un panic: el mensaje
     /// lleva `PREFIJO_TIMEOUT` y `causa_recurso` lo separa (main lo manda a
     /// `recursos/` con `causa: timeout`).
+    /// 9d: sin cota absoluta (antes < 10 s). El hijo duerme DORMIR antes de
+    /// contestar: si el padre lo esperara (o lo matara tarde), tardaria eso. Se
+    /// compara contra una base medida en el mismo test (lanzar el mismo binario de
+    /// tests y minificar con un hijo que contesta enseguida), con margen DORMIR / 4:
+    /// lejos de lo que cuesta esperar al hijo y de lo que mueve la carga.
     #[test]
     fn timeout_del_minifier_es_recurso() {
-        let r = remoto_de_test_con(Minifier::Swc, SourceKind::Script, &[("DIFUZZ_TEST_DORMIR_MS", "20000")], Duration::from_millis(300), Some(0));
+        const DORMIR: Duration = Duration::from_secs(20);
+        let base = {
+            let r = remoto_de_test_con(Minifier::Swc, SourceKind::Script, &[], Duration::from_secs(30), Some(0));
+            let t0 = Instant::now();
+            assert!(matches!(r.prepare("console.log(1);\n"), Outcome::Ok { .. }), "la base tenia que minificar");
+            t0.elapsed()
+        };
+        let dormir = DORMIR.as_millis().to_string();
+        let r = remoto_de_test_con(Minifier::Swc, SourceKind::Script, &[("DIFUZZ_TEST_DORMIR_MS", &dormir)], Duration::from_millis(300), Some(0));
         let t0 = Instant::now();
         let Outcome::Panic(msg) = r.prepare("console.log(1);\n") else { panic!("tenia que vencer el timeout") };
-        assert!(t0.elapsed() < Duration::from_secs(10), "{:?}", t0.elapsed());
+        let t = t0.elapsed();
+        assert!(t < base + DORMIR / 4, "espero al hijo: {t:?} (base {base:?})");
         assert!(msg.starts_with(PREFIJO_TIMEOUT) && msg.contains("0.3 s"), "{msg}");
         assert_eq!(causa_recurso(&msg), Some("timeout"));
         // Un panic de verdad no es recurso.
@@ -987,15 +1024,27 @@ mod tests {
     /// R2-H04: un hijo que pasa el presupuesto de RSS del worker se mata y el
     /// caso queda con `PREFIJO_MEMORIA` (no "senal 6"); el siguiente caso usa un
     /// hijo nuevo.
+    /// 9d: sin cota absoluta (antes < 15 s). El hijo come y despues duerme
+    /// DORMIR; el sondeo (cada SONDEO_MEMORIA) lo tiene que frenar mucho antes.
+    /// Base y margen como en `timeout_del_minifier_es_recurso`.
     #[test]
     fn memoria_del_hijo_es_recurso_y_sigue() {
+        const DORMIR: Duration = Duration::from_secs(20);
         if !std::path::Path::new("/proc/self/statm").exists() {
             return;
         }
-        let r = remoto_de_test_con(Minifier::Swc, SourceKind::Script, &[("DIFUZZ_TEST_COMER_MIB", "300"), ("DIFUZZ_TEST_DORMIR_MS", "20000")], Duration::from_secs(30), Some(128 << 20));
+        let base = {
+            let r = remoto_de_test_con(Minifier::Swc, SourceKind::Script, &[], Duration::from_secs(30), Some(128 << 20));
+            let t0 = Instant::now();
+            assert!(matches!(r.prepare("console.log(1);\n"), Outcome::Ok { .. }), "la base tenia que minificar");
+            t0.elapsed()
+        };
+        let dormir = DORMIR.as_millis().to_string();
+        let r = remoto_de_test_con(Minifier::Swc, SourceKind::Script, &[("DIFUZZ_TEST_COMER_MIB", "300"), ("DIFUZZ_TEST_DORMIR_MS", &dormir)], Duration::from_secs(30), Some(128 << 20));
         let t0 = Instant::now();
         let Outcome::Panic(msg) = r.prepare("console.log(1);\n") else { panic!("tenia que pasar el presupuesto") };
-        assert!(t0.elapsed() < Duration::from_secs(15), "el sondeo no lo freno: {:?}", t0.elapsed());
+        let t = t0.elapsed();
+        assert!(t < base + DORMIR / 4, "el sondeo no lo freno: {t:?} (base {base:?})");
         assert!(msg.starts_with(PREFIJO_MEMORIA) && msg.contains("> 128 MiB"), "{msg}");
         assert_eq!(causa_recurso(&msg), Some("memoria"));
         assert!(HIJOS_DEL_HILO.with(|h| h.borrow().is_empty()), "el hijo muerto sigue anotado");

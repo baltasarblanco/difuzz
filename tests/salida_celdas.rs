@@ -2,18 +2,19 @@
 //! dentro de `--out` y la marca de corrida (`<out>/<celda>/CORRIDA.txt`).
 //!
 //! Cada test usa su TMPDIR propio (los temporales del runner y del hijo van
-//! ahi) y lo borra al final. Sin node no hay nada que correr: se saltean
-//! avisando, como el resto de los tests que corren node.
+//! ahi) y lo borra al final. Sin node fallan, como el resto de los tests que
+//! corren node (salvo `DIFUZZ_SIN_NODE=1`: ver src/test_util.rs).
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
-const BIN: &str = env!("CARGO_BIN_EXE_difuzz");
+// difuzz es solo binario: el helper comun se incluye por ruta.
+#[allow(dead_code)]
+#[path = "../src/test_util.rs"]
+mod test_util;
 
-fn hay_node() -> bool {
-    Command::new("node").arg("--version").output().is_ok_and(|o| o.status.success())
-}
+const BIN: &str = env!("CARGO_BIN_EXE_difuzz");
 
 /// `<tmp>/difuzz-test-<nombre>-<pid>/` vacio, con `tmp/` para TMPDIR.
 fn base(nombre: &str) -> PathBuf {
@@ -60,8 +61,7 @@ fn leer(p: &Path) -> String {
 /// suyos y no toca los de la otra.
 #[test]
 fn dos_celdas_mismo_out_no_se_pisan() {
-    if !hay_node() {
-        eprintln!("sin node en PATH: test omitido");
+    if !test_util::requiere_node() {
         return;
     }
     let b = base("celdas");
@@ -125,8 +125,7 @@ fn esperar_marca(p: &Path) {
 /// misma celda la lleva a `completa`.
 #[test]
 fn corrida_cortada_queda_marcada() {
-    if !hay_node() {
-        eprintln!("sin node en PATH: test omitido");
+    if !test_util::requiere_node() {
         return;
     }
     let b = base("corte");
