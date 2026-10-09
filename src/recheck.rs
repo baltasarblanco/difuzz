@@ -11,7 +11,11 @@
 //!   se minifica igual y se compara. Si la divergencia sigue, `with` no la
 //!   explica. 1 minify + 2 node.
 //!
-//! Los dos solo pueden SACAR un flag (known -> div), nunca ponerlo.
+//! - violaciones atrapadas (b4-a, R1-H04 / C3): el preload ubica cada TDZ, coercion
+//!   de Symbol y `class extends` invalido que lanzo en A (atrapado o no); se cambia
+//!   cada una por algo que no lanza, se minifica igual y se compara. 1 minify + 2 node.
+//!
+//! Los re-chequeos solo pueden SACAR un flag (known -> div), nunca ponerlo.
 //!
 //! b1-b (R1-H01/H02, R2-H02): un re-chequeo solo deja el flag (known/) si es
 //! concluyente (`veredicto`). Antes, ante cualquier duda (no parsea, el
@@ -21,8 +25,8 @@
 
 use std::panic::{catch_unwind, AssertUnwindSafe};
 
-use swc_common::{sync::Lrc, FileName, Globals, SourceMap, DUMMY_SP, GLOBALS};
-use swc_ecma_ast::{BlockStmt, ExprStmt, Program, Stmt};
+use swc_common::{sync::Lrc, BytePos, FileName, Globals, SourceMap, Spanned, DUMMY_SP, GLOBALS};
+use swc_ecma_ast::{BlockStmt, Class, Expr, ExprStmt, Lit, Null, Program, Stmt};
 use swc_ecma_codegen::{text_writer::JsWriter, Emitter};
 use swc_ecma_transforms_base::fixer::fixer;
 use swc_ecma_visit::{VisitMut, VisitMutWith};
@@ -172,6 +176,193 @@ pub fn with_matters(
     veredicto(a, b, &a2, &b2)
 }
 
+/// b4-a: los flags del sensor de violaciones (preload.js) que re-chequea
+/// `violaciones_matter`, cada uno con la clase de su linea `viol`.
+pub const FLAGS_VIOLACION: [(&str, &str); 3] =
+    [("tdz_atrapada", "tdz"), ("coercion_symbol", "symbol"), ("extends_atrapado", "extends")];
+
+/// b4-a: las violaciones que el preload ubico en `a` (lineas `viol <clase> <pos>`
+/// del canal de control), sin repetir, en el orden en que pasaron.
+pub fn violaciones(a: &runner::Exec) -> Vec<&str> {
+    let mut v: Vec<&str> = Vec::new();
+    for s in a.ctl.lines().filter_map(|l| l.strip_prefix("viol ")) {
+        if !v.contains(&s) {
+            v.push(s);
+        }
+    }
+    v
+}
+
+/// b4-a (R1-H04 / C3): `Explica` solo si, con cada violacion ubicada en A
+/// cambiada por algo que no lanza (`neutralize_violaciones`), la divergencia
+/// desaparece y el camino se sostiene (`veredicto`). Se neutralizan todas las
+/// ubicadas, de las tres clases a la vez: con una sola, la variante podria seguir
+/// divergiendo por otra y el veredicto dependeria del orden.
+pub fn violaciones_matter(
+    r: &runner::Runner,
+    recheck: (backend::Minifier, minify::Preset, SourceKind),
+    original: &str,
+    a: &runner::Exec,
+    b: &runner::Exec,
+) -> Recheck {
+    let (minifier, preset, kind) = recheck;
+    let v = violaciones(a);
+    if v.is_empty() {
+        return Recheck::Inconcluso("el preload no dejo ninguna linea `viol` (tope de pausas o sin inspector)".into());
+    }
+    if let Some(s) = v.iter().find(|s| s.ends_with(" -")) {
+        return Recheck::Inconcluso(format!("violacion sin posicion: {s}"));
+    }
+    let spec = v.join("\n");
+    let neutral = match crate::analisis::sin_violaciones(original, kind, &spec) {
+        Ok(n) => n,
+        Err(e) => {
+            crate::analisis::registrar("re-chequeo de violaciones atrapadas", &e);
+            return Recheck::Inconcluso(format!("fallo el analisis de difuzz: {}", e.lines().next().unwrap_or_default()));
+        }
+    };
+    let Some(neutral) = neutral else {
+        return Recheck::Inconcluso(format!("no pude ubicar en el original todas las violaciones ({})", v.join(", ")));
+    };
+    let cfg = preset.build(minifier, kind);
+    let minify::Outcome::Ok { original: o2, minified: m2, .. } = minify::prepare(&neutral, &cfg) else {
+        return Recheck::Inconcluso("no pude minificar la variante sin violaciones".into());
+    };
+    let a2 = r.run(&o2);
+    if !a2.completed() {
+        return Recheck::Inconcluso(format!("la variante sin violaciones no termino ({:?})", a2.status));
+    }
+    let b2 = r.run(&m2);
+    veredicto(a, b, &a2, &b2)
+}
+
+/// b4-a: el programa con cada violacion de `spec` (`<clase> <linea>:<columna>`,
+/// 0-based y columna en UTF-16, como las da V8) cambiada por algo que no lanza:
+/// - `tdz`: el identificador que empieza ahi pasa a `void 0`;
+/// - `symbol`: la expresion mas chica que la contiene y que puede coercionar
+///   (llamada, `new`, binaria, unaria, template, update, asignacion) pasa a `void 0`;
+/// - `extends`: el heredero que la contiene pasa a `null`.
+///
+/// `None` si no parsea o si alguna violacion no se ubica (V8 da 0:0 para un
+/// heredero literal, p. ej.): un re-chequeo a medias no es concluyente.
+pub fn neutralize_violaciones(src: &str, kind: SourceKind, spec: &str) -> Option<String> {
+    #[derive(PartialEq)]
+    enum Clase {
+        Tdz,
+        Symbol,
+        Extends,
+    }
+    struct N(Vec<(Clase, BytePos, bool)>);
+    impl VisitMut for N {
+        fn visit_mut_class(&mut self, c: &mut Class) {
+            c.visit_mut_children_with(self);
+            if let Some(sup) = c.super_class.as_mut() {
+                let sp = sup.span();
+                let mut hit = false;
+                for o in self.0.iter_mut().filter(|o| o.0 == Clase::Extends && !o.2 && sp.lo <= o.1 && o.1 < sp.hi) {
+                    o.2 = true;
+                    hit = true;
+                }
+                if hit {
+                    **sup = Expr::Lit(Lit::Null(Null { span: DUMMY_SP }));
+                }
+            }
+        }
+        fn visit_mut_expr(&mut self, e: &mut Expr) {
+            e.visit_mut_children_with(self);
+            let sp = e.span();
+            let ident = matches!(e, Expr::Ident(_));
+            let coerce = matches!(
+                e,
+                Expr::Call(_) | Expr::New(_) | Expr::Bin(_) | Expr::Unary(_) | Expr::Tpl(_) | Expr::Update(_) | Expr::Assign(_)
+            );
+            let mut hit = false;
+            for o in self.0.iter_mut().filter(|o| !o.2) {
+                let si = match o.0 {
+                    Clase::Tdz => ident && sp.lo == o.1,
+                    Clase::Symbol => coerce && sp.lo <= o.1 && o.1 < sp.hi,
+                    Clase::Extends => false,
+                };
+                if si {
+                    o.2 = true;
+                    hit = true;
+                }
+            }
+            if hit {
+                *e = *Expr::undefined(DUMMY_SP);
+            }
+        }
+    }
+    catch_unwind(AssertUnwindSafe(|| {
+        GLOBALS.set(&Globals::new(), || {
+            let cm: Lrc<SourceMap> = Default::default();
+            let fm = cm.new_source_file(FileName::Anon.into(), src.to_string());
+            let mut objetivos = Vec::new();
+            for l in spec.lines() {
+                let (clase, pos) = l.split_once(' ')?;
+                let (lin, col) = pos.split_once(':')?;
+                let off = offset_utf16(src, lin.parse().ok()?, col.parse().ok()?)?;
+                let clase = match clase {
+                    "tdz" => Clase::Tdz,
+                    "symbol" => Clase::Symbol,
+                    "extends" => Clase::Extends,
+                    _ => return None,
+                };
+                objetivos.push((clase, fm.start_pos + BytePos(u32::try_from(off).ok()?), false));
+            }
+            if objetivos.is_empty() {
+                return None;
+            }
+            let mut program = backend::swc::parse_program(&fm, kind)?;
+            let mut n = N(objetivos);
+            program.visit_mut_with(&mut n);
+            if !n.0.iter().all(|o| o.2) {
+                return None;
+            }
+            emit(cm, &program.apply(fixer(None)))
+        })
+    }))
+    .ok()
+    .flatten()
+}
+
+/// b4-a: el byte de `src` en la linea `linea` y la columna `col` (0-based, en
+/// unidades UTF-16, con los terminadores de linea de ECMAScript, como V8).
+fn offset_utf16(src: &str, linea: usize, col: usize) -> Option<usize> {
+    let mut inicio = 0;
+    let mut l = 0;
+    let mut it = src.char_indices().peekable();
+    while l < linea {
+        let (i, c) = it.next()?;
+        match c {
+            '\n' | '\u{2028}' | '\u{2029}' => {
+                l += 1;
+                inicio = i + c.len_utf8();
+            }
+            '\r' => {
+                l += 1;
+                inicio = i + 1;
+                if let Some(&(j, '\n')) = it.peek() {
+                    it.next();
+                    inicio = j + 1;
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut u = 0;
+    for (i, c) in src[inicio..].char_indices() {
+        if u == col {
+            return Some(inicio + i);
+        }
+        if u > col || matches!(c, '\n' | '\r' | '\u{2028}' | '\u{2029}') {
+            return None;
+        }
+        u += c.len_utf16();
+    }
+    (u == col).then_some(src.len())
+}
+
 /// El programa con cada `with (o) S` cambiado por `{ o; S }`. `None` si no
 /// parsea o no hay ningun `with`.
 pub fn neutralize_with(src: &str, kind: SourceKind) -> Option<String> {
@@ -223,7 +414,7 @@ fn emit(cm: Lrc<SourceMap>, program: &Program) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{globals_matter, neutralize_with, veredicto, with_matters, Recheck};
+    use super::{globals_matter, neutralize_violaciones, neutralize_with, offset_utf16, veredicto, violaciones_matter, with_matters, Recheck};
     use crate::backend::Minifier;
     use crate::minify::{Preset, SourceKind};
     use crate::runner::{Exec, Preload, Runner, Status, THROW_EXIT};
@@ -320,5 +511,127 @@ mod tests {
         let p = "function f() { var a = 1; with ({ a: 2 }) { return a; } }\nconsole.log(f());\n";
         let (ap, bp) = (r.run(p), r.run("console.log(1);\n"));
         assert_eq!(with_matters(&r, (Minifier::Oxc, Preset::CoreDefaults, SourceKind::Script), p, &ap, &bp), Recheck::Explica);
+    }
+
+    /// b4-a: la posicion de V8 (0-based, UTF-16) a byte, y la neutralizacion por clase.
+    #[test]
+    fn neutraliza_violaciones() {
+        assert_eq!(offset_utf16("ab\ncd", 1, 1), Some(4));
+        assert_eq!(offset_utf16("a\r\nb", 1, 0), Some(3));
+        // "ñ" es 2 bytes y 1 unidad UTF-16; el emoji, 4 bytes y 2 unidades.
+        assert_eq!(offset_utf16("\"ñ😀\";x", 0, 5), Some(8));
+        assert_eq!(offset_utf16("ab", 0, 3), None);
+        assert_eq!(offset_utf16("ab\ncd", 0, 3), None);
+        let k = SourceKind::Script;
+        // TDZ: el identificador que empieza en la posicion.
+        let out = neutralize_violaciones("try { x; } catch (e) {}\nlet x = 1;\n", k, "tdz 0:6").unwrap();
+        assert!(out.contains("void 0") && out.contains("let x = 1"), "{out}");
+        // Symbol: V8 da la posicion de `abs`; se cambia la llamada entera.
+        let out = neutralize_violaciones("try { Math.abs(Symbol()); } catch (e) {}\n", k, "symbol 0:11").unwrap();
+        assert!(out.contains("void 0") && !out.contains("Math.abs"), "{out}");
+        // extends: el heredero que contiene la posicion pasa a null; el otro no.
+        let src = "const v = [];\nclass B {}\ntry { class A extends v {} } catch (e) {}\nclass C extends B {}\n";
+        let out = neutralize_violaciones(src, k, "extends 2:22").unwrap();
+        assert!(out.contains("extends null") && out.contains("extends B"), "{out}");
+        // Una que no se ubica (0:0 de un heredero literal) o sin posicion: None.
+        assert!(neutralize_violaciones("try { class A extends [] {} } catch (e) {}\n", k, "extends 0:0").is_none());
+        assert!(neutralize_violaciones("try { x; } catch (e) {}\nlet x;\n", k, "tdz 0:6\nsymbol -").is_none());
+        assert!(neutralize_violaciones("x;\n", k, "tdz 5:0").is_none());
+    }
+
+    /// b4-a (R1-H04 / C3): el sensor ve las violaciones atrapadas, y el re-chequeo
+    /// solo las explica si la divergencia es esa. Al lado de un bug real de oxc
+    /// (O4, #24331: `delete (0/0)` -> `delete NaN`) la divergencia sigue: div/.
+    #[test]
+    fn violaciones_atrapadas_en_node() {
+        use crate::minify::{self, SourceKind};
+        if std::process::Command::new("node").arg("--version").output().is_err() {
+            eprintln!("sin node en PATH: test omitido");
+            return;
+        }
+        let preload = Preload::write_tagged("viol").unwrap();
+        let r = Runner::new(&preload, 9970, std::time::Duration::from_secs(20));
+        let cfg = Preset::CoreDefaults.build(Minifier::Oxc, SourceKind::Script);
+        let caso = |src: &str| {
+            let minify::Outcome::Ok { original, minified, .. } = minify::prepare(src, &cfg) else {
+                panic!("no minifica: {src}");
+            };
+            let (a, b) = (r.run(&original), r.run(&minified));
+            let rc = violaciones_matter(&r, (Minifier::Oxc, Preset::CoreDefaults, SourceKind::Script), &original, &a, &b);
+            (a, b, rc)
+        };
+        let bug = "console.log(delete (0 / 0));\n";
+        for (prog, flag) in [
+            ("try { x; console.log(\"sin tdz\"); } catch (e) { console.log(\"tdz\"); }\nlet x = 1;\n", "tdz_atrapada"),
+            ("try { Math.abs(Symbol()); console.log(\"no lanzo\"); } catch (e) { console.log(\"lanzo\"); }\n", "coercion_symbol"),
+            ("const v = [];\ntry { class A extends v {} console.log(\"no lanzo\"); } catch (e) { console.log(\"lanzo\"); }\n", "extends_atrapado"),
+        ] {
+            let (a, b, rc) = caso(prog);
+            assert!(a.flags.iter().any(|f| f == flag), "{prog}: {:?}", a.flags);
+            assert_ne!(a.stdout, b.stdout, "oxc ya no explota la asuncion: {prog}");
+            assert_eq!(rc, Recheck::Explica, "{prog}");
+            // Negativo: el mismo uso inocuo y un bug real al lado.
+            let (a, b, rc) = caso(&format!("{prog}{bug}"));
+            assert!(a.flags.iter().any(|f| f == flag), "{prog}: {:?}", a.flags);
+            assert!(b.stdout.ends_with("false\n") && a.stdout.ends_with("true\n"), "oxc ya no tiene O4: {}", b.stdout);
+            assert_eq!(rc, Recheck::NoExplica, "{prog}{bug}");
+        }
+        // Sin violacion ubicada (coercion de Symbol no atrapada sin marcos) no hay
+        // re-chequeo posible: inconcluso.
+        let a = r.run("console.log(1);\n");
+        let rc = violaciones_matter(&r, (Minifier::Oxc, Preset::CoreDefaults, SourceKind::Script), "console.log(1);\n", &a, &a);
+        assert!(matches!(rc, Recheck::Inconcluso(_)), "{rc:?}");
+    }
+
+    /// b4-a: el sensor solo observa. La salida no cambia; lo que atrapa el preload
+    /// (invocar, leer un export en TDZ) no cuenta como atrapado por el programa; la
+    /// coercion de Symbol no atrapada se ubica igual.
+    #[test]
+    fn sensor_de_violaciones_solo_observa() {
+        if std::process::Command::new("node").arg("--version").output().is_err() {
+            eprintln!("sin node en PATH: test omitido");
+            return;
+        }
+        let preload = Preload::write_tagged("viol2").unwrap();
+        let r = Runner::new(&preload, 9971, std::time::Duration::from_secs(20));
+        let e = r.run("let n = 0;\nfor (let i = 0; i < 300; i++) { try { y; } catch (e) { n++; } }\nconsole.log(n);\nlet y;\n");
+        assert_eq!(e.stdout, "300\n");
+        assert!(e.flags.iter().any(|f| f == "tdz_atrapada"), "{:?}", e.flags);
+        assert_eq!(super::violaciones(&e), ["tdz 1:38"], "{}", e.ctl);
+        // No atrapada: `tdz` como siempre, sin `tdz_atrapada`.
+        let e = r.run("x;\nlet x;\n");
+        assert!(e.flags == ["tdz"], "{:?}", e.flags);
+        // Symbol no atrapado: flag y posicion por el primer frame.
+        let e = r.run("console.log(1);\nMath.abs(Symbol());\n");
+        assert!(e.threw() && e.flags.iter().any(|f| f == "coercion_symbol"), "{:?}", e.flags);
+        assert_eq!(super::violaciones(&e), ["symbol 1:5"], "{}", e.ctl);
+        // Node muerto por una senal (process.pid es falso: abort): se repite sin el
+        // sensor (runner::run_inner) y el canal lo dice. El status es el de siempre.
+        let e = r.run("console.log(1);\nprocess.abort();\n");
+        assert_eq!(e.status, crate::runner::Status::Signal);
+        assert!(e.ctl.starts_with("sensor_caido\n"), "{}", e.ctl);
+        // Una recursion que atrapa en cada nivel: con el sensor no termina a tiempo
+        // (cada throw recorre la pila); se repite sin el y da lo de siempre.
+        let rec = Runner::new(&preload, 9971, std::time::Duration::from_secs(4));
+        let e = rec.run("function foo(){try{foo()}catch(ex){let x=10;const y=10;class Zee{}}console.log(x,y,Zee)};try{foo()}catch(e){console.log(\"fin\")}\n");
+        assert_eq!((e.status.clone(), e.stdout.as_str()), (crate::runner::Status::Exited(0), "fin\n"));
+        assert!(e.ctl.starts_with("sensor_caido\n"), "{}", e.ctl);
+        // `debugger;` no pausa (si no, un loop con `debugger;` se vuelve lentisimo).
+        let t = std::time::Instant::now();
+        let e = r.run("let n = 0;\nfor (let i = 0; i < 20000; i++) { debugger; n++; }\nconsole.log(n);\n");
+        assert_eq!(e.stdout, "20000\n");
+        assert!(t.elapsed() < std::time::Duration::from_secs(4), "{:?}", t.elapsed());
+        // invocar: la TDZ la atrapa el preload (no el programa): cuenta como `tdz`.
+        let e = r.run("function f() { return z; }\n__difuzzObserveInvocar([\"f\", f]);\nlet z = 1;\n");
+        assert!(e.stdout.contains("f() throws ReferenceError"), "{}", e.stdout);
+        assert!(e.flags.iter().any(|f| f == "tdz") && !e.flags.iter().any(|f| f == "tdz_atrapada"), "{:?}", e.flags);
+        // Carril B: el programa es el modulo que importa el envoltorio.
+        let m = Runner::new(&preload, 9971, std::time::Duration::from_secs(20)).with_kind(SourceKind::Module);
+        let e = m.run("try { x; } catch {}\nexport let x = 1;\n");
+        assert_eq!(super::violaciones(&e), ["tdz 0:6"], "{}", e.ctl);
+        // ... y una no atrapada: V8 pausa como "atrapada" (el rechazo del import lo
+        // maneja node), pero onThrow la reconoce y queda solo `tdz`.
+        let e = m.run("x;\nexport let x;\n");
+        assert!(e.flags.iter().any(|f| f == "tdz") && !e.flags.iter().any(|f| f == "tdz_atrapada"), "{:?}", e.flags);
     }
 }

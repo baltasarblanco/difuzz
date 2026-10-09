@@ -162,7 +162,7 @@ pub fn fallo_en_backend(msg: String) {
 }
 
 /// Un backend con el analisis separado del minifier. Lo arman `Preset::build`
-/// y `Config::core_defaults_keep_names` alrededor del backend (o del `Remoto`).
+/// y `Config::con_nombres` alrededor del backend (o del `Remoto`).
 pub struct Analizado {
     inner: Box<dyn Backend>,
     /// `Some(carril)`: los chequeos estaticos se piden aca (oxc en un hijo).
@@ -341,6 +341,11 @@ pub fn sin_extends(src: &str, kind: SourceKind) -> Result<Option<String>, String
     correr("extends", kind, &[src]).map(|v| v.and_then(|mut v| v.pop()))
 }
 
+/// b4-a: `recheck::neutralize_violaciones` (`spec`: una violacion por linea).
+pub fn sin_violaciones(src: &str, kind: SourceKind, spec: &str) -> Result<Option<String>, String> {
+    correr("violaciones", kind, &[src, spec]).map(|v| v.and_then(|mut v| v.pop()))
+}
+
 /// `backend::swc::checks_on_text`. b2-int (R1-H13): la cuarta parte es el
 /// estado del analisis de los tres textos (`checks::Analisis::codigo`).
 #[allow(clippy::type_complexity)]
@@ -388,6 +393,7 @@ fn ejecutar(op: &str, kind: SourceKind, p: &[&str]) -> Option<Vec<String>> {
         }),
         ("with", [src]) => crate::recheck::neutralize_with(src, kind).map(|s| vec![s]),
         ("extends", [src]) => crate::backend::swc::neutralize_extends(src, kind).map(|s| vec![s]),
+        ("violaciones", [src, spec]) => crate::recheck::neutralize_violaciones(src, kind, spec).map(|s| vec![s]),
         ("checks", [src, o, m]) => {
             let (f, (d0, d1), a) = crate::backend::swc::checks_on_text(src, o, m, kind);
             Some(vec![f.join(","), d0.to_string(), d1.to_string(), a.codigo()])

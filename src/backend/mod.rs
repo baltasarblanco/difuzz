@@ -78,6 +78,11 @@ pub enum Rechequeo {
     GlobalConocido,
     /// `with (o) S` -> `{ o; S }`.
     With,
+    /// b4-a: las violaciones que el preload ubico en A (TDZ, coercion de Symbol,
+    /// `class extends` invalido; atrapadas o no) -> algo que no lanza
+    /// (`recheck::violaciones_matter`). Re-chequea los flags de
+    /// `recheck::FLAGS_VIOLACION`.
+    Violaciones,
 }
 
 /// Tercer eje de la celda: que minifier se mide.
@@ -159,11 +164,15 @@ impl Minifier {
         }
     }
 
-    /// El preset `core_defaults` con los nombres preservados (main::names_only).
-    pub fn build_core_defaults_keep_names(self, kind: SourceKind) -> Box<dyn Backend> {
+    /// El preset con los nombres preservados (main::names_only), para los
+    /// presets que cambian nombres (hoy solo `core_defaults`).
+    pub fn build_con_nombres(self, preset: Preset, kind: SourceKind) -> Box<dyn Backend> {
         match self {
-            Minifier::Swc => Box::new(swc::Swc::core_defaults_keep_names().with_kind(kind, false)),
-            Minifier::Oxc => Box::new(oxc::Oxc::core_defaults_keep_names(source_type(kind))),
+            Minifier::Swc => {
+                assert!(preset == Preset::CoreDefaults, "swc: la variante con nombres solo existe para core_defaults");
+                Box::new(swc::Swc::core_defaults_keep_names().with_kind(kind, false))
+            }
+            Minifier::Oxc => Box::new(oxc::Oxc::con_nombres(preset, source_type(kind))),
             #[cfg(test)]
             Minifier::Identidad => Box::new(identidad::Identidad { kind }),
         }

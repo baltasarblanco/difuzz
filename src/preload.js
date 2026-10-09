@@ -192,6 +192,12 @@
   // V8 llama a prepareStackTrace la primera vez que alguien lee .stack. `quiet`: el
   // preload mismo lee el stack de un throw (M21) y eso no es uso del programa.
   let quiet = false;
+  // b4-a: `marcos`, los frames de cada error formateado, para ubicar una violacion no
+  // atrapada (onThrow). Ojo: el sensor de violaciones atrapadas (al final) hace que V8
+  // formatee el stack de cada Error atrapado al pausar, y eso prende `stack` aunque el
+  // programa no lo lea; no se descuenta a proposito (despues del formateo, una lectura del
+  // programa ya no pasa por aca): el re-chequeo de contenido (A salado) decide.
+  const marcos = new WeakMap();
   Error.prepareStackTrace = (err, frames) => {
     if (!quiet) flags.add('stack');
     let head;
@@ -200,6 +206,9 @@
     } catch {
       head = 'Error';
     }
+    try {
+      if (frames.length && err !== null && (typeof err === 'object' || typeof err === 'function')) marcos.set(err, frames);
+    } catch {}
     return head + frames.map((f) => `\n    at ${f}`).join('') + (SALT ? '\n    at dz' : '');
   };
 
@@ -316,6 +325,43 @@
       if (e instanceof TypeError && /^Class extends value/.test(e.message)) flags.add('extends');
     } catch {}
   };
+  // b4-a: violaciones de asunciones de oxc que V8 informa con un error propio: TDZ, la
+  // coercion de un Symbol a primitivo y un `class extends` con algo que no es constructor.
+  const VIOLACIONES = [
+    ['tdz', ReferenceError, / before initialization/],
+    ['symbol', TypeError, /^Cannot convert a Symbol value to a/],
+    ['extends', TypeError, /^Class extends value/],
+  ];
+  const violacionDe = (e) => {
+    for (const [k, E, re] of VIOLACIONES) {
+      try {
+        if (e instanceof E && re.test(e.message)) return k;
+      } catch {}
+    }
+    return null;
+  };
+  // `viol <clase> <linea>:<columna>` (0-based, columna en UTF-16) o `viol <clase> -`. Las
+  // atrapadas las registra el sensor del inspector; la de Symbol no atrapada, onThrow.
+  const MAX_VIOL = 32;
+  // Apaga (false) y vuelve a prender (true) el sensor del inspector mientras el preload
+  // atrapa errores que no son del programa (el hook de --stubs): al pausar, V8 formatea su
+  // stack y prenderia `stack`. Lo define el sensor; sin inspector no hace nada.
+  let sensor = () => {};
+  const violaciones = [];
+  // `desc`: la descripcion de V8 (el stack formateado), para reconocer despues el mismo error.
+  const registrarViolacion = (k, pos, desc) => {
+    if (violaciones.length < MAX_VIOL) violaciones.push([k, pos, desc]);
+  };
+  const posDeMarco = (e) => {
+    try {
+      // El primero con archivo: `Math.abs (<anonymous>)` es un built-in, sin posicion.
+      const f = (marcos.get(e) || []).find((x) => x.getFileName());
+      const l = f && f.getLineNumber();
+      const c = f && f.getColumnNumber();
+      if (Number.isInteger(l) && Number.isInteger(c)) return `${l - 1}:${c - 1}`;
+    } catch {}
+    return '-';
+  };
   const onThrow = (e) => {
     try {
       if (e instanceof ReferenceError && / before initialization/.test(e.message)) flags.add('tdz');
@@ -332,6 +378,22 @@
     } finally {
       quiet = false;
     }
+    // b4-a: V8 puede haber pausado por este mismo error como "atrapado" (en el carril B, el
+    // rechazo del import lo maneja node): no lo fue. Se reconoce por su stack formateado.
+    const k = violacionDe(e);
+    if (k) {
+      try {
+        quiet = true;
+        const st = e.stack;
+        const i = violaciones.findIndex((v) => v[0] === k && v[2] === st);
+        if (i >= 0) violaciones.splice(i, 1);
+      } catch {
+      } finally {
+        quiet = false;
+      }
+    }
+    // La coercion de un Symbol no tenia flag ni atrapada ni sin atrapar.
+    if (k === 'symbol') registrarViolacion('symbol', posDeMarco(e));
     writeDz(`!dz throw ${t}\n`);
     realExit(70);
   };
@@ -479,6 +541,12 @@
     } catch {
       flags.add('builtins');
     }
+    // b4-a: una violacion atrapada (o la de Symbol) es un flag por clase y una linea `viol`.
+    const FLAG_VIOL = { tdz: 'tdz_atrapada', symbol: 'coercion_symbol', extends: 'extends_atrapado' };
+    for (const [k, pos] of violaciones) {
+      flags.add(FLAG_VIOL[k]);
+      ctl(`viol ${k} ${pos}`);
+    }
     ctl(`flags ${[...flags].sort().join(',')}`);
   });
 
@@ -517,6 +585,7 @@
   };
   const invocar = (name, f) => {
     let r;
+    const nViol = violaciones.length;
     try {
       r = Reflect.apply(f, undefined, []);
     } catch (e) {
@@ -524,6 +593,17 @@
         if (e instanceof ReferenceError && / before initialization/.test(e.message)) flags.add('tdz');
       } catch {}
       extendsFlag(e);
+      // b4-a: la atrapa el preload, no el programa: para el sensor del inspector fue
+      // "atrapada", pero cuenta como no atrapada (`tdz`, `extends`). La de Symbol se queda.
+      const k = violacionDe(e);
+      if (k === 'tdz' || k === 'extends') {
+        for (let i = violaciones.length - 1; i >= nViol; i--) {
+          if (violaciones[i][0] === k) {
+            violaciones.splice(i, 1);
+            break;
+          }
+        }
+      }
       return `${name}() throws ${thrownType(e)}`;
     }
     let isPromise = false;
@@ -713,6 +793,7 @@
       try {
         require('module').registerHooks({
           resolve(spec, context, next) {
+            sensor(false);
             try {
               return next(spec, context);
             } catch (e) {
@@ -723,6 +804,8 @@
               if (!LINK_CODES.includes(code)) throw e;
               const cjs = (context.conditions || []).includes('require');
               return { url: `${PREFIX}${cjs ? 'cjs' : 'esm'}/${encodeURIComponent(spec)}`, shortCircuit: true };
+            } finally {
+              sensor(true);
             }
           },
           load(url, context, next) {
@@ -745,4 +828,72 @@
       } catch {}
     }
   }
+
+  // --- b4-a (R1-H04 / C3): violaciones atrapadas --------------------------------
+  // onThrow solo ve lo NO atrapado: `try { x; } catch {} let x;` no prendia `tdz`, y lo
+  // mismo con `Math.abs(Symbol())` o `class A extends v {}` atrapados. El inspector de V8 en
+  // este mismo proceso pausa en cada excepcion ATRAPADA (state 'caught'), sincronicamente:
+  // el handler mira la descripcion, registra la violacion y sigue. Va al final del preload
+  // para no ver los throws del preload mismo, y descarta los que lanza codigo del preload
+  // (p. ej. leer un export en TDZ al observar) o de node (url que no es file: del programa).
+  // Solo observa: no escribe en stdout ni toca objetos del programa. Efectos conocidos:
+  //   - al pausar, V8 arma la descripcion del Error leyendo `.stack` (MEDIDO): el stack
+  //     queda formateado en el throw (si despues el programa cambia `message`, ve el
+  //     viejo), llama a Error.prepareStackTrace (o a la del programa, si la cambio) y
+  //     prende `stack` (ver prepareStackTrace).
+  //   - Debugger.enable cuesta ~12 ms por node y cada pausa ~0.4 ms: tope MAX_PAUSAS.
+  // Igual en A y en B: lo que cambie, cambia en los dos.
+  // DIFUZZ_SENSOR=0: sin sensor (runner.rs lo pide si node murio por una senal con el).
+  const conSensor = process.env.DIFUZZ_SENSOR !== '0';
+  delete process.env.DIFUZZ_SENSOR;
+  if (conSensor) try {
+    const PRELOAD_URL = require('url').pathToFileURL(__filename).href;
+    const inspector = require('inspector');
+    const sesion = new inspector.Session();
+    sesion.connect();
+    const MAX_PAUSAS = 256;
+    let pausas = 0;
+    const DESC = [
+      ['tdz', /^ReferenceError: [^\n]* before initialization/],
+      ['symbol', /^TypeError: Cannot convert a Symbol value to a/],
+      ['extends', /^TypeError: Class extends value/],
+    ];
+    // `callFrames[].url` llega vacio (MEDIDO, node 24): la url sale de scriptParsed. Solo
+    // los file: (el programa, el envoltorio del carril B y este preload); eval no.
+    const urls = new Map();
+    sesion.on('Debugger.scriptParsed', (m) => {
+      try {
+        const p = m.params;
+        if (typeof p.url === 'string' && p.url.startsWith('file:')) urls.set(p.scriptId, p.url);
+      } catch {}
+    });
+    sesion.on('Debugger.paused', (m) => {
+      try {
+        const p = m.params || {};
+        const d = p.data || {};
+        const desc = typeof d.description === 'string' ? d.description : '';
+        const f = (p.callFrames || [])[0];
+        const url = (f && urls.get(f.location.scriptId)) || '';
+        if ((p.reason === 'exception' || p.reason === 'promiseRejection') && url && url !== PRELOAD_URL) {
+          for (const [k, re] of DESC) {
+            if (re.test(desc)) {
+              registrarViolacion(k, `${f.location.lineNumber}:${f.location.columnNumber}`, desc);
+              break;
+            }
+          }
+        }
+      } catch {
+      } finally {
+        sesion.post('Debugger.resume');
+        if (++pausas === MAX_PAUSAS) sesion.post('Debugger.setPauseOnExceptions', { state: 'none' });
+      }
+    });
+    sensor = (on) => sesion.post('Debugger.setPauseOnExceptions', { state: on && pausas < MAX_PAUSAS ? 'caught' : 'none' });
+    sesion.post('Debugger.enable');
+    // Con el debugger prendido, cada `debugger;` del programa pausa (MEDIDO: un loop con
+    // `debugger;` y --invocar paso a Timeout). Sin breakpoints activos no pausa, y las
+    // pausas por excepcion siguen (MEDIDO).
+    sesion.post('Debugger.setBreakpointsActive', { active: false });
+    sensor(true);
+  } catch {}
 })();

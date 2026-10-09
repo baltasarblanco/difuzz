@@ -376,7 +376,26 @@ impl Runner {
             .map_or(true, |s| s.success())
     }
 
+    /// b4-a: el sensor de violaciones atrapadas (inspector de V8 en el preload)
+    /// puede tumbar a node (MEDIDO: SIGSEGV con fixture/issues/9460/side-effects,
+    /// que sin el sensor corre bien) o volverlo lentisimo (MEDIDO: con pausa en
+    /// excepciones atrapadas cada throw recorre la pila; una recursion que atrapa
+    /// en cada nivel pasa de 0,05 s a mas de 40 s). Si node muere por una senal o
+    /// no termina a tiempo con el sensor, se repite sin el: el resultado es el de
+    /// siempre (sin flags de violacion) y el canal lleva `sensor_caido`. Un
+    /// programa que muere o cuelga por su cuenta hace lo mismo otra vez (cuesta
+    /// el doble).
     fn run_inner(&self, js: &str, opts: Opts) -> Exec {
+        let e = self.run_once(js, opts);
+        if !matches!(e.status, Status::Signal | Status::Timeout) || opts.sin_sensor {
+            return e;
+        }
+        let mut e = self.run_once(js, Opts { sin_sensor: true, ..opts });
+        e.ctl.insert_str(0, "sensor_caido\n");
+        e
+    }
+
+    fn run_once(&self, js: &str, opts: Opts) -> Exec {
         let start = Instant::now();
         if let Err(e) = std::fs::write(&self.script, js) {
             return Exec::failed(format!("escribir {}: {e}", self.script.display()), start);
@@ -432,6 +451,8 @@ struct Opts<'a> {
     node_args: &'a [&'a str],
     /// Nombres separados por coma para DIFUZZ_GLOBALS.
     globals: Option<&'a str>,
+    /// b4-a: sin el sensor de violaciones del preload (DIFUZZ_SENSOR=0).
+    sin_sensor: bool,
 }
 
 fn run_file(r: &Runner, script: &Path, start: Instant, timeout: Duration, opts: Opts) -> Exec {
@@ -469,6 +490,9 @@ fn run_file(r: &Runner, script: &Path, start: Instant, timeout: Duration, opts: 
     }
     if let Some(g) = opts.globals {
         cmd.env("DIFUZZ_GLOBALS", g);
+    }
+    if opts.sin_sensor {
+        cmd.env("DIFUZZ_SENSOR", "0");
     }
     // M2: grupo de procesos propio (pgid = pid de node). Al terminar, por timeout
     // o normalmente, se mata el grupo entero: un hijo que hereda el stdout ya no

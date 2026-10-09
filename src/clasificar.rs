@@ -182,6 +182,36 @@ pub fn clasificar<'a>(
             let r = recheck::with_matters(runner, (rc.minifier, rc.preset, rc.kind), original, a, b);
             rechequear(&mut flags, &mut notes, &mut traza, "with", ("with_irrelevante", "with_inconcluso"), r);
         }
+        // b4-a (R1-H04 / C3): un re-chequeo para todas las violaciones ubicadas; su
+        // resultado vale para cada flag de violacion presente (Explica los deja).
+        let nombres: Vec<&'static str> =
+            recheck::FLAGS_VIOLACION.iter().map(|(f, _)| *f).filter(|f| flags.contains(f)).collect();
+        if !nombres.is_empty() && rc.rechequea(Rechequeo::Violaciones) {
+            let r = recheck::violaciones_matter(runner, (rc.minifier, rc.preset, rc.kind), original, a, b);
+            let t = match &r {
+                recheck::Recheck::Explica => format!("Explica (quedan {})", nombres.join(", ")),
+                recheck::Recheck::NoExplica => format!("NoExplica -> {}_irrelevante", nombres.join("_irrelevante, ")),
+                recheck::Recheck::Inconcluso(n) => format!("Inconcluso -> {}_inconcluso: {n}", nombres.join("_inconcluso, ")),
+            };
+            traza.paso("violaciones", t);
+            if let recheck::Recheck::Inconcluso(n) = &r {
+                notes.push(format!("re-chequeo de violaciones ({}) inconcluso: {n}", nombres.join(", ")));
+            }
+            for f in nombres {
+                let par = match f {
+                    "tdz_atrapada" => ("tdz_atrapada_irrelevante", "tdz_atrapada_inconcluso"),
+                    "coercion_symbol" => ("coercion_symbol_irrelevante", "coercion_symbol_inconcluso"),
+                    _ => ("extends_atrapado_irrelevante", "extends_atrapado_inconcluso"),
+                };
+                // La nota ya va una vez arriba: aca solo el flag.
+                let r1 = match &r {
+                    recheck::Recheck::Inconcluso(_) => recheck::Recheck::Inconcluso(String::new()),
+                    otro => otro.clone(),
+                };
+                let mut sin_nota = Vec::new();
+                apply_recheck(&mut flags, &mut sin_nota, f, par, r1);
+            }
+        }
     }
     let mut why = ctx.known.classify(rel, &flags);
     traza.paso("asunciones", why.clone().unwrap_or_else(|| "ninguna (ni flag de la tabla, ni ruta, ni backlog)".into()));
@@ -498,5 +528,45 @@ mod tests {
         assert!(matches!(r, Some(Recheck::Inconcluso(ref n)) if n.contains("Timeout")), "{r:?}");
         // Un Failed del fuzzer sigue sin opinar.
         assert_eq!(depth_recheck(&ok("1\n"), &ok("2\n"), &ex(Status::Failed("x".into()), "")), None);
+    }
+
+    /// b4-a (R1-H04 / C3), de punta a punta con oxc: una TDZ atrapada que oxc borra
+    /// va a known/ (re-chequeo de violaciones Explica); la misma al lado de un bug
+    /// real (O4, #24331) queda en div/ con `tdz_atrapada_irrelevante`.
+    #[test]
+    fn tdz_atrapada_de_punta_a_punta() {
+        use super::Medido;
+        use crate::{backend::Minifier, cache, compare_and_report, known, minify, oracle, runner, triage, Ctx, Stats};
+        use std::path::Path;
+        if std::process::Command::new("node").arg("--version").output().is_err() {
+            eprintln!("sin node en PATH: test omitido");
+            return;
+        }
+        let d = std::env::temp_dir().join(format!("difuzz-test-viol-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        let reporter = oracle::Reporter::new(&d, "test".into(), runner::PRELOAD);
+        let known = known::Known::load(&d, &d, 0, Minifier::Oxc);
+        let cache = cache::CacheA::new(None, &[]);
+        let triage = triage::Triage::load(&d);
+        let (preset, kind) = (minify::Preset::CoreDefaults, minify::SourceKind::Script);
+        let medido = Some(Medido { minifier: Minifier::Oxc, preset, kind });
+        let ctx = Ctx { reporter: &reporter, known: &known, cache: &cache, triage: &triage, medido };
+        let preload = runner::Preload::write_tagged("viol-pap").unwrap();
+        let r = runner::Runner::new(&preload, 9972, std::time::Duration::from_secs(20));
+        let cfg = preset.build(Minifier::Oxc, kind);
+        let tdz = "try { x; console.log(\"sin tdz\"); } catch (e) { console.log(\"tdz\"); }\nlet x = 1;\n";
+        for (rel, src, known_div) in [("pos", tdz.to_string(), (1, 0)), ("neg", format!("{tdz}console.log(delete (0 / 0));\n"), (0, 1))] {
+            let minify::Outcome::Ok { original, minified, .. } = minify::prepare(&src, &cfg) else { panic!("no minifica") };
+            let mut st = Stats::default();
+            let p = format!("{rel}/input.js");
+            assert!(compare_and_report(&ctx, &r, &mut st, Path::new(&p), &original, &minified, r.run(&original), false, false, &[], None));
+            assert_eq!((st.known, st.divergences), known_div, "{rel}");
+        }
+        let meta = std::fs::read_to_string(d.join("known/pos/meta.txt")).unwrap();
+        assert!(meta.contains("oxc: No TDZ Violation (atrapada)") && meta.contains("  violaciones: Explica (quedan tdz_atrapada)\n"), "{meta}");
+        let meta = std::fs::read_to_string(d.join("div/neg/meta.txt")).unwrap();
+        assert!(meta.contains("tdz_atrapada_irrelevante") && meta.contains("  violaciones: NoExplica"), "{meta}");
+        std::fs::remove_dir_all(&d).unwrap();
     }
 }

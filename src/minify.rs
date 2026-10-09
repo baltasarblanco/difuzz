@@ -138,17 +138,18 @@ impl SourceKind {
 }
 
 impl Config {
-    /// core_defaults con los nombres preservados (keep_* en compress y mangle).
-    /// No es una celda: sirve para preguntar si una divergencia de core_defaults
-    /// desaparece cuando los nombres no cambian (main::names_only).
-    pub fn core_defaults_keep_names(minifier: Minifier, kind: SourceKind) -> Self {
+    /// El preset con los nombres preservados (keep_* en compress y mangle).
+    /// No es una celda: sirve para preguntar si una divergencia de un preset que
+    /// cambia nombres (hoy solo core_defaults) desaparece cuando los nombres no
+    /// cambian (main::names_only).
+    pub fn con_nombres(minifier: Minifier, preset: Preset, kind: SourceKind) -> Self {
         let remoto = crate::subproceso::activo();
         let env = |b: Box<dyn Backend>| crate::analisis::envolver(b, minifier, kind, remoto);
-        let oraculo = crate::subproceso::oraculo(minifier, Preset::CoreDefaults, kind, true).map(|b| crate::analisis::envolver(b, minifier, kind, true));
+        let oraculo = crate::subproceso::oraculo(minifier, preset, kind, true).map(|b| crate::analisis::envolver(b, minifier, kind, true));
         if remoto {
-            return Config(env(Box::new(crate::subproceso::Remoto::new(minifier, Preset::CoreDefaults, kind, true))), oraculo);
+            return Config(env(Box::new(crate::subproceso::Remoto::new(minifier, preset, kind, true))), oraculo);
         }
-        Config(env(minifier.build_core_defaults_keep_names(kind)), oraculo)
+        Config(env(minifier.build_con_nombres(preset, kind)), oraculo)
     }
 
     /// M34: una config sobre un backend ya armado (el hijo de `--preparar`).

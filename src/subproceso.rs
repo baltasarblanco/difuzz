@@ -206,7 +206,7 @@ const COLA_STDERR: usize = 4096;
 
 static ACTIVO: AtomicBool = AtomicBool::new(false);
 
-/// Por defecto (sin `--en-proceso`): desde aca, `Preset::build` y `Config::core_defaults_keep_names`
+/// Por defecto (sin `--en-proceso`): desde aca, `Preset::build` y `Config::con_nombres`
 /// devuelven configs que minifican en un hijo.
 pub fn activar() {
     ACTIVO.store(true, Ordering::SeqCst);
@@ -451,7 +451,7 @@ pub fn aviso_viejo(oraculo: &std::path::Path) -> Option<String> {
 /// La config del worker, en proceso (lo que el hijo arma en `serve`).
 fn local_backend(minifier: Minifier, preset: Preset, kind: SourceKind, keep_names: bool) -> Box<dyn Backend> {
     if keep_names {
-        minifier.build_core_defaults_keep_names(kind)
+        minifier.build_con_nombres(preset, kind)
     } else {
         minifier.build(preset, kind)
     }

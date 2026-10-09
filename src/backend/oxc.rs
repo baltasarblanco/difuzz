@@ -36,7 +36,7 @@ pub const POLITICA: Politica = Politica {
     razones: FLAG_REASONS_OXC,
     rutas: &[],
     backlog: None,
-    rechequeos: &[Rechequeo::Extends, Rechequeo::GlobalConocido, Rechequeo::With],
+    rechequeos: &[Rechequeo::Extends, Rechequeo::GlobalConocido, Rechequeo::With, Rechequeo::Violaciones],
     solo_sloppy: Some("oxc: solo sloppy (no soportado); con \"use strict\" la divergencia desaparece"),
     chequeos_propios: false,
 };
@@ -44,10 +44,10 @@ pub const POLITICA: Politica = Politica {
 /// Las asunciones de oxc, contra crates/oxc_minifier/docs/ASSUMPTIONS.md (tag
 /// crates_v0.153.0). Asunciones de oxc SIN flag todavia (sus divergencias caen
 /// en div/): `document.all`, longitud maxima de Array/String/TypedArray,
-/// coercion que lanza con Symbol (`Math.abs(Symbol())`), `var` de un eval
-/// directo usada afuera, `arguments` global, y escrituras de propiedades sobre
+/// `var` de un eval directo usada afuera, `arguments` global, y escrituras de propiedades sobre
 /// bindings no usados (setters en prototipos: solo cubierto si el preload ve
-/// `builtins`). M13 agrego `with`, `global_conocido` y `extends`.
+/// `builtins`). M13 agrego `with`, `global_conocido` y `extends`; b4-a,
+/// `tdz_atrapada`, `coercion_symbol` y `extends_atrapado`.
 /// Flags de SWC que oxc NO declara como asuncion y por eso no van aca:
 /// `proxy` (property_read_side_effects es All por defecto), `callee`,
 /// `redefine_global`.
@@ -61,6 +61,12 @@ const FLAG_REASONS_OXC: &[(&str, &str)] = &[
     ("with", "oxc: No `with` Statement"),
     ("global_conocido", "oxc: Known globals exist and are side-effect-free to access (no existe en node)"),
     ("extends", "oxc: No side effects from extending a class"),
+    // b4-a (R1-H04 / C3, preload.js): violaciones que el programa atrapa (y la
+    // coercion de Symbol, atrapada o no). Solo llegan aca si el re-chequeo de
+    // violaciones (Rechequeo::Violaciones) dio Explica; si no, se renombran.
+    ("tdz_atrapada", "oxc: No TDZ Violation (atrapada)"),
+    ("coercion_symbol", "oxc: Coercion to a primitive does not throw for non-Symbol arguments"),
+    ("extends_atrapado", "oxc: No side effects from extending a class (atrapado)"),
     // M16 (main.rs): no es asuncion del minifier, es el motor.
     ("profundidad", "difuzz: limite de pila del motor (V8), no del programa"),
     // No es asuncion documentada de oxc: el contenido de .stack (posiciones,
@@ -106,6 +112,16 @@ impl Oxc {
                 }
                 o
             }
+        }
+    }
+
+    /// El preset con los nombres preservados (main::names_only), con el resto
+    /// de sus opciones intactas. Solo para los presets que cambian nombres (hoy
+    /// `core_defaults`); para los otros devuelve el preset tal cual.
+    pub fn con_nombres(preset: Preset, source_type: SourceType) -> Self {
+        match preset {
+            Preset::CoreDefaults => Oxc::core_defaults_keep_names(source_type),
+            Preset::CarrilA => Oxc::new(preset, source_type),
         }
     }
 

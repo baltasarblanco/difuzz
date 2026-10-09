@@ -716,7 +716,7 @@ fn main() {
                     // Solo core_defaults cambia nombres: ahi cada divergencia se
                     // vuelve a probar con los nombres preservados (names_only).
                     let names_cfg = (cli.preset == minify::Preset::CoreDefaults)
-                        .then(|| minify::Config::core_defaults_keep_names(cli.minifier, cli.kind));
+                        .then(|| minify::Config::con_nombres(cli.minifier, cli.preset, cli.kind));
                     let runner = runner::Runner::new(preload, w, cli.timeout)
                         .with_kind(cli.kind)
                         .with_invocar(cli.invocar)
