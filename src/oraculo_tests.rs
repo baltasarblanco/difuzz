@@ -49,10 +49,10 @@ fn correr(tag: &str, worker: usize, cfg: &Config) -> (crate::Stats, PathBuf) {
     let args = [corpus.to_str().unwrap(), "--out", out.to_str().unwrap(), "--no-cache", "--jobs", "1"];
     let cli = crate::Cli::parse(args.iter().map(|s| s.to_string()).collect()).unwrap();
     let reporter = crate::oracle::Reporter::new(&out, cli.cell(), crate::runner::PRELOAD);
-    let known = crate::known::Known::load(&corpus, &out, 0);
+    let known = crate::known::Known::load(&corpus, &out, 0, crate::backend::Minifier::Swc);
     let cache = crate::cache::CacheA::new(None, &[]);
     let triage = crate::triage::Triage::load(&out);
-    let ctx = crate::Ctx { reporter: &reporter, known: &known, cache: &cache, triage: &triage, strict_recheck: None, oxc_recheck: None };
+    let ctx = crate::Ctx { reporter: &reporter, known: &known, cache: &cache, triage: &triage, medido: None };
     let preload = crate::runner::Preload::write_tagged(&format!("oraculo-{tag}")).unwrap();
     let runner = crate::runner::Runner::new(&preload, worker, Duration::from_secs(10));
     let mut stats = crate::Stats::default();

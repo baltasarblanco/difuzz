@@ -9,6 +9,7 @@ mod analisis;
 mod backend;
 mod cache;
 mod checks;
+mod clasificar;
 mod corpus;
 mod corrida;
 mod emitir;
@@ -148,7 +149,7 @@ impl Cli {
         let mut timeout = Duration::from_millis(5000);
         let mut limit = None;
         let mut observe = true;
-        let mut minifier = backend::Minifier::Swc;
+        let mut minifier = backend::Minifier::POR_DEFECTO;
         let mut preset = minify::Preset::CarrilA;
         let mut forma = minify::Forma::TalCual;
         let mut kind = minify::SourceKind::Script;
@@ -664,16 +665,15 @@ fn main() {
         // M4: "sintoma v2" (sin rutas por proceso): las tablas viejas se
         // descartan por el encabezado en vez de dar drift masivo.
         known::fnv1a(&[runner::PRELOAD, cell.as_str(), "sintoma v2"]),
-    )
-    .with_backend(cli.minifier);
+        cli.minifier,
+    );
     let ctx = Ctx {
         reporter: &reporter,
         known: &known,
         cache: &cache,
         triage: &triage,
-        strict_recheck: (cli.minifier == backend::Minifier::Oxc && cli.kind == minify::SourceKind::Script)
-            .then_some(cli.preset),
-        oxc_recheck: (cli.minifier == backend::Minifier::Oxc).then_some((cli.preset, cli.kind)),
+        // 7a: que re-chequeos aplican lo dice la politica del backend (clasificar.rs).
+        medido: Some(clasificar::Medido { minifier: cli.minifier, preset: cli.preset, kind: cli.kind }),
     };
     let jobs = cli.jobs.min(files.len());
     // R2-H04: el presupuesto de memoria de los hijos, con los workers reales.
@@ -1364,169 +1364,16 @@ fn observe_module(
     true
 }
 
-/// Precondicion de names_only: la salida del original puede mostrar nombres,
-/// porque lee `.name` o imprime una instancia con el nombre de su clase
-/// (`Foo { x: 7 }`). Sin esto, names_only tapaba bugs reales: keep_* tambien
-/// apaga optimizaciones (inlining de funciones con nombre) y el 12188 dejaba de
-/// dispararse.
-fn names_visible(original: &str, a_stdout: &str) -> bool {
-    let ident = |c: char| c.is_alphanumeric() || c == '_' || c == '$';
-    let reads_name = original
-        .match_indices(".name")
-        .any(|(i, _)| !original[i + 5..].chars().next().is_some_and(ident));
-    let named_instance = a_stdout.lines().any(|l| {
-        l.match_indices(" {")
-            .any(|(i, _)| l[..i].chars().next_back().is_some_and(ident))
-    });
-    reads_name || named_instance
-}
-
-/// La divergencia desaparece si se minifica igual pero preservando nombres: es
-/// el costo de keep_* apagado (`f.name`, `Foo { x: 7 }` impreso como `{ x: 7 }`),
-/// no un bug. Se minifica el original ya impreso: es el mismo programa.
-fn names_only(runner: &runner::Runner, cfg: &minify::Config, original: &str, a: &runner::Exec) -> bool {
-    let minify::Outcome::Ok { minified, .. } = minify::prepare(original, cfg) else {
-        return false;
-    };
-    matches!(oracle::compare(a, &runner.run(&minified)), oracle::Verdict::Same)
-}
-
-/// Flags cuya asuncion es sobre el contenido, no sobre la llamada.
-const CONTENT_FLAGS: [&str; 2] = ["fn_tostring", "stack"];
-
 /// Lo que comparten todas las comparaciones de una corrida.
 struct Ctx<'a> {
     reporter: &'a oracle::Reporter,
     known: &'a known::Known,
     cache: &'a cache::CacheA,
     triage: &'a triage::Triage,
-    /// M17: con `--minifier oxc --carril a`, el preset con el que se re-minifica
-    /// el original en estricto ante una divergencia no conocida. `None` en las
-    /// demas celdas.
-    strict_recheck: Option<minify::Preset>,
-    /// M13: con `--minifier oxc`, preset y carril para re-chequear el flag
-    /// `extends` (ver `extends_matters`). `None` con swc.
-    oxc_recheck: Option<(minify::Preset, minify::SourceKind)>,
-}
-
-/// M13: el flag `extends` (estatico) mira todo el programa: en 9460 un
-/// `class extends 1` atrapado a proposito tapaba un bug real (O5). Se cambia
-/// cada heredero literal por `null`, se minifica igual y se compara: si la
-/// divergencia sigue, `extends` no la explica (`false`). Si no hay nada que
-/// cambiar o algo falla, inconcluso (b1-b: antes `true`, se conservaba el flag).
-/// El veredicto es el de recheck::veredicto (camino incluido).
-fn extends_matters(
-    runner: &runner::Runner,
-    recheck: (minify::Preset, minify::SourceKind),
-    original: &str,
-    a: &runner::Exec,
-    b: &runner::Exec,
-) -> recheck::Recheck {
-    let (preset, kind) = recheck;
-    let neutral = match analisis::sin_extends(original, kind) {
-        Ok(n) => n,
-        Err(e) => {
-            analisis::registrar("re-chequeo de extends", &e);
-            return recheck::Recheck::Inconcluso(format!("fallo el analisis de difuzz: {}", e.lines().next().unwrap_or_default()));
-        }
-    };
-    let Some(neutral) = neutral else {
-        return recheck::Recheck::Inconcluso("no pude neutralizar el heredero literal".into());
-    };
-    let cfg = preset.build(backend::Minifier::Oxc, kind);
-    let minify::Outcome::Ok { original: o2, minified: m2, .. } = minify::prepare(&neutral, &cfg) else {
-        return recheck::Recheck::Inconcluso("no pude minificar la variante con `extends null`".into());
-    };
-    let a2 = runner.run(&o2);
-    if !a2.completed() {
-        return recheck::Recheck::Inconcluso(format!("la variante con `extends null` no termino ({:?})", a2.status));
-    }
-    let b2 = runner.run(&m2);
-    recheck::veredicto(a, b, &a2, &b2)
-}
-
-/// b1-b: aplica a `flags` el resultado del re-chequeo de `flag`. Solo `Explica`
-/// lo deja; `NoExplica` lo cambia por `irrelevante` y `Inconcluso` por
-/// `inconcluso` mas una nota para meta.txt.
-fn apply_recheck(
-    flags: &mut Vec<&str>,
-    notes: &mut Vec<String>,
-    flag: &str,
-    (irrelevante, inconcluso): (&'static str, &'static str),
-    r: recheck::Recheck,
-) {
-    let reemplazo = match r {
-        recheck::Recheck::Explica => return,
-        recheck::Recheck::NoExplica => irrelevante,
-        recheck::Recheck::Inconcluso(n) => {
-            notes.push(format!("re-chequeo de {flag} inconcluso: {n}"));
-            inconcluso
-        }
-    };
-    flags.retain(|f| *f != flag);
-    flags.push(reemplazo);
-}
-
-/// b1-b (R2-H02, R1-H03): M16 concluyente. `None` si A no depende de la pila (o
-/// la corrida honda fallo por el fuzzer). La profundidad explica la divergencia
-/// solo si la corrida con mas pila termino sola y B difiere de A unicamente en
-/// lo que tambien cambia con mas pila: B da lo mismo que A con mas pila, o las
-/// tres salidas tienen las mismas lineas y cada linea en que B difiere de A es
-/// una que cambia con la pila. Antes un Timeout de la corrida honda (o un bug en
-/// otra linea) alcanzaba para mandar a known/.
-fn depth_recheck(a: &runner::Exec, b: &runner::Exec, deep: &runner::Exec) -> Option<recheck::Recheck> {
-    if matches!(deep.status, Status::Failed(_)) || same_exec(deep, a) {
-        return None;
-    }
-    if !deep.completed() {
-        return Some(recheck::Recheck::Inconcluso(format!(
-            "la corrida con mas pila ({}) no termino ({:?})",
-            runner::DEEP_STACK,
-            deep.status
-        )));
-    }
-    if same_exec(deep, b) || recheck::localizada(a, b, deep) {
-        Some(recheck::Recheck::Explica)
-    } else {
-        Some(recheck::Recheck::Inconcluso(
-            "el original depende de la pila, pero B difiere de A en lineas que no cambian con mas pila".into(),
-        ))
-    }
-}
-
-/// M17: oxc no soporta sloppy (D1 del CLAUDE.md). Ante una divergencia de oxc
-/// en el carril A: si el original con `"use strict"` es valido para node y la
-/// divergencia desaparece al minificarlo asi, es "solo sloppy" (`Ok(true)`). Si
-/// no es estricto-valido, `Err(nota)`: queda en div/ para confirmar en el
-/// carril B. Se minifica el original ya impreso: es el mismo programa.
-/// b1-b (R1-H01): ademas el camino tiene que sostenerse (recheck::veredicto). Si
-/// en estricto el original toma otra rama, la divergencia puede "desaparecer"
-/// porque la rama con el bug no corre: eso es inconcluso (`Err`), no sloppy.
-fn sloppy_only(
-    runner: &runner::Runner,
-    preset: minify::Preset,
-    original: &str,
-    a: &runner::Exec,
-    b: &runner::Exec,
-) -> Result<bool, String> {
-    let strict = format!("\"use strict\";\n{original}");
-    if !runner.node_accepts(&strict) {
-        return Err("no es estricto-valido: confirmar en el carril B".into());
-    }
-    let cfg = preset.build(backend::Minifier::Oxc, minify::SourceKind::Script);
-    let minify::Outcome::Ok { original: o2, minified: m2, .. } = minify::prepare(&strict, &cfg) else {
-        return Err("re-chequeo sloppy inconcluso: no pude minificar la variante estricta".into());
-    };
-    let a2 = runner.run(&o2);
-    if !a2.completed() {
-        return Err(format!("re-chequeo sloppy inconcluso: la variante estricta no termino ({:?})", a2.status));
-    }
-    let b2 = runner.run(&m2);
-    match recheck::veredicto(a, b, &a2, &b2) {
-        recheck::Recheck::Explica => Ok(true),
-        recheck::Recheck::NoExplica => Ok(false),
-        recheck::Recheck::Inconcluso(n) => Err(format!("re-chequeo sloppy inconcluso: {n}")),
-    }
+    /// 7a: el backend medido y su celda, para los re-chequeos que declara su
+    /// politica (M13 flags estaticos, M17 solo sloppy) y re-minificar con el.
+    /// `None` (tests): ningun re-chequeo propio del backend.
+    medido: Option<clasificar::Medido>,
 }
 
 /// Corre B y compara contra A (que ya termino con exit 0). Devuelve `true` si
@@ -1574,110 +1421,25 @@ fn compare_and_report(
                 stats.inherited += 1;
                 return true;
             }
-            // Una asuncion habla del programa de entrada: clasifican los flags de A
-            // y los estaticos del original. Un flag solo en B es algo que el
-            // minificado hace y el original no (p. ej. el .stack que Node lee al
-            // cargar un SyntaxError): hallazgo, no asuncion.
-            let mut flags: Vec<&str> = a.flags.iter().map(String::as_str).collect();
-            flags.extend_from_slice(static_flags);
-            // AGENTS.md habla de depender del *contenido* de toString y .stack, no
-            // de llamarlos (`f++` llama a toString y da NaN igual). A se corre de
-            // nuevo con esos contenidos cambiados: si la salida no cambia, no dependen.
-            if flags.iter().any(|f| CONTENT_FLAGS.contains(f)) {
-                let salted = runner.run_salted(original);
-                if salted.status == a.status && salted.stdout == a.stdout {
-                    flags.retain(|f| !CONTENT_FLAGS.contains(f));
-                    flags.push("contenido_irrelevante");
-                }
-            }
-            // M16: la salida puede depender del limite de pila de V8 y no del
-            // programa (1000 funciones anidadas, una recursion que atrapa el
-            // RangeError y devuelve cuantos frames entraron). Si A con el doble de
-            // pila da otra salida, la divergencia depende de la profundidad del
-            // motor. DESVIO de la propuesta: se prueba ante toda divergencia
-            // confirmada, no solo si la salida dice "RangeError" (corpus-invocar/37
-            // lo atrapa y no lo imprime). Cuesta una ejecucion por divergencia.
-            // b1-b: notas de los re-chequeos inconclusos (van a meta.txt).
-            let mut notes: Vec<String> = Vec::new();
-            // R1-H13/H14: la nota de la pasada (analisis con SWC, pasada de bloques).
-            if let Some(n) = &stats.nota_pasada {
-                notes.push(n.clone());
-            }
-            let deep = runner.run_with_args(original, &[runner::DEEP_STACK]);
-            // b1-b (R2-H02): solo un M16 concluyente pone el flag (depth_recheck).
-            match depth_recheck(&a, &b, &deep) {
-                None => {}
-                Some(recheck::Recheck::Explica) => flags.push("profundidad"),
-                Some(r) => apply_recheck(&mut flags, &mut notes, "profundidad", ("profundidad_irrelevante", "profundidad_inconcluso"), r),
-            }
-            let flags_b: Vec<&str> = b.flags.iter().map(String::as_str).collect();
-            if names_cfg.is_some_and(|c| names_visible(original, &a.stdout) && names_only(runner, c, original, &a)) {
-                flags.push("nombres");
-            }
-            if flags.contains(&"extends") {
-                if let Some(rc) = ctx.oxc_recheck {
-                    let r = extends_matters(runner, rc, original, &a, &b);
-                    apply_recheck(&mut flags, &mut notes, "extends", ("extends_irrelevante", "extends_inconcluso"), r);
-                }
-            }
-            // Pendiente del fuego: `global_conocido` y `with` tambien se
-            // re-chequean (recheck.rs), como `extends`. Solo oxc los clasifica.
-            if let Some(rc) = ctx.oxc_recheck {
-                if flags.contains(&"global_conocido") {
-                    let r = recheck::globals_matter(runner, rc.1, original, minified, &a, &b);
-                    apply_recheck(
-                        &mut flags,
-                        &mut notes,
-                        "global_conocido",
-                        ("global_conocido_irrelevante", "global_conocido_inconcluso"),
-                        r,
-                    );
-                }
-                if flags.contains(&"with") {
-                    let r = recheck::with_matters(runner, rc, original, &a, &b);
-                    apply_recheck(&mut flags, &mut notes, "with", ("with_irrelevante", "with_inconcluso"), r);
-                }
-            }
-            let mut why = ctx.known.classify(rel, &flags);
-            if let (None, Some(preset)) = (&why, ctx.strict_recheck) {
-                match sloppy_only(runner, preset, original, &a, &b) {
-                    Ok(true) => {
-                        flags.push("solo_sloppy");
-                        why = Some("oxc: solo sloppy (no soportado); con \"use strict\" la divergencia desaparece".into());
-                    }
-                    Ok(false) => {}
-                    Err(nota) => notes.push(nota),
-                }
-            }
-            // b1-b (R1-H03): un minificado que node no acepta nunca es asuncion:
-            // ninguna permite que el minifier produzca codigo invalido. Se
-            // clasifica sin flags (queda el backlog/ruta de SWC, que no son
-            // asunciones). Solo se paga `node --check` si iba a known/.
-            if why.is_some() && !runner.node_accepts(minified) && runner.node_accepts(original) {
-                let sin_flags = ctx.known.classify(rel, &[]);
-                if sin_flags.is_none() {
-                    flags.push("minificado_invalido");
-                    notes.push("node --check rechaza el minificado (y acepta el original): ninguna asuncion lo explica".into());
-                }
-                why = sin_flags;
-            }
-            // Una conocida que cambia de sintoma deja de estar cubierta.
-            let drift = why.as_ref().and_then(|w| {
-                let h = oracle::symptom(kind, &a, &b);
-                ctx.known
-                    .record_symptom(rel, h)
-                    .err()
-                    .map(|prev| format!("conocida ({w}) con sintoma nuevo: antes {prev:016x}, ahora {h:016x}"))
-            });
-            if drift.is_some() {
-                why = None;
+            // 7d: la decision div/ o known/ (y por que), con su traza (clasificar.rs).
+            let c = clasificar::clasificar(
+                ctx,
+                runner,
+                rel,
+                original,
+                minified,
+                &a,
+                &b,
+                kind,
+                static_flags,
+                names_cfg,
+                stats.nota_pasada.as_deref(),
+            );
+            if c.drift {
                 stats.known_drift += 1;
             }
-            // b1-b: el drift va primero (como antes, cuando pisaba la nota de sloppy).
-            if let Some(d) = &drift {
-                notes.insert(0, d.clone());
-            }
-            let nota = (!notes.is_empty()).then(|| notes.join(" | "));
+            let flags_b: Vec<&str> = b.flags.iter().map(String::as_str).collect();
+            let clasificar::Clasificacion { flags, why, nota, traza, .. } = c;
             if why.is_some() {
                 stats.known += 1;
             } else {
@@ -1698,6 +1460,7 @@ fn compare_and_report(
                 &flags,
                 &flags_b,
                 if a_cached { "hit (confirmado con una corrida fresca)" } else { "miss" },
+                &traza.texto(),
             );
             true
         }
@@ -2013,19 +1776,6 @@ fn print_hint(out: &Path, stats: &Stats) {
 
 #[cfg(test)]
 mod tests {
-    use super::names_visible;
-
-    #[test]
-    fn nombres_visibles_solo_si_la_salida_puede_mostrarlos() {
-        assert!(names_visible("console.log(f.name);", ""));
-        assert!(names_visible("", "Foo { x: 7 }"));
-        assert!(names_visible("", "A {} A {}"));
-        // 12188: nada de nombres a la vista.
-        assert!(!names_visible("a[index++]=1;", "member result 1 1"));
-        assert!(!names_visible("o.names;", "x = { a: 1 }"));
-        assert!(!names_visible("", "Map(1) { 'a' => 1 }"));
-    }
-
     #[test]
     fn la_celda_incluye_el_backend() {
         let cli = |args: &[&str]| super::Cli::parse(args.iter().map(|s| s.to_string()).collect()).unwrap();
@@ -2045,7 +1795,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
         let reporter = oracle::Reporter::new(&d, "test".into(), runner::PRELOAD);
-        let known = known::Known::load(&d, &d, 0);
+        let known = known::Known::load(&d, &d, 0, super::backend::Minifier::Swc);
         let cache = cache::CacheA::new(None, &[]);
         let triage = triage::Triage::load(&d);
         let ctx = Ctx {
@@ -2053,8 +1803,7 @@ mod tests {
             known: &known,
             cache: &cache,
             triage: &triage,
-            strict_recheck: None,
-            oxc_recheck: None,
+            medido: None,
         };
         let preload = runner::Preload::write_tagged("identico").unwrap();
         let r = runner::Runner::new(&preload, 999, std::time::Duration::from_secs(5));
@@ -2106,10 +1855,10 @@ mod tests {
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
         let reporter = oracle::Reporter::new(&d, "test".into(), runner::PRELOAD);
-        let known = known::Known::load(&d, &d, 0).with_backend(Minifier::Oxc);
+        let known = known::Known::load(&d, &d, 0, Minifier::Oxc);
         let cache = cache::CacheA::new(None, &[]);
         let triage = triage::Triage::load(&d);
-        let ctx = Ctx { reporter: &reporter, known: &known, cache: &cache, triage: &triage, strict_recheck: None, oxc_recheck: None };
+        let ctx = Ctx { reporter: &reporter, known: &known, cache: &cache, triage: &triage, medido: None };
         let preload = runner::Preload::write_tagged("invalido").unwrap();
         let r = runner::Runner::new(&preload, 989, std::time::Duration::from_secs(20));
         // `coercion` es un flag estatico de todo el programa (05-coercion-miente).
@@ -2123,77 +1872,13 @@ mod tests {
         let meta = std::fs::read_to_string(d.join("div/invalido/meta.txt")).unwrap();
         assert!(meta.contains("known: no\n") && meta.contains("nota: node --check rechaza el minificado"), "{meta}");
         assert!(meta.contains("minificado_invalido"), "{meta}");
+        // 7d: la traza de la clasificacion, al final de meta.txt.
+        assert!(meta.contains("\nclasificacion:\n  profundidad: no aplica"), "{meta}");
+        assert!(meta.contains("\n  minificado_invalido: si (node --check rechaza el minificado y acepta el original): sin flags, ninguna\n  decision: div/\n"), "{meta}");
+        let meta = std::fs::read_to_string(d.join("known/valido/meta.txt")).unwrap();
+        assert!(meta.contains("\n  asunciones: sensor, asuncion: oxc: Coercion Methods Are Pure\n  minificado_invalido: no (node --check acepta el minificado)\n"), "{meta}");
+        assert!(meta.ends_with("  decision: known/ (sensor, asuncion: oxc: Coercion Methods Are Pure)\n"), "{meta}");
         std::fs::remove_dir_all(&d).unwrap();
-    }
-
-    /// M17: "solo sloppy" exige que el original sea estricto-valido y que la
-    /// divergencia desaparezca en estricto. Un bug real (O1) no se esconde.
-    #[test]
-    fn oxc_solo_sloppy() {
-        use super::{backend::Minifier, minify, minify::Preset, runner, sloppy_only};
-        if std::process::Command::new("node").arg("--version").output().is_err() {
-            eprintln!("sin node en PATH: test omitido");
-            return;
-        }
-        let preload = runner::Preload::write_tagged("m17").unwrap();
-        let r = runner::Runner::new(&preload, 998, std::time::Duration::from_secs(20));
-        // b1-b: A y B de verdad (oxc core_defaults), no solo la variante estricta.
-        let ab = |src: &str| {
-            let cfg = Preset::CoreDefaults.build(Minifier::Oxc, minify::SourceKind::Script);
-            let minify::Outcome::Ok { original, minified, .. } = minify::prepare(src, &cfg) else {
-                panic!("no minifica: {src}");
-            };
-            let (a, b) = (r.run(&original), r.run(&minified));
-            (original, a, b)
-        };
-        // terser/compress/dead_code/dead_code_2_should_warn (corpus completo): `g`
-        // es una funcion en bloque (Anexo B, solo sloppy). En sloppy `g()` da
-        // TypeError, en estricto ReferenceError: mismo punto, se acepta como sloppy.
-        let (o, a, b) = ab("function f(){g();x=10;throw new Error(`foo`);if(x){y();var x;function g(){}(function(){var q;function y(){}})()}}f();\n");
-        assert_eq!(a.stdout, "!dz throw TypeError\n");
-        assert_eq!(sloppy_only(&r, Preset::CoreDefaults, &o, &a, &b), Ok(true));
-        let with = "with ({}) { console.log(1); }\n";
-        assert!(sloppy_only(&r, Preset::CarrilA, with, &r.run(with), &r.run(with)).is_err());
-        let (o, a, b) = ab("const __proto__ = 0;\nconsole.log(Object.keys({ __proto__ }));\n");
-        assert_eq!(sloppy_only(&r, Preset::CoreDefaults, &o, &a, &b), Ok(false));
-        // b1-b (R1-H01, c4 10-rt-sloppy-miente): el bug de oxc (borra la IIFE con
-        // rest y default con efecto) esta en la rama sloppy. En estricto el
-        // original toma la otra rama: antes `Ok(true)` (known/), ahora inconcluso.
-        let (o, a, b) = ab("function rec(v) { console.log(v); }\nfunction f() { return this; }\nif (f() === undefined) {\n  console.log(\"estricto\");\n} else {\n  (function (...[value = rec(\"rest\")]) {})();\n}\nconsole.log(\"fin\");\n");
-        assert_eq!(a.stdout, "rest\nfin\n");
-        assert_ne!(b.stdout, a.stdout, "oxc ya no tiene el bug de 9460: buscar otro");
-        let s = sloppy_only(&r, Preset::CoreDefaults, &o, &a, &b);
-        assert!(s.as_ref().is_err_and(|n| n.contains("otro camino")), "{s:?}");
-    }
-
-    /// b1-b (R2-H02): M16 solo es concluyente si la corrida honda termina y B
-    /// difiere de A solo en lineas que dependen de la pila.
-    #[test]
-    fn profundidad_concluyente() {
-        use super::{depth_recheck, recheck::Recheck, runner::{Exec, Status}};
-        let ex = |status: Status, s: &str| Exec {
-            status,
-            stdout: s.into(),
-            stderr: String::new(),
-            flags: Vec::new(),
-            elapsed: std::time::Duration::ZERO,
-            ctl: String::new(),
-        };
-        let ok = |s: &str| ex(Status::Exited(0), s);
-        // A no depende de la pila: no hay flag.
-        assert_eq!(depth_recheck(&ok("1\nx\n"), &ok("2\nx\n"), &ok("1\nx\n")), None);
-        // Solo cambia la linea que depende de la pila: concluyente.
-        assert_eq!(depth_recheck(&ok("1200\nx\n"), &ok("1500\nx\n"), &ok("2400\nx\n")), Some(Recheck::Explica));
-        // B da lo mismo que A con mas pila (A se quedo sin pila, B no).
-        assert_eq!(depth_recheck(&ok("corto\n"), &ok("largo\n"), &ok("largo\n")), Some(Recheck::Explica));
-        // 07-profundidad-miente: ademas de la linea de la pila, B pierde otra.
-        let r = depth_recheck(&ok("playo 3\n[ '__proto__' ]\n"), &ok("playo 5\n[]\n"), &ok("hondo 1\n[ '__proto__' ]\n"));
-        assert!(matches!(r, Some(Recheck::Inconcluso(_))), "{r:?}");
-        // R2-H02: la corrida honda en Timeout no es evidencia de profundidad.
-        let r = depth_recheck(&ok("1\n"), &ok("2\n"), &ex(Status::Timeout, ""));
-        assert!(matches!(r, Some(Recheck::Inconcluso(ref n)) if n.contains("Timeout")), "{r:?}");
-        // Un Failed del fuzzer sigue sin opinar.
-        assert_eq!(depth_recheck(&ok("1\n"), &ok("2\n"), &ex(Status::Failed("x".into()), "")), None);
     }
 
     /// M31 (a): si invocar no termina (cuelgue, exit propio), la observacion se
@@ -2210,10 +1895,10 @@ mod tests {
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
         let reporter = oracle::Reporter::new(&d, "test".into(), runner::PRELOAD);
-        let known = known::Known::load(&d, &d, 0);
+        let known = known::Known::load(&d, &d, 0, super::backend::Minifier::Swc);
         let cache = cache::CacheA::new(None, &[]);
         let triage = triage::Triage::load(&d);
-        let ctx = Ctx { reporter: &reporter, known: &known, cache: &cache, triage: &triage, strict_recheck: None, oxc_recheck: None };
+        let ctx = Ctx { reporter: &reporter, known: &known, cache: &cache, triage: &triage, medido: None };
         let cli = Cli::parse(["c", "--invocar", "--no-cache"].iter().map(|s| s.to_string()).collect()).unwrap();
         let cfg = minify::Preset::CarrilA.build(Minifier::Swc, minify::SourceKind::Script);
         let preload = runner::Preload::write_tagged("m31a").unwrap();
@@ -2291,10 +1976,10 @@ mod tests {
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
         let reporter = oracle::Reporter::new(&d, "test".into(), runner::PRELOAD);
-        let known = known::Known::load(&d, &d, 0);
+        let known = known::Known::load(&d, &d, 0, super::backend::Minifier::Swc);
         let cache = cache::CacheA::new(None, &[]);
         let triage = triage::Triage::load(&d);
-        let ctx = Ctx { reporter: &reporter, known: &known, cache: &cache, triage: &triage, strict_recheck: None, oxc_recheck: None };
+        let ctx = Ctx { reporter: &reporter, known: &known, cache: &cache, triage: &triage, medido: None };
         let cli = Cli::parse(["c", "--no-cache"].iter().map(|s| s.to_string()).collect()).unwrap();
         let cfg = minify::Config::from_backend(Box::new(Rompe));
         let preload = runner::Preload::write_tagged("h14").unwrap();
@@ -2348,13 +2033,13 @@ mod tests {
                 let preload = runner::Preload::write_tagged("h03").unwrap();
                 let cache = cache::CacheA::new(None, &[]);
                 let triage = triage::Triage::load(&d);
-                let known = known::Known::load(&d, &d, 0);
+                let known = known::Known::load(&d, &d, 0, super::backend::Minifier::Swc);
                 for (m, minifier) in [("swc", Minifier::Swc), ("oxc", Minifier::Oxc)] {
                     for (k, kind) in [("a", minify::SourceKind::Script), ("b", minify::SourceKind::Module)] {
                         let out = d.join(format!("out-{m}-{k}"));
                         std::fs::create_dir_all(&out).unwrap();
                         let reporter = oracle::Reporter::new(&out, "test".into(), runner::PRELOAD).with_kind(kind);
-                        let ctx = Ctx { reporter: &reporter, known: &known, cache: &cache, triage: &triage, strict_recheck: None, oxc_recheck: None };
+                        let ctx = Ctx { reporter: &reporter, known: &known, cache: &cache, triage: &triage, medido: None };
                         let cli = Cli::parse(
                             [corpus.to_str().unwrap(), "--minifier", m, "--carril", k, "--no-cache"].iter().map(|s| s.to_string()).collect(),
                         )
@@ -2397,12 +2082,12 @@ mod tests {
         let preload = runner::Preload::write_tagged("a6").unwrap();
         let cache = cache::CacheA::new(None, &[]);
         let triage = triage::Triage::load(&d);
-        let known = known::Known::load(&d, &d, 0);
+        let known = known::Known::load(&d, &d, 0, super::backend::Minifier::Swc);
         for (m, minifier) in [("swc", Minifier::Swc), ("oxc", Minifier::Oxc)] {
             let out = d.join(format!("out-{m}"));
             std::fs::create_dir_all(&out).unwrap();
             let reporter = oracle::Reporter::new(&out, "test".into(), runner::PRELOAD);
-            let ctx = Ctx { reporter: &reporter, known: &known, cache: &cache, triage: &triage, strict_recheck: None, oxc_recheck: None };
+            let ctx = Ctx { reporter: &reporter, known: &known, cache: &cache, triage: &triage, medido: None };
             let cli = Cli::parse([corpus.to_str().unwrap(), "--minifier", m, "--no-cache", "--mutaciones", "1"].iter().map(|s| s.to_string()).collect()).unwrap();
             let cfg = minify::Preset::CarrilA.build(minifier, minify::SourceKind::Script);
             let r = runner::Runner::new(&preload, 993, std::time::Duration::from_secs(10));
@@ -2443,10 +2128,10 @@ mod tests {
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
         let reporter = oracle::Reporter::new(&d, "test".into(), runner::PRELOAD).with_kind(minify::SourceKind::Module);
-        let known = known::Known::load(&d, &d, 0);
+        let known = known::Known::load(&d, &d, 0, super::backend::Minifier::Swc);
         let cache = cache::CacheA::new(None, &[]);
         let triage = triage::Triage::load(&d);
-        let ctx = Ctx { reporter: &reporter, known: &known, cache: &cache, triage: &triage, strict_recheck: None, oxc_recheck: None };
+        let ctx = Ctx { reporter: &reporter, known: &known, cache: &cache, triage: &triage, medido: None };
         let cfg = minify::Preset::CoreDefaults.build(Minifier::Oxc, minify::SourceKind::Module);
         let preload = runner::Preload::write_tagged("h01").unwrap();
         let r = runner::Runner::new(&preload, 991, std::time::Duration::from_secs(10)).with_kind(minify::SourceKind::Module);

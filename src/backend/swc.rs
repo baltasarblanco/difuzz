@@ -22,9 +22,51 @@ use swc_ecma_transforms_base::{
     resolver,
 };
 
-use super::Backend;
+use super::{Backend, Backlog, Politica};
 use crate::checks::{Analisis, Parseo};
 use crate::minify::{Outcome, SourceKind};
+
+/// 7a: lo que difuzz sabe de SWC (antes en known.rs). Sus asunciones son las
+/// de AGENTS.md del minifier; su backlog, tests/TODO.txt y tests/postponed.txt
+/// del corpus. Sin re-chequeos de flags estaticos ni de sloppy.
+pub const POLITICA: Politica = Politica {
+    abreviatura: "swc",
+    razones: FLAG_REASONS,
+    rutas: ASSUMPTIONS,
+    backlog: Some(Backlog {
+        listas: &["TODO.txt", "postponed.txt"],
+        prefijo: "terser/compress/",
+        razon: "backlog de SWC (tests/TODO.txt o tests/postponed.txt)",
+    }),
+    rechequeos: &[],
+    solo_sloppy: None,
+    chequeos_propios: true,
+};
+
+/// (flag, asuncion que viola). Flags de preload.js y de checks.rs.
+const FLAG_REASONS: &[(&str, &str)] = &[
+    ("fn_tostring", "no depender de Function.prototype.toString()"),
+    ("stack", "no depender de Error.prototype.stack"),
+    ("proxy", "acceso a propiedades sin efectos (Proxy)"),
+    ("builtins", "built-ins no pisados"),
+    ("tdz", "TDZ no se preserva"),
+    ("callee", "sin arguments.callee/.caller ni Function.prototype.caller"),
+    ("redefine_global", "undefined/NaN/Infinity no se redefinen"),
+    ("coercion", "toString/valueOf (helpers de coercion) sin efectos"),
+    ("nombres", "core_defaults no preserva nombres de funciones/clases (keep_* apagado)"),
+    // M16 (main.rs): no es asuncion del minifier, es el motor.
+    ("profundidad", "difuzz: limite de pila del motor (V8), no del programa"),
+];
+
+/// (prefijo de ruta relativa al corpus, asuncion que el caso viola). Solo lo que
+/// el sensor no puede ver: 2719 arma `"call" + "er"` en runtime, y V8 le da a
+/// cada funcion sloppy su propio `caller` no configurable (no hay donde engancharse).
+const ASSUMPTIONS: &[(&str, &str)] = &[
+    (
+        "terser/compress/issue_2719/",
+        "asuncion: no se usa Function.prototype.caller",
+    ),
+];
 
 pub struct Swc {
     pub minify: MinifyOptions,

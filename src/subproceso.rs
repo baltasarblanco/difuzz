@@ -351,11 +351,12 @@ pub fn oraculo(minifier: Minifier, preset: Preset, kind: SourceKind, keep_names:
 /// R1-H05: lo que imprime `difuzz --preparar --info`. El padre exige la misma
 /// linea con `debug_assertions=off`: mismo protocolo y mismos minifiers.
 pub fn info(debug_assertions: bool) -> String {
+    // 7a: las versiones de todos los backends de produccion, en su orden.
+    let versiones: Vec<&str> = Minifier::TODOS.iter().map(|m| m.version()).collect();
     format!(
-        "{SALUDO}; difuzz {}; {}; {}; debug_assertions={}",
+        "{SALUDO}; difuzz {}; {}; debug_assertions={}",
         env!("CARGO_PKG_VERSION"),
-        Minifier::Swc.version(),
-        Minifier::Oxc.version(),
+        versiones.join("; "),
         if debug_assertions { "on" } else { "off" }
     )
 }
@@ -768,12 +769,14 @@ pub fn serve(args: &[String]) -> i32 {
 }
 
 fn serve_con_pila(args: &[String], pila: usize, entrada: impl BufRead + Send, salida: impl Write + Send) -> i32 {
-    let (mut minifier, mut preset, mut kind, mut keep) = (Minifier::Swc, Preset::CarrilA, SourceKind::Script, false);
+    // 7b: el backend no tiene default (antes `Swc` si faltaba): el padre
+    // siempre lo pasa (args_config).
+    let (mut minifier, mut preset, mut kind, mut keep) = (None, Preset::CarrilA, SourceKind::Script, false);
     let mut i = 0;
     while i < args.len() {
         let v = args.get(i + 1).map(String::as_str).unwrap_or_default();
         let ok = match args[i].as_str() {
-            "--minifier" => Minifier::parse(v).map(|m| minifier = m).is_some(),
+            "--minifier" => Minifier::parse(v).map(|m| minifier = Some(m)).is_some(),
             "--config" => Preset::parse(v).map(|p| preset = p).is_some(),
             "--carril" => SourceKind::parse(v).map(|k| kind = k).is_some(),
             "--keep-names" => {
@@ -789,6 +792,10 @@ fn serve_con_pila(args: &[String], pila: usize, entrada: impl BufRead + Send, sa
         }
         i += 2;
     }
+    let Some(minifier) = minifier else {
+        eprintln!("--preparar: falta --minifier");
+        return 2;
+    };
     // Misma pila que un worker (M1): un fuente que pasa en proceso pasa aca.
     let r = std::thread::scope(|s| {
         std::thread::Builder::new()

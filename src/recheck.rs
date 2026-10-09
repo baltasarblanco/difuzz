@@ -1,5 +1,6 @@
-//! Re-chequeo de los flags estaticos de oxc `with` y `global_conocido`
-//! (pendiente del fuego). Como `extends` (main::extends_matters): un flag
+//! Re-chequeo de los flags estaticos `with` y `global_conocido` (M13, los
+//! pide la politica de oxc: backend::Politica::rechequeos; pendiente del
+//! fuego). Como `extends` (clasificar::extends_matters): un flag
 //! estatico mira todo el programa, no la divergencia. Antes iban a `known/` sin
 //! verificar que la divergencia viniera de eso.
 //!
@@ -82,7 +83,7 @@ pub fn veredicto(a: &runner::Exec, b: &runner::Exec, a2: &runner::Exec, b2: &run
 /// oxc reescribe `undefined` y `0/0` suponiendo que no hay scope; dentro del
 /// `with` eso da otros valores, ni los de A ni los de A'). Un bug en una linea
 /// que la asuncion no toca, o una linea de mas o de menos, no pasa.
-/// Tambien lo usa M16 (main::depth_recheck), con A' = A con mas pila.
+/// Tambien lo usa M16 (clasificar::depth_recheck), con A' = A con mas pila.
 pub fn localizada(a: &runner::Exec, b: &runner::Exec, a2: &runner::Exec) -> bool {
     let lines = |e: &runner::Exec| oracle::normalize_names(&e.stdout).lines().map(String::from).collect::<Vec<_>>();
     let (la, lb, l2) = (lines(a), lines(b), lines(a2));
@@ -143,12 +144,12 @@ pub fn globals_matter(
 /// el camino se sostiene (`veredicto`).
 pub fn with_matters(
     r: &runner::Runner,
-    recheck: (minify::Preset, SourceKind),
+    recheck: (backend::Minifier, minify::Preset, SourceKind),
     original: &str,
     a: &runner::Exec,
     b: &runner::Exec,
 ) -> Recheck {
-    let (preset, kind) = recheck;
+    let (minifier, preset, kind) = recheck;
     let neutral = match crate::analisis::sin_with(original, kind) {
         Ok(n) => n,
         Err(e) => {
@@ -159,7 +160,7 @@ pub fn with_matters(
     let Some(neutral) = neutral else {
         return Recheck::Inconcluso("no pude neutralizar el `with` (no parsea con SWC o no lo encuentro)".into());
     };
-    let cfg = preset.build(backend::Minifier::Oxc, kind);
+    let cfg = preset.build(minifier, kind);
     let minify::Outcome::Ok { original: o2, minified: m2, .. } = minify::prepare(&neutral, &cfg) else {
         return Recheck::Inconcluso("no pude minificar la variante sin `with`".into());
     };
@@ -223,6 +224,7 @@ fn emit(cm: Lrc<SourceMap>, program: &Program) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::{globals_matter, neutralize_with, veredicto, with_matters, Recheck};
+    use crate::backend::Minifier;
     use crate::minify::{Preset, SourceKind};
     use crate::runner::{Exec, Preload, Runner, Status, THROW_EXIT};
 
@@ -307,16 +309,16 @@ mod tests {
         // (no aplica: el minificado se re-hace con oxc, que no diverge aca).
         let w = "var o = { x: 1 };\nwith (o) { console.log(typeof o); }\n";
         let aw = r.run(w);
-        assert_eq!(with_matters(&r, (Preset::CoreDefaults, SourceKind::Script), w, &aw, &aw), Recheck::Explica);
+        assert_eq!(with_matters(&r, (Minifier::Oxc, Preset::CoreDefaults, SourceKind::Script), w, &aw, &aw), Recheck::Explica);
         // O4 (oxc #24331: `delete (0/0)` -> `delete NaN`) con un `with` al lado que
         // no tiene nada que ver: sin el scope la divergencia sigue, el flag se va.
         let o4 = "var o = {};\nwith (o) { console.log(1); }\nconsole.log(delete (0 / 0));\n";
         let a4 = r.run(o4);
-        assert_eq!(with_matters(&r, (Preset::CoreDefaults, SourceKind::Script), o4, &a4, &a4), Recheck::NoExplica);
+        assert_eq!(with_matters(&r, (Minifier::Oxc, Preset::CoreDefaults, SourceKind::Script), o4, &a4, &a4), Recheck::NoExplica);
         // 02-with-positivo (c4): sin el scope el original devuelve otra cosa, y el
         // minificado ya se comporta asi: la asuncion explica la divergencia.
         let p = "function f() { var a = 1; with ({ a: 2 }) { return a; } }\nconsole.log(f());\n";
         let (ap, bp) = (r.run(p), r.run("console.log(1);\n"));
-        assert_eq!(with_matters(&r, (Preset::CoreDefaults, SourceKind::Script), p, &ap, &bp), Recheck::Explica);
+        assert_eq!(with_matters(&r, (Minifier::Oxc, Preset::CoreDefaults, SourceKind::Script), p, &ap, &bp), Recheck::Explica);
     }
 }

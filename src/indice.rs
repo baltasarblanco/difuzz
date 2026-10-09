@@ -158,7 +158,8 @@ struct Cell<'a> {
 impl<'a> Cell<'a> {
     fn parse(cell: &'a str) -> Cell<'a> {
         let mut parts: Vec<&str> = cell.split('+').collect();
-        let backend = if matches!(parts.first(), Some(&"swc") | Some(&"oxc")) { parts.remove(0) } else { "" };
+        // 7b: el backend lo reconoce backend::Minifier (antes "swc" | "oxc" a mano).
+        let backend = if parts.first().is_some_and(|p| crate::backend::Minifier::parse(p).is_some()) { parts.remove(0) } else { "" };
         let mut it = parts.into_iter();
         let preset = it.next().unwrap_or("");
         let forma = it.next().unwrap_or("");
@@ -200,7 +201,9 @@ impl<'a> Cell<'a> {
             "tal_cual" => "tc",
             other => other,
         };
-        let mut s = if self.backend.is_empty() { String::new() } else { format!("{} ", self.backend) };
+        // 7b: la abreviatura la declara el backend (backend::Politica).
+        let ab = crate::backend::Minifier::parse(self.backend).map_or(self.backend, |m| m.politica().abreviatura);
+        let mut s = if ab.is_empty() { String::new() } else { format!("{ab} ") };
         s.push_str(p);
         if !f.is_empty() {
             s.push('.');
@@ -394,5 +397,27 @@ mod tests {
         let e = cruce(&vacio).unwrap_err().to_string();
         assert!(e.ends_with("corridas sin terminar: oxc+carril_a+tal_cual (interrumpida)"), "{e}");
         std::fs::remove_dir_all(&vacio).unwrap();
+    }
+
+    /// 7b (aceptacion): un backend nuevo (el falso `identidad`) sale en `--cruce`
+    /// con la abreviatura que declara su politica (`id`), no partido como si
+    /// el backend fuera el preset (R1: `identidad.carril_a+tal_cual`).
+    #[test]
+    fn cruce_con_backend_nuevo() {
+        let d = std::env::temp_dir().join(format!("difuzz-test-indice-id-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        let id = Index::create(&d, "identidad+carril_a+tal_cual").unwrap();
+        let o = Index::create(&d, "oxc+carril_a+tal_cual").unwrap();
+        id.record("caso_x", "div", "Stdout", 1);
+        o.record("caso_x", "div", "Stdout", 1);
+        id.commit().unwrap();
+        o.commit().unwrap();
+        drop((id, o));
+        let t = cruce(&d).unwrap();
+        std::fs::remove_dir_all(&d).unwrap();
+        let cab: Vec<&str> = t.lines().nth(1).unwrap().split_whitespace().collect();
+        assert_eq!(cab, ["id", "A.tc", "oxc", "A.tc", "caso"], "{t}");
+        assert_eq!(Cell::parse("identidad+carril_a+tal_cual").backend, "identidad");
+        assert!(t.contains("identidad+carril_a+tal_cual: div=1"), "{t}");
     }
 }

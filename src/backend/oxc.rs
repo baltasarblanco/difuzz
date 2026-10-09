@@ -23,8 +23,50 @@ use oxc_minifier::{
 use oxc_parser::Parser;
 pub use oxc_span::SourceType;
 
-use super::Backend;
+use super::{Backend, Politica, Rechequeo};
 use crate::minify::{Outcome, Preset, SourceKind};
+
+/// 7a: lo que difuzz sabe de oxc (antes en known.rs, main.rs y recheck.rs).
+/// Sin backlog ni asunciones por ruta (las de terser son de SWC). Los flags
+/// estaticos `extends`, `global_conocido` y `with` (M13) se re-chequean antes
+/// de clasificar, y en el carril A una divergencia sin asuncion se prueba en
+/// estricto (M17: oxc no soporta sloppy, D1 del CLAUDE.md).
+pub const POLITICA: Politica = Politica {
+    abreviatura: "oxc",
+    razones: FLAG_REASONS_OXC,
+    rutas: &[],
+    backlog: None,
+    rechequeos: &[Rechequeo::Extends, Rechequeo::GlobalConocido, Rechequeo::With],
+    solo_sloppy: Some("oxc: solo sloppy (no soportado); con \"use strict\" la divergencia desaparece"),
+    chequeos_propios: false,
+};
+
+/// Las asunciones de oxc, contra crates/oxc_minifier/docs/ASSUMPTIONS.md (tag
+/// crates_v0.153.0). Asunciones de oxc SIN flag todavia (sus divergencias caen
+/// en div/): `document.all`, longitud maxima de Array/String/TypedArray,
+/// coercion que lanza con Symbol (`Math.abs(Symbol())`), `var` de un eval
+/// directo usada afuera, `arguments` global, y escrituras de propiedades sobre
+/// bindings no usados (setters en prototipos: solo cubierto si el preload ve
+/// `builtins`). M13 agrego `with`, `global_conocido` y `extends`.
+/// Flags de SWC que oxc NO declara como asuncion y por eso no van aca:
+/// `proxy` (property_read_side_effects es All por defecto), `callee`,
+/// `redefine_global`.
+const FLAG_REASONS_OXC: &[(&str, &str)] = &[
+    ("fn_tostring", "oxc: Function.prototype.toString is not relied on"),
+    ("builtins", "oxc: No Monkey-Patching Built-ins"),
+    ("tdz", "oxc: No TDZ Violation"),
+    ("coercion", "oxc: Coercion Methods Are Pure"),
+    ("nombres", "oxc: No Reliance on Function.prototype.name (keep_names apagado en core_defaults)"),
+    // M13 (checks.rs y preload.js).
+    ("with", "oxc: No `with` Statement"),
+    ("global_conocido", "oxc: Known globals exist and are side-effect-free to access (no existe en node)"),
+    ("extends", "oxc: No side effects from extending a class"),
+    // M16 (main.rs): no es asuncion del minifier, es el motor.
+    ("profundidad", "difuzz: limite de pila del motor (V8), no del programa"),
+    // No es asuncion documentada de oxc: el contenido de .stack (posiciones,
+    // nombres) cambia con cualquier minificacion. Decision de difuzz, VERIFICAR.
+    ("stack", "difuzz: el contenido de Error.prototype.stack cambia al minificar (oxc no lo documenta)"),
+];
 
 pub struct Oxc {
     options: MinifierOptions,

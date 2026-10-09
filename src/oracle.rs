@@ -280,6 +280,7 @@ impl Reporter {
         flags_a: &[&str],
         flags_b: &[&str],
         a_origin: &str,
+        traza: &str,
     ) {
         let list = |f: &[&str]| if f.is_empty() { "-".to_string() } else { f.join(",") };
         let dest = if known.is_some() { "known" } else { "div" };
@@ -339,6 +340,9 @@ impl Reporter {
 analisis_de_difuzz_fallo:
 {}
 ", notas.join("\n")) };
+        // 7d: la traza de la clasificacion (clasificar.rs), al final: lo de
+        // arriba queda igual que antes.
+        let meta = if traza.is_empty() { meta } else { format!("{meta}\n{traza}") };
         write_all(
             &dir,
             &[
@@ -618,9 +622,9 @@ mod tests {
             ctl: ctl.into(),
         };
         let (a, b) = (ex("1\n", ""), ex("!dz throw TypeError\n", "throw TypeError\nexc TypeError: x\\n    at y\n"));
-        r.divergence(std::path::Path::new("c/input.js"), "o", "m", &a, &b, Kind::ThrowNew, false, None, None, &[], &[], "miss");
+        r.divergence(std::path::Path::new("c/input.js"), "o", "m", &a, &b, Kind::ThrowNew, false, None, None, &[], &[], "miss", "clasificacion:\n  decision: div/\n");
         let meta = std::fs::read_to_string(d.join("div/c/meta.txt")).unwrap();
-        for want in ["a_cache: miss\n", "node: v0\n", "backend: x 1\n", "debug_assertions: ", "repro_original: cd /", "--no-warnings --require /", "original.cjs\n", "repro_minificado: cd /"] {
+        for want in ["a_cache: miss\n", "node: v0\n", "backend: x 1\n", "debug_assertions: ", "repro_original: cd /", "--no-warnings --require /", "original.cjs\n", "repro_minificado: cd /", "\nclasificacion:\n  decision: div/\n"] {
             assert!(meta.contains(want), "falta {want:?} en\n{meta}");
         }
         assert_eq!(std::fs::read_to_string(d.join("div/c/b.exc")).unwrap(), "TypeError: x\n    at y");

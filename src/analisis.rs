@@ -170,7 +170,9 @@ pub struct Analizado {
 }
 
 pub fn envolver(inner: Box<dyn Backend>, minifier: Minifier, kind: SourceKind, remoto: bool) -> Box<dyn Backend> {
-    let checks = (remoto && minifier == Minifier::Oxc).then_some(kind);
+    // 7a: un backend que no hace los chequeos sobre su propio AST (oxc) los
+    // pide aca cuando minifica en un hijo (backend::Politica::chequeos_propios).
+    let checks = (remoto && !minifier.politica().chequeos_propios).then_some(kind);
     Box::new(Analizado { inner, checks })
 }
 
