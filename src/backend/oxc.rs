@@ -39,6 +39,8 @@ pub const POLITICA: Politica = Politica {
     rechequeos: &[Rechequeo::Extends, Rechequeo::GlobalConocido, Rechequeo::With, Rechequeo::Violaciones],
     solo_sloppy: Some("oxc: solo sloppy (no soportado); con \"use strict\" la divergencia desaparece"),
     chequeos_propios: false,
+    // M13: `with`, `global_conocido` y `extends` (los re-chequea `rechequeos`).
+    flags_estaticos: Some(crate::checks::static_flags_oxc),
 };
 
 /// Las asunciones de oxc, contra crates/oxc_minifier/docs/ASSUMPTIONS.md (tag
@@ -200,7 +202,7 @@ impl Backend for Oxc {
         let (static_flags, dead_writes, analisis) = if crate::analisis::checks_afuera() {
             (Vec::new(), (0, 0), Default::default())
         } else {
-            crate::analisis::atrapar(|| super::swc::checks_on_text(src, &original, &minified, kind)).unwrap_or_else(|e| {
+            crate::analisis::atrapar(|| super::swc::checks_on_text(src, &original, &minified, kind, super::Minifier::Oxc)).unwrap_or_else(|e| {
                 crate::analisis::fallo_en_backend(e);
                 (vec![crate::analisis::FALLO_ANALISIS], (0, 0), crate::checks::Analisis::PERDIDO)
             })

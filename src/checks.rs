@@ -14,7 +14,8 @@ use swc_ecma_visit::{Visit, VisitWith};
 /// `arguments.callee`, `.caller`, bindings llamados `undefined`, `NaN` o
 /// `Infinity`, y helpers de coercion propios (`valueOf`, `toString`,
 /// `Symbol.toPrimitive`), que AGENTS.md asume sin efectos. Se suman a los flags
-/// del preload (known.rs).
+/// del preload (known.rs). Son de todos los backends; los propios de un backend
+/// los declara su politica (`backend::Politica::flags_estaticos`).
 pub fn static_flags(program: &Program) -> Vec<&'static str> {
     let mut v = StaticFlags::default();
     program.visit_with(&mut v);
@@ -28,8 +29,17 @@ pub fn static_flags(program: &Program) -> Vec<&'static str> {
     if v.coercion {
         out.push("coercion");
     }
-    // M13: asunciones de oxc (ASSUMPTIONS.md) que se ven en el fuente. Solo las
-    // clasifica la tabla de oxc (known.rs::FLAG_REASONS_OXC).
+    out
+}
+
+/// M13: asunciones de oxc (ASSUMPTIONS.md) que se ven en el fuente. Solo las
+/// clasifica la tabla de oxc (`backend::oxc::FLAG_REASONS_OXC`) y solo las pide
+/// su politica (`backend::oxc::POLITICA.flags_estaticos`): desde el 09-oct
+/// (deuda del bloque 3) swc no las calcula.
+pub fn static_flags_oxc(program: &Program) -> Vec<&'static str> {
+    let mut v = StaticFlags::default();
+    program.visit_with(&mut v);
+    let mut out = Vec::new();
     if v.with {
         out.push("with");
     }
@@ -560,19 +570,23 @@ mod tests {
         assert!(static_flags(&parse("x.toString(); String(y); o.valueOf();")).is_empty());
     }
 
-    /// M13: asunciones de oxc con sensor estatico.
+    /// M13: asunciones de oxc con sensor estatico (solo las pide la politica de oxc).
     #[test]
     fn flags_estaticos_de_oxc() {
-        assert_eq!(static_flags(&parse("with (o) { x; }")), ["with"]);
-        assert_eq!(static_flags(&parse("console.log(typeof window, document.title);")), ["global_conocido"]);
+        use super::static_flags_oxc;
+        assert_eq!(static_flags_oxc(&parse("with (o) { x; }")), ["with"]);
+        assert_eq!(static_flags_oxc(&parse("console.log(typeof window, document.title);")), ["global_conocido"]);
         // Declarado en el programa: no es el global.
-        assert!(static_flags(&parse("var window = {}; window.x = 1;")).is_empty());
-        assert!(static_flags(&parse("function f(document) { return document; }")).is_empty());
+        assert!(static_flags_oxc(&parse("var window = {}; window.x = 1;")).is_empty());
+        assert!(static_flags_oxc(&parse("function f(document) { return document; }")).is_empty());
         // Existe en node (o no esta en la lista de oxc): no cuenta.
-        assert!(static_flags(&parse("console.log(navigator, process, globalThis, foo);")).is_empty());
-        assert_eq!(static_flags(&parse("class A extends /x/ {}")), ["extends"]);
-        assert_eq!(static_flags(&parse("var B = class extends ([1]) {};")), ["extends"]);
-        assert!(static_flags(&parse("class A extends null {} class C extends A {}")).is_empty());
+        assert!(static_flags_oxc(&parse("console.log(navigator, process, globalThis, foo);")).is_empty());
+        assert_eq!(static_flags_oxc(&parse("class A extends /x/ {}")), ["extends"]);
+        assert_eq!(static_flags_oxc(&parse("var B = class extends ([1]) {};")), ["extends"]);
+        assert!(static_flags_oxc(&parse("class A extends null {} class C extends A {}")).is_empty());
+        // Los comunes no los dan (09-oct: swc no los calcula), ni al reves.
+        assert!(static_flags(&parse("with (o) { x; } window; class A extends 1 {}")).is_empty());
+        assert!(static_flags_oxc(&parse("arguments.callee; function g(NaN) {} var o = { valueOf() {} };")).is_empty());
         // La lista esta ordenada para binary_search.
         let t = super::NODE_MISSING_OXC_GLOBALS;
         assert!(t.windows(2).all(|w| w[0] < w[1]));

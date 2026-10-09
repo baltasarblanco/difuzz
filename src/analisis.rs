@@ -167,13 +167,15 @@ pub struct Analizado {
     inner: Box<dyn Backend>,
     /// `Some(carril)`: los chequeos estaticos se piden aca (oxc en un hijo).
     checks: Option<SourceKind>,
+    /// El backend medido: sus flags estaticos propios (`Politica::flags_estaticos`).
+    minifier: Minifier,
 }
 
 pub fn envolver(inner: Box<dyn Backend>, minifier: Minifier, kind: SourceKind, remoto: bool) -> Box<dyn Backend> {
     // 7a: un backend que no hace los chequeos sobre su propio AST (oxc) los
     // pide aca cuando minifica en un hijo (backend::Politica::chequeos_propios).
     let checks = (remoto && !minifier.politica().chequeos_propios).then_some(kind);
-    Box::new(Analizado { inner, checks })
+    Box::new(Analizado { inner, checks, minifier })
 }
 
 impl Backend for Analizado {
@@ -197,7 +199,7 @@ impl Backend for Analizado {
         if let Some(kind) = self.checks {
             // b2-int (R1-H13): el estado del analisis viene del hijo de analisis,
             // junto con los flags (operacion `checks`).
-            match checks(src, &original, &minified, kind) {
+            match checks(src, &original, &minified, kind, self.minifier) {
                 Ok((f, d, a)) => (static_flags, dead_writes, analisis) = (f, d, a),
                 Err(e) => {
                     analisis = crate::checks::Analisis::PERDIDO;
@@ -352,10 +354,11 @@ pub fn sin_violaciones(src: &str, kind: SourceKind, spec: &str) -> Result<Option
 }
 
 /// `backend::swc::checks_on_text`. b2-int (R1-H13): la cuarta parte es el
-/// estado del analisis de los tres textos (`checks::Analisis::codigo`).
+/// estado del analisis de los tres textos (`checks::Analisis::codigo`). 09-oct:
+/// el backend medido viaja por nombre (sus flags estaticos propios).
 #[allow(clippy::type_complexity)]
-pub fn checks(src: &str, original: &str, minified: &str, kind: SourceKind) -> Result<(Vec<&'static str>, (usize, usize), Analisis), String> {
-    let v = correr("checks", kind, &[src, original, minified])?.ok_or("checks sin respuesta")?;
+pub fn checks(src: &str, original: &str, minified: &str, kind: SourceKind, minifier: Minifier) -> Result<(Vec<&'static str>, (usize, usize), Analisis), String> {
+    let v = correr("checks", kind, &[src, original, minified, minifier.name()])?.ok_or("checks sin respuesta")?;
     let [f, d0, d1, a] = &v[..] else {
         return Err(format!("checks: {} partes", v.len()));
     };
@@ -400,8 +403,9 @@ fn ejecutar(op: &str, kind: SourceKind, p: &[&str]) -> Option<Vec<String>> {
         ("arguments", [src]) => crate::recheck::rename_arguments(src).map(|s| vec![s]),
         ("extends", [src]) => crate::backend::swc::neutralize_extends(src, kind).map(|s| vec![s]),
         ("violaciones", [src, spec]) => crate::recheck::neutralize_violaciones(src, kind, spec).map(|s| vec![s]),
-        ("checks", [src, o, m]) => {
-            let (f, (d0, d1), a) = crate::backend::swc::checks_on_text(src, o, m, kind);
+        ("checks", [src, o, m, minifier]) => {
+            let minifier = Minifier::parse(minifier)?;
+            let (f, (d0, d1), a) = crate::backend::swc::checks_on_text(src, o, m, kind, minifier);
             Some(vec![f.join(","), d0.to_string(), d1.to_string(), a.codigo()])
         }
         ("bloques", [src]) => crate::minify::instrument_bloques(src, kind).map(|s| vec![s]),
@@ -680,7 +684,7 @@ mod tests {
             crate::minify::instrument(src, true, k),
             crate::recheck::neutralize_with(src, k),
             crate::backend::swc::neutralize_extends(src, k),
-            crate::backend::swc::checks_on_text(src, src, src, k),
+            crate::backend::swc::checks_on_text(src, src, src, k, Minifier::Oxc),
             crate::mutate::variants_ext(src, 3, 2, 7, k).unwrap().into_iter().map(|v| (v.src, v.desc, v.extra, v.tdz_filter)).collect::<Vec<_>>(),
         );
         let pedir = || {
@@ -688,7 +692,7 @@ mod tests {
                 epilogo(src, true, k).unwrap(),
                 sin_with(src, k).unwrap(),
                 sin_extends(src, k).unwrap(),
-                checks(src, src, src, k).unwrap(),
+                checks(src, src, src, k, Minifier::Oxc).unwrap(),
                 variantes(src, 3, 2, 7, k).unwrap().unwrap().into_iter().map(|v| (v.src, v.desc, v.extra, v.tdz_filter)).collect::<Vec<_>>(),
             )
         };
@@ -707,9 +711,11 @@ mod tests {
         assert!(bloques(bl, k).unwrap().is_some_and(|e| e.ends_with("__difuzzObserve([\"b\", b]);\n")));
         assert_eq!(bloques("var a = 1;\n", k).unwrap(), None);
         let rec = "new.target;\n";
-        let (_, _, a) = checks(rec, rec, "x = {", k).unwrap();
+        let (_, _, a) = checks(rec, rec, "x = {", k, Minifier::Oxc).unwrap();
         assert_eq!(a.codigo(), "rrp");
-        assert_eq!(checks(rec, rec, "x = {", k).unwrap(), crate::backend::swc::checks_on_text(rec, rec, "x = {", k));
+        assert_eq!(checks(rec, rec, "x = {", k, Minifier::Oxc).unwrap(), crate::backend::swc::checks_on_text(rec, rec, "x = {", k, Minifier::Oxc));
+        // 09-oct: el backend cruza el pipe; swc no calcula los flags estaticos de oxc.
+        assert_eq!(checks(src, src, src, k, Minifier::Swc).unwrap().0, ["coercion"]);
         sin_hijo_de_test();
         assert!(tomar_notas().is_empty());
     }
@@ -792,7 +798,7 @@ mod tests {
         assert!(e.starts_with("panic: panic forzado del analisis (test)"), "{e}");
         forzar_panic(false);
         usar_hijo_de_test(&[("DIFUZZ_TEST_PANIC_ANALISIS", "1")]);
-        let e = checks("x;", "x;", "x;", SourceKind::Script).unwrap_err();
+        let e = checks("x;", "x;", "x;", SourceKind::Script, Minifier::Oxc).unwrap_err();
         assert!(e.starts_with("panic: panic forzado del analisis (test)") && e.contains("\nubicacion: src/analisis.rs:"), "{e}");
         sin_hijo_de_test();
         // Un panic atrapado adentro de `f` se ve por la ubicacion del hook.

@@ -118,7 +118,8 @@ fn codigo_2_uso() {
     let corpus = b.join("corpus");
     caso(&corpus, "uno", b"console.log(1);\n");
     let out = b.join("out");
-    let celda = out.join("swc+carril_a+tal_cual");
+    // La celda por defecto (B5: --minifier oxc), la que tocaria `--limit 0 --out`.
+    let celda = out.join("oxc+carril_a+tal_cual");
     std::fs::create_dir_all(celda.join("div/viejo")).unwrap();
     std::fs::write(celda.join("CORRIDA.txt"), "estado: completa\n").unwrap();
     let c = corpus.to_str().unwrap();

@@ -41,6 +41,8 @@ pub const POLITICA: Politica = Politica {
     rechequeos: &[],
     solo_sloppy: None,
     chequeos_propios: true,
+    // Los de oxc (M13) no son asunciones de SWC: no se calculan.
+    flags_estaticos: None,
 };
 
 /// (flag, asuncion que viola). Flags de preload.js y de checks.rs.
@@ -407,17 +409,26 @@ fn emit(cm: Lrc<SourceMap>, program: &Program) -> Result<String, String> {
 /// (acepta errores recuperados) y el estado de los tres vuelve en `Analisis`:
 /// main lo cuenta en las stats y lo anota en meta.txt. Un panic de SWC deja
 /// todo `Perdido`.
+///
+/// 09-oct: `minifier` es el backend medido; ademas de los flags comunes se
+/// calculan los que declara su politica (`Politica::flags_estaticos`).
 pub fn checks_on_text(
     src: &str,
     original: &str,
     minified: &str,
     kind: SourceKind,
+    minifier: super::Minifier,
 ) -> (Vec<&'static str>, (usize, usize), Analisis) {
     let perdido = Analisis { fuente: Parseo::Perdido, original: Parseo::Perdido, minificado: Parseo::Perdido };
     catch_unwind(AssertUnwindSafe(|| {
         GLOBALS.set(&Globals::new(), || {
             let (p, fuente) = parse_para_analisis(src, kind);
-            let static_flags = p.map_or_else(Vec::new, |p| crate::checks::static_flags(&p));
+            let propios = minifier.politica().flags_estaticos;
+            let static_flags = p.map_or_else(Vec::new, |p| {
+                let mut f = crate::checks::static_flags(&p);
+                f.extend(propios.map_or_else(Vec::new, |g| g(&p)));
+                f
+            });
             let dead = |text: &str| {
                 let (p, estado) = parse_para_analisis(text, kind);
                 (p.map_or(0, |p| crate::checks::dead_writes(&p)), estado)
@@ -515,19 +526,21 @@ mod tests {
     fn analisis_no_es_silencioso() {
         use super::checks_on_text;
         use crate::checks::Parseo::{Limpio, Perdido, Recuperado};
+        // `with` (abajo) es un flag estatico de oxc: solo lo calcula su politica.
+        const OXC: crate::backend::Minifier = crate::backend::Minifier::Oxc;
         // `new.target` top-level (CJS valido, SWC lo marca como recuperado).
-        let (_, _, a) = checks_on_text("new.target;\n", "new.target;\n", "x = {", SourceKind::Script);
+        let (_, _, a) = checks_on_text("new.target;\n", "new.target;\n", "x = {", SourceKind::Script, OXC);
         assert_eq!((a.fuente, a.original, a.minificado), (Recuperado, Recuperado, Perdido));
         // Anexo B como cuerpo de un `if`: los flags se calculan igual.
-        let (flags, _, a) = checks_on_text("if (x) function f() { return arguments.callee; }\n", "1;", "1;", SourceKind::Script);
+        let (flags, _, a) = checks_on_text("if (x) function f() { return arguments.callee; }\n", "1;", "1;", SourceKind::Script, OXC);
         assert_eq!((flags, a.fuente, a.original), (vec!["callee"], Recuperado, Limpio));
         // `delete x` en un modulo (estricto): el lint cuenta igual.
-        let (_, dead, a) = checks_on_text("1;", "1;", "delete x; [1][0] = 2;", SourceKind::Module);
+        let (_, dead, a) = checks_on_text("1;", "1;", "delete x; [1][0] = 2;", SourceKind::Module, OXC);
         assert_eq!((dead, a.minificado), ((0, 1), Recuperado));
         // `with` en un modulo no parsea como modulo: se analiza como script.
-        let (flags, _, a) = checks_on_text("with (o) { x; }", "1;", "1;", SourceKind::Module);
+        let (flags, _, a) = checks_on_text("with (o) { x; }", "1;", "1;", SourceKind::Module, OXC);
         assert_eq!((flags, a.fuente), (vec!["with"], Recuperado));
-        let (_, _, a) = checks_on_text("1;", "1;", "1;", SourceKind::Module);
+        let (_, _, a) = checks_on_text("1;", "1;", "1;", SourceKind::Module, OXC);
         assert!(a.limpio());
     }
 

@@ -51,7 +51,7 @@ uso: difuzz <corpus_dir> [--out DIR] [--minifier M] [--config C] [--forma F] [--
   corpus_dir     raiz con archivos input.js (p. ej. crates/swc_ecma_minifier/tests)
   --out DIR      donde guardar hallazgos, en DIR/<celda>/ (default: ./difuzz-out)
                  R1-H09: celdas distintas no se pisan; DIR/<celda>/CORRIDA.txt dice si la corrida termino
-  --minifier M   swc | oxc                          (default: swc)
+  --minifier M   swc | oxc                          (default: oxc)
   --config C     carril_a | core_defaults           (default: carril_a)
   --forma F      tal_cual | en_funcion              (default: tal_cual)
   --carril K     a (script, .cjs) | b (modulo ES, .mjs) (default: a)
@@ -1875,7 +1875,9 @@ mod tests {
     #[test]
     fn la_celda_incluye_el_backend() {
         let cli = |args: &[&str]| super::Cli::parse(args.iter().map(|s| s.to_string()).collect()).unwrap();
-        assert_eq!(cli(&["corpus"]).cell(), "swc+carril_a+tal_cual");
+        // B5 (09-oct): sin --minifier, oxc.
+        assert_eq!(cli(&["corpus"]).cell(), "oxc+carril_a+tal_cual");
+        assert_eq!(cli(&["corpus", "--minifier", "swc"]).cell(), "swc+carril_a+tal_cual");
         assert_eq!(
             cli(&["corpus", "--minifier", "oxc", "--config", "core_defaults", "--forma", "en_funcion"]).cell(),
             "oxc+core_defaults+en_funcion"
@@ -2331,10 +2333,11 @@ mod tests {
             v.extend(extra.iter().map(|s| s.to_string()));
             Cli::parse(v).unwrap()
         };
-        // Carril A (default): el nombre de siempre (backend+preset+forma).
-        assert_eq!(args(&[]).cell(), "swc+carril_a+tal_cual");
-        assert_eq!(args(&["--carril", "a", "--config", "core_defaults"]).cell(), "swc+core_defaults+tal_cual");
-        assert_eq!(args(&["--carril", "b"]).cell(), "swc+carril_a+tal_cual+carril_b");
+        // Carril A (default): el nombre de siempre (backend+preset+forma). B5: oxc por defecto.
+        assert_eq!(args(&[]).cell(), "oxc+carril_a+tal_cual");
+        assert_eq!(args(&["--carril", "a", "--config", "core_defaults"]).cell(), "oxc+core_defaults+tal_cual");
+        assert_eq!(args(&["--carril", "b"]).cell(), "oxc+carril_a+tal_cual+carril_b");
+        assert_eq!(args(&["--carril", "b", "--minifier", "swc"]).cell(), "swc+carril_a+tal_cual+carril_b");
         assert_eq!(
             args(&["--carril", "b", "--config", "core_defaults", "--forma", "en_funcion", "--minifier", "oxc"]).cell(),
             "oxc+core_defaults+en_funcion+carril_b"

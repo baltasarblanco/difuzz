@@ -1,6 +1,6 @@
 #!/bin/bash
 # Corre la matriz {carril_a, core_defaults} x {tal_cual, en_funcion} con un backend
-# (MIN=swc|oxc) y un carril (CARRIL=a|b) sobre el corpus, y cruza los div/.
+# (MIN=swc|oxc, default oxc: B5) y un carril (CARRIL=a|b) sobre el corpus, y cruza los div/.
 # Las celdas comparten la cache de A ($OUT/cache-a) y el indice ($OUT/indice);
 # el cruce lo imprime `difuzz --cruce`, sin volver a correr nada.
 # M7: sin `cd` ni rutas fijas; no borra el directorio de la celda (el reporter ya
@@ -13,7 +13,7 @@
 set -u
 BIN=${BIN:-$(dirname "$0")/../target/release/difuzz}
 CORPUS=${CORPUS:-$HOME/swc-main/crates/swc_ecma_minifier/tests}
-MIN=${MIN:-swc}
+MIN=${MIN:-oxc}
 CARRIL=${CARRIL:-a}
 OUT=${1:-out-matriz}
 CELLS=(core_defaults+en_funcion core_defaults+tal_cual carril_a+en_funcion carril_a+tal_cual)

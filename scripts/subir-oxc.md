@@ -77,7 +77,8 @@ Por celda, cada caso cuyo estado cambia. Estado = destinos del caso (`div:<kind>
 - El arnes ademas cuenta casos en el mismo destino con otro minificado: es lo esperable al cambiar
   de version y no se triagea uno por uno.
 - Las celdas de swc son control: cambiar oxc no deberia moverlas. Si se mueven, es carga o algo de
-  difuzz que depende de oxc (los flags estaticos se calculan con codigo comun).
+  difuzz que depende de oxc. (Hasta el 09-oct los flags estaticos de oxc, M13, se calculaban tambien
+  para swc; desde entonces los pide solo la politica de oxc, `Politica::flags_estaticos`.)
 
 ## Lo que el script avisa y NO arregla
 

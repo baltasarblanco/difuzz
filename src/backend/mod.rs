@@ -52,6 +52,11 @@ pub struct Politica {
     /// AST de SWC (`true`, swc). `false`: los textos se re-parsean, y con el
     /// minificador en un hijo los pide el hijo de analisis (analisis.rs).
     pub chequeos_propios: bool,
+    /// Flags estaticos de las asunciones de ESTE backend, ademas de los comunes
+    /// de `checks::static_flags` (oxc: `checks::static_flags_oxc`, M13). `None`:
+    /// ninguno, y no se calculan (09-oct: antes los de oxc se calculaban para
+    /// todos los backends; deuda del bloque 3).
+    pub flags_estaticos: Option<fn(&swc_ecma_ast::Program) -> Vec<&'static str>>,
 }
 
 /// 7b: el backlog de un minifier: listas de casos que el minifier sabe que no
@@ -102,8 +107,9 @@ impl Minifier {
     /// (subproceso.rs: el oraculo tiene que tener los mismos).
     pub const TODOS: &'static [Minifier] = &[Minifier::Swc, Minifier::Oxc];
 
-    /// B5 (decision pendiente del usuario): el default de `--minifier`.
-    pub const POR_DEFECTO: Minifier = Minifier::Swc;
+    /// B5 (decision del usuario, 09-oct): el default de `--minifier` es oxc, el
+    /// objetivo (D1). Cambia el nombre de la celda por defecto.
+    pub const POR_DEFECTO: Minifier = Minifier::Oxc;
 
     pub fn name(self) -> &'static str {
         match self {
@@ -222,9 +228,29 @@ mod tests {
         assert!(Minifier::TODOS.iter().all(|m| !Minifier::Identidad.eq(m)), "identidad no es de produccion");
     }
 
+    /// 09-oct (deuda del bloque 3): los flags estaticos de oxc (`with`,
+    /// `global_conocido`, `extends`) los pide solo la politica de oxc. Con swc no
+    /// se calculan (ni en proceso ni en el hijo minificador); los comunes, si.
+    #[test]
+    fn flags_estaticos_por_politica() {
+        use crate::minify::{prepare, Outcome, Preset, SourceKind};
+        let src = "with (o) { f(arguments.callee); }\nconsole.log(typeof window);\nclass A extends 1 {}\n";
+        for (m, esperados) in [
+            (Minifier::Swc, &["callee"][..]),
+            (Minifier::Oxc, &["callee", "with", "global_conocido", "extends"][..]),
+        ] {
+            let cfg = Preset::CarrilA.build(m, SourceKind::Script);
+            let Outcome::Ok { static_flags, .. } = prepare(src, &cfg) else { panic!("{m:?} no preparo el script") };
+            assert_eq!(static_flags, esperados, "{m:?}");
+        }
+        assert!(Minifier::Swc.politica().flags_estaticos.is_none() && Minifier::Oxc.politica().flags_estaticos.is_some());
+    }
+
     /// 7b (aceptacion): el backend falso funciona por el camino normal
     /// (`Preset::build` + `minify::prepare`, con el analisis de difuzz) en los
-    /// dos carriles: minificado = original, y los flags estaticos salen igual.
+    /// dos carriles: minificado = original, y los flags estaticos comunes salen
+    /// igual. 09-oct: los de oxc (`with`) ya no, porque identidad no los declara
+    /// en su politica (`flags_estaticos: None`): un backend no hereda los de otro.
     #[test]
     fn backend_identidad_funciona() {
         use crate::minify::{prepare, Outcome, Preset, SourceKind};
@@ -237,7 +263,7 @@ mod tests {
                 panic!("identidad tenia que preparar el script");
             };
             assert_eq!(original, minified);
-            assert!(static_flags.contains(&"with") && static_flags.contains(&"callee"), "{static_flags:?}");
+            assert!(!static_flags.contains(&"with") && static_flags.contains(&"callee"), "{static_flags:?}");
         }
         let cfg = Preset::CoreDefaults.build(Minifier::Identidad, SourceKind::Module);
         let Outcome::Ok { original, minified, .. } = prepare("export const a = 1 + 2;\n", &cfg) else { panic!("modulo") };

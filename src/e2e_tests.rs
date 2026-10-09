@@ -31,7 +31,7 @@ impl Backend for Rompe {
             Outcome::Ok { original, minified, .. } => {
                 assert!(minified.contains(self.de), "Rompe: {:?} no esta en {minified:?}", self.de);
                 let minified = minified.replacen(self.de, self.a, 1);
-                let (static_flags, dead_writes, analisis) = crate::backend::swc::checks_on_text(src, &original, &minified, SourceKind::Script);
+                let (static_flags, dead_writes, analisis) = crate::backend::swc::checks_on_text(src, &original, &minified, SourceKind::Script, Minifier::Identidad);
                 Outcome::Ok { original, minified, static_flags, dead_writes, analisis }
             }
             o => o,

@@ -886,32 +886,37 @@ pub(crate) mod tests {
     /// un flag nuevo que ese programa no dispara pasaba sin aviso. Ahora la
     /// lista sale del fuente de `checks::static_flags` (cada `out.push("...")`)
     /// y tiene que ser exactamente FLAGS_ESTATICOS.
+    /// 09-oct: los flags estaticos de oxc viven en su propia funcion
+    /// (`checks::static_flags_oxc`, la pide `Politica::flags_estaticos`); las
+    /// dos cruzan el pipe del hijo de analisis y se miran las dos.
     #[test]
     fn flags_estaticos_conocidos() {
         let fuente = include_str!("checks.rs");
-        let cuerpo = &fuente[fuente.find("pub fn static_flags(").expect("checks::static_flags")..];
-        let cuerpo = &cuerpo[..cuerpo.find("\n}\n").expect("fin de checks::static_flags")];
-        let mut en_checks: Vec<&str> = cuerpo
-            .match_indices("out.push(\"")
-            .map(|(i, p)| {
+        let mut en_checks: Vec<&str> = Vec::new();
+        for f in ["pub fn static_flags(", "pub fn static_flags_oxc("] {
+            let cuerpo = &fuente[fuente.find(f).unwrap_or_else(|| panic!("checks.rs: falta {f}"))..];
+            let cuerpo = &cuerpo[..cuerpo.find("\n}\n").unwrap_or_else(|| panic!("checks.rs: fin de {f}"))];
+            let antes = en_checks.len();
+            en_checks.extend(cuerpo.match_indices("out.push(\"").map(|(i, p)| {
                 let resto = &cuerpo[i + p.len()..];
                 &resto[..resto.find('"').expect("literal cerrado")]
-            })
-            .collect();
-        // Otra forma de agregar flags (extend, insert, push de algo que no es un
-        // literal) no la ve este test: que falle y se actualice.
-        assert_eq!(cuerpo.matches("out.").count(), en_checks.len(), "static_flags agrega flags de otra forma:\n{cuerpo}");
+            }));
+            // Otra forma de agregar flags (extend, insert, push de algo que no es un
+            // literal) no la ve este test: que falle y se actualice.
+            assert_eq!(cuerpo.matches("out.").count(), en_checks.len() - antes, "{f} agrega flags de otra forma:\n{cuerpo}");
+        }
         en_checks.sort_unstable();
         let mut lista = FLAGS_ESTATICOS.to_vec();
         lista.sort_unstable();
-        assert_eq!(en_checks, lista, "los flags de checks::static_flags no son FLAGS_ESTATICOS");
+        assert_eq!(en_checks, lista, "los flags de checks::static_flags y static_flags_oxc no son FLAGS_ESTATICOS");
         // Y el programa de ejemplo los dispara todos (el fuente no miente).
         let p = crate::backend::swc::parse_for(
             "with (o) {} arguments.callee; function g(NaN) {} var o = { valueOf() {} }; window; class A extends 1 {}",
             SourceKind::Script,
         )
         .unwrap();
-        let fl = crate::checks::static_flags(&p);
+        let mut fl = crate::checks::static_flags(&p);
+        fl.extend(crate::checks::static_flags_oxc(&p));
         assert_eq!(fl.len(), FLAGS_ESTATICOS.len(), "{fl:?}");
         for f in fl {
             assert!(FLAGS_ESTATICOS.contains(&f), "falta {f} en FLAGS_ESTATICOS");
