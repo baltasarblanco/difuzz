@@ -401,6 +401,9 @@ struct Stats {
     /// en el envoltorio de modulos, la que se repitio sin invocar. Va en una
     /// linea aparte (solo con `--invocar`).
     invocar_retry: usize,
+    /// I3/M1 (revision-b456): comparaciones donde A o B no corrieron enteros con
+    /// el sensor de violaciones y los dos se repitieron sin el. Ortogonal, como LINT.
+    sensor_repetidos: usize,
     /// R1-H05: casos cuyo minificado salio del oraculo sin debug assertions (el
     /// binario con asserts hizo panic). Ortogonal, como LINT: el caso cuenta
     /// tambien donde termino (iguales, DIVERGENCIAS, conocidas, descartes).
@@ -467,6 +470,7 @@ impl Stats {
         self.a_link += o.a_link;
         self.a_nondet += o.a_nondet;
         self.invocar_retry += o.invocar_retry;
+        self.sensor_repetidos += o.sensor_repetidos;
         self.solo_asserts += o.solo_asserts;
         self.solo_asserts_sin_div += o.solo_asserts_sin_div;
         self.fallos_analisis += o.fallos_analisis;
@@ -696,6 +700,11 @@ fn main() {
     if cli.stubs {
         cache_parts.push("stubs v1");
     }
+    // 09-oct: sin el sensor de violaciones, A no deja las mismas lineas en el canal
+    // (flags `*_atrapada`, `viol`): no puede compartir cache con una celda que lo usa.
+    if !cli.minifier.politica().usa_sensor() {
+        cache_parts.push("sin sensor");
+    }
     let cache = cache::CacheA::new(cli.cache.clone(), &cache_parts);
     // M27 (a): si --out no se puede escribir, no hay hallazgos que guardar.
     if oracle::write_errors() > errors_before {
@@ -719,7 +728,7 @@ fn main() {
         cache: &cache,
         triage: &triage,
         // 7a: que re-chequeos aplican lo dice la politica del backend (clasificar.rs).
-        medido: Some(clasificar::Medido { minifier: cli.minifier, preset: cli.preset, kind: cli.kind }),
+        medido: Some(medido_de_celda(&cli)),
     };
     let jobs = cli.jobs.min(files.len());
     // R2-H04: el presupuesto de memoria de los hijos, con los workers reales.
@@ -758,15 +767,8 @@ fn main() {
                     .name(format!("worker-{w}"))
                     .stack_size(WORKER_STACK)
                     .spawn_scoped(scope, move || {
-                    let cfg = cli.preset.build(cli.minifier, cli.kind);
-                    // Solo core_defaults cambia nombres: ahi cada divergencia se
-                    // vuelve a probar con los nombres preservados (names_only).
-                    let names_cfg = (cli.preset == minify::Preset::CoreDefaults)
-                        .then(|| minify::Config::con_nombres(cli.minifier, cli.preset, cli.kind));
-                    let runner = runner::Runner::new(preload, w, cli.timeout)
-                        .with_kind(cli.kind)
-                        .with_invocar(cli.invocar)
-                        .with_stubs(cli.stubs);
+                    let (cfg, names_cfg) = configs_de_celda(cli);
+                    let runner = runner_de_celda(preload, w, cli);
                     let mut stats = Stats::default();
                     loop {
                         // R1-H18: con el binario cambiado, no se toma otro caso.
@@ -859,6 +861,10 @@ fn main() {
     }
     if stats.fallos_analisis > 0 {
         println!("analisis de difuzz (A6/R1-H12): casos_con_fallo={} descartados={}", stats.fallos_analisis, stats.descartes_analisis);
+    }
+    // M1 (revision-b456): en una linea aparte, solo si paso (no cambia la de `total=`).
+    if stats.sensor_repetidos > 0 {
+        println!("sensor (I3): comparados_sin_sensor={}", stats.sensor_repetidos);
     }
     // M27 (a): una escritura perdida del reporter es un hallazgo perdido.
     let lost = oracle::write_errors() - errors_before;
@@ -1437,6 +1443,31 @@ fn observe_module(
     true
 }
 
+/// El runner de un worker de la celda. Decision del usuario (09-oct): el sensor
+/// de violaciones del preload lo decide la politica del backend medido
+/// (`Politica::usa_sensor`): swc corre sin el (A, B y re-chequeos), oxc con el.
+fn runner_de_celda(preload: &runner::Preload, worker: usize, cli: &Cli) -> runner::Runner {
+    runner::Runner::new(preload, worker, cli.timeout)
+        .with_kind(cli.kind)
+        .with_invocar(cli.invocar)
+        .with_stubs(cli.stubs)
+        .with_sensor(cli.minifier.politica().usa_sensor())
+}
+
+/// La config de minificacion de un worker y la de nombres preservados. Solo
+/// core_defaults cambia nombres: ahi cada divergencia se vuelve a probar con los
+/// nombres preservados (names_only). (M5: la usa tambien el e2e.)
+fn configs_de_celda(cli: &Cli) -> (minify::Config, Option<minify::Config>) {
+    let cfg = cli.preset.build(cli.minifier, cli.kind);
+    let names_cfg = (cli.preset == minify::Preset::CoreDefaults).then(|| minify::Config::con_nombres(cli.minifier, cli.preset, cli.kind));
+    (cfg, names_cfg)
+}
+
+/// El backend medido de la celda, para los re-chequeos de su politica (`Ctx::medido`).
+fn medido_de_celda(cli: &Cli) -> clasificar::Medido {
+    clasificar::Medido { minifier: cli.minifier, preset: cli.preset, kind: cli.kind }
+}
+
 /// Lo que comparten todas las comparaciones de una corrida.
 struct Ctx<'a> {
     reporter: &'a oracle::Reporter,
@@ -1475,6 +1506,41 @@ fn compare_and_report(
         return false;
     }
     let b = runner.run(minified);
+    // I3 (revision-b456): el sensor cambia lo que el programa observa (V8 formatea el
+    // stack al pausar: llama al toString del programa y congela `.stack`). Es simetrico
+    // solo si A y B corrieron igual. Si alguno corrio sin el sensor (`sensor_caido`: se
+    // repitio sin el tras una senal o un timeout) o a medias (`sensor_tope`: MAX_PAUSAS),
+    // los dos se repiten sin el sensor (salvo el que ya corrio entero sin el) y todo lo
+    // que sigue (confirmacion y re-chequeos) usa el runner sin sensor.
+    let (mut a, mut b, mut a_cached) = (a, b, a_cached);
+    let sin_sensor;
+    let mut runner = runner;
+    let mut paso_sensor = None;
+    if runner.con_sensor() {
+        let (da, db) = (a.sensor_degradado(), b.sensor_degradado());
+        if da.is_some() || db.is_some() {
+            sin_sensor = runner.sin_sensor();
+            runner = &sin_sensor;
+            stats.sensor_repetidos += 1;
+            if da != Some(runner::SENSOR_CAIDO) {
+                a = runner.run(original);
+                a_cached = false;
+            }
+            if db != Some(runner::SENSOR_CAIDO) {
+                b = runner.run(minified);
+            }
+            let lado = |d: Option<&str>| match d {
+                Some(runner::SENSOR_CAIDO) => "sin el sensor (sensor_caido: senal o timeout con el)",
+                Some(_) => "con el sensor a medias (sensor_tope: MAX_PAUSAS)",
+                None => "con el sensor",
+            };
+            paso_sensor = Some(format!(
+                "A {}, B {} -> A y B comparados sin el sensor (I3)",
+                lado(da),
+                lado(db)
+            ));
+        }
+    }
     if let Status::Failed(e) = &b.status {
         stats.runner_failed += 1;
         ctx.reporter.discard(rel, "runner", b.elapsed);
@@ -1512,7 +1578,11 @@ fn compare_and_report(
                 stats.known_drift += 1;
             }
             let flags_b: Vec<&str> = b.flags.iter().map(String::as_str).collect();
-            let clasificar::Clasificacion { flags, why, nota, traza, .. } = c;
+            let clasificar::Clasificacion { flags, why, nota, mut traza, .. } = c;
+            // M1 (revision-b456): que el sensor no corrio entero queda en meta.txt.
+            if let Some(p) = paso_sensor {
+                traza.anteponer("sensor", p);
+            }
             if why.is_some() {
                 stats.known += 1;
             } else {
@@ -1872,6 +1942,88 @@ fn print_hint(out: &Path, stats: &Stats) {
 
 #[cfg(test)]
 mod tests {
+    /// Decision del usuario (09-oct): el runner de la celda (el de produccion,
+    /// `runner_de_celda`) corre el sensor de violaciones solo si la politica del
+    /// backend lo usa. swc: node sin el sensor (DIFUZZ_SENSOR=0), sin flags ni
+    /// lineas `viol` de una TDZ atrapada; oxc: con. Lo mismo vale para los
+    /// re-chequeos y la pasada observada, que salen de este runner.
+    #[test]
+    fn sensor_segun_la_politica() {
+        if !crate::test_util::requiere_node() {
+            return;
+        }
+        let preload = crate::runner::Preload::write_tagged("sensor-pol").unwrap();
+        let prog = "try { x; } catch (e) {}\nlet x = 1;\nconsole.log(1);\n";
+        for (m, con) in [("swc", false), ("oxc", true)] {
+            let cli = super::Cli::parse(["c", "--minifier", m, "--no-cache"].iter().map(|s| s.to_string()).collect()).unwrap();
+            assert_eq!(cli.minifier.politica().usa_sensor(), con, "{m}");
+            let r = super::runner_de_celda(&preload, crate::test_util::id_runner(), &cli);
+            assert_eq!(r.con_sensor(), con, "{m}");
+            assert_eq!(r.observing().con_sensor(), con, "{m}");
+            let e = r.run(prog);
+            assert_eq!(e.stdout, "1\n", "{m}");
+            assert_eq!(e.flags.iter().any(|f| f == "tdz_atrapada"), con, "{m}: {:?}", e.flags);
+            assert_eq!(e.ctl.lines().any(|l| l.starts_with("viol tdz ")), con, "{m}: {}", e.ctl);
+            // sin_sensor (I3) apaga el sensor aunque la politica lo use.
+            let e = r.sin_sensor().run(prog);
+            assert!(!e.flags.iter().any(|f| f == "tdz_atrapada"), "{m}: {:?}", e.flags);
+        }
+    }
+
+    /// I3 / M1 (revision-b456): el sensor cambia lo que el programa observa (al pausar,
+    /// V8 formatea el stack y llama al toString del programa). A pasa MAX_PAUSAS antes
+    /// del throw y B (sin el loop, que no hace nada visible) no: con el sensor, B
+    /// imprime "toString llamado" y A no. Antes eso era una divergencia falsa; ahora los
+    /// dos se repiten sin el sensor y dan lo mismo. Con un bug de verdad, div/ y el
+    /// meta dice que se compararon sin el sensor.
+    #[test]
+    fn sensor_asimetrico_se_repite_sin_el() {
+        use super::{compare_and_report, Ctx, Stats};
+        use crate::{cache, known, oracle, runner, triage};
+        use std::path::Path;
+        if !crate::test_util::requiere_node() {
+            return;
+        }
+        let d = std::env::temp_dir().join(format!("difuzz-test-i3-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        let reporter = oracle::Reporter::new(&d, "test".into(), runner::PRELOAD);
+        let known = known::Known::load(&d, &d, 0, super::backend::Minifier::Oxc);
+        let cache = cache::CacheA::new(None, &[]);
+        let triage = triage::Triage::load(&d);
+        let ctx = Ctx { reporter: &reporter, known: &known, cache: &cache, triage: &triage, medido: None };
+        let preload = runner::Preload::write_tagged("i3").unwrap();
+        let r = runner::Runner::new(&preload, crate::test_util::id_runner(), std::time::Duration::from_secs(20));
+        let e = "class E extends Error { toString() { console.log(\"toString llamado\"); return \"E\"; } }\ntry { throw new E(\"x\"); } catch (e) {}\n";
+        let original = format!("for (let i = 0; i < 300; i++) {{ try {{ null.x; }} catch (e) {{}} }}\n{e}console.log(\"fin\");\n");
+        let minified = format!("{e}console.log(\"fin\");\n");
+        let a = r.run(&original);
+        assert_eq!((a.stdout.as_str(), a.sensor_degradado()), ("fin\n", Some(runner::SENSOR_TOPE)), "{}", a.ctl);
+        let b = r.run(&minified);
+        assert_eq!((b.stdout.as_str(), b.sensor_degradado()), ("toString llamado\nfin\n", None), "sin esto el test no prueba nada");
+        let mut st = Stats::default();
+        assert!(!compare_and_report(&ctx, &r, &mut st, Path::new("igual/input.js"), &original, &minified, a, false, false, &[], None));
+        assert_eq!((st.sensor_repetidos, st.divergences, st.a_nondet), (1, 0, 0));
+        // Con un bug de verdad: div/, y el paso `sensor` en la traza de meta.txt.
+        let bug = format!("{e}console.log(\"fin2\");\n");
+        let a = r.run(&original);
+        assert!(compare_and_report(&ctx, &r, &mut st, Path::new("bug/input.js"), &original, &bug, a, false, false, &[], None));
+        assert_eq!((st.sensor_repetidos, st.divergences), (2, 1));
+        let meta = std::fs::read_to_string(d.join("div/bug/meta.txt")).unwrap();
+        assert!(
+            meta.contains("\nclasificacion:\n  sensor: A con el sensor a medias (sensor_tope: MAX_PAUSAS), B con el sensor -> A y B comparados sin el sensor (I3)\n"),
+            "{meta}"
+        );
+        // Sin sensor por politica (swc) no hay nada que repetir.
+        let mut st = Stats::default();
+        let sin = r.sin_sensor();
+        let a = sin.run(&original);
+        assert!(!compare_and_report(&ctx, &sin, &mut st, Path::new("swc/input.js"), &original, &minified, a, false, false, &[], None));
+        assert_eq!(st.sensor_repetidos, 0);
+        drop((sin, r));
+        std::fs::remove_dir_all(&d).unwrap();
+    }
+
     #[test]
     fn la_celda_incluye_el_backend() {
         let cli = |args: &[&str]| super::Cli::parse(args.iter().map(|s| s.to_string()).collect()).unwrap();

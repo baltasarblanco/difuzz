@@ -85,12 +85,17 @@ enum Back {
     PanicaConOraculo,
     /// El hijo minificador real (subproceso.rs) que duerme mas que su timeout.
     HijoLento,
+    /// M5 (revision-b456): el backend de la celda de verdad (`--minifier`,
+    /// `--config` de la fila), con `Ctx::medido` como en produccion: corren los
+    /// re-chequeos de su politica (los backends falsos no se pueden re-minificar).
+    Celda,
 }
 
 impl Back {
-    fn config(&self) -> Config {
+    fn config(&self, cli: &crate::Cli) -> Config {
         let id = || Box::new(Identidad { kind: SourceKind::Script });
         match *self {
+            Back::Celda => crate::configs_de_celda(cli).0,
             Back::Identidad => Config::from_backend(id()),
             Back::Rompe(de, a) => Config::from_backend(Box::new(Rompe { de, a })),
             Back::Panica => Config::from_backend(Box::new(Panica)),
@@ -125,10 +130,10 @@ const TRAZA_COERCION: &str = "\nclasificacion:\n  profundidad: no aplica (A con 
 
 const TRAZA_BUILTINS: &str = "\nclasificacion:\n  profundidad: no aplica (A con mas pila da lo mismo, o la corrida honda fallo)\n  asunciones: sensor, asuncion: oxc: No Monkey-Patching Built-ins\n  minificado_invalido: no (node --check acepta el minificado)\n  sintoma: el de known-sintomas.tsv (o primero registrado)\n  decision: known/ (sensor, asuncion: oxc: No Monkey-Patching Built-ins)\n";
 
-/// b4-a: al pausar en la excepcion atrapada, V8 formatea `.stack` (riesgo
-/// documentado del sensor): B gana `stack` y el re-chequeo de contenido lo
-/// descarta (`contenido_irrelevante` en A).
-const TRAZA_TDZ_ATRAPADA: &str = "\nclasificacion:\n  contenido: NoExplica -> contenido_irrelevante (A con toString/.stack cambiados da lo mismo)\n  profundidad: no aplica (A con mas pila da lo mismo, o la corrida honda fallo)\n  asunciones: sensor, asuncion: oxc: No TDZ Violation (atrapada)\n  minificado_invalido: no (node --check acepta el minificado)\n  sintoma: el de known-sintomas.tsv (o primero registrado)\n  decision: known/ (sensor, asuncion: oxc: No TDZ Violation (atrapada))\n";
+/// b4-a / M5: la TDZ atrapada que oxc borra, por el camino de produccion (oxc
+/// core_defaults, re-chequeo de violaciones Explica; MEDIDA). `contenido` sigue
+/// dependiendo de que V8 formatea `.stack` al pausar (riesgo documentado de b4-a).
+const TRAZA_TDZ_ATRAPADA: &str = "\nclasificacion:\n  contenido: NoExplica -> contenido_irrelevante (A con toString/.stack cambiados da lo mismo)\n  profundidad: no aplica (A con mas pila da lo mismo, o la corrida honda fallo)\n  nombres: no aplica (la salida no puede mostrar nombres)\n  violaciones: Explica (quedan tdz_atrapada)\n  asunciones: sensor, asuncion: oxc: No TDZ Violation (atrapada)\n  minificado_invalido: no (node --check acepta el minificado)\n  sintoma: el de known-sintomas.tsv (o primero registrado)\n  decision: known/ (sensor, asuncion: oxc: No TDZ Violation (atrapada))\n";
 
 const TRAZA_CAUSA: &str = "\nclasificacion:\n  contenido: Explica (A con toString/.stack cambiados da otra salida)\n  profundidad: no aplica (A con mas pila da lo mismo, o la corrida honda fallo)\n  asunciones: sensor, asuncion: difuzz: el contenido de Error.prototype.stack cambia al minificar (oxc no lo documenta)\n  minificado_invalido: no (node --check acepta el minificado)\n  sintoma: el de known-sintomas.tsv (o primero registrado)\n  decision: known/ (sensor, asuncion: difuzz: el contenido de Error.prototype.stack cambia al minificar (oxc no lo documenta))\n";
 
@@ -175,15 +180,17 @@ fn tabla() -> Vec<Fila> {
             meta: &["\nknown: sensor, asuncion: oxc: No Monkey-Patching Built-ins\n", "\nflags_a: builtins\n", TRAZA_BUILTINS],
         },
         // b4-a (R1-H04 / C3): flag del sensor de violaciones atrapadas (preload.js,
-        // inspector) -> asuncion de la tabla de oxc. Con `medido = None` no corre el
-        // re-chequeo de violaciones (lo cubre `clasificar::tdz_atrapada_de_punta_a_punta`).
+        // inspector) -> asuncion de la tabla de oxc. M5 (revision-b456): por el camino de
+        // produccion (oxc de verdad, `Ctx::medido` y el runner de la celda, con el sensor
+        // por la politica de oxc), asi corre el re-chequeo de violaciones. Antes: `Rompe`
+        // y `medido = None` (sin re-chequeo) y `flags_b: stack,...`, un detalle de V8.
         Fila {
             caso: "known-violacion",
-            programa: "try { x; } catch (e) {}\nlet x = 1;\nconsole.log(41);\n",
-            back: Back::Rompe("41", "42"),
-            args: &[],
+            programa: "try { x; console.log(\"sin tdz\"); } catch (e) { console.log(\"tdz\"); }\nlet x = 1;\n",
+            back: Back::Celda,
+            args: &["--minifier", "oxc", "--config", "core_defaults"],
             destino: Destino::Known,
-            meta: &["\nknown: sensor, asuncion: oxc: No TDZ Violation (atrapada)\n", "\nflags_a: tdz_atrapada,contenido_irrelevante\nflags_b: stack,tdz_atrapada\n", TRAZA_TDZ_ATRAPADA],
+            meta: &["\nknown: sensor, asuncion: oxc: No TDZ Violation (atrapada)\n", TRAZA_TDZ_ATRAPADA],
         },
         // R2-H07 (b6-usuario): `coercion` (estatico, sin re-chequeo) y `stack`, que el
         // re-chequeo de contenido confirma: la razon es la de `stack`, no la del primer
@@ -326,15 +333,20 @@ fn clasificacion_de_punta_a_punta() {
     let known = crate::known::Known::load(&corpus, &out, 0, Minifier::Oxc);
     let cache = crate::cache::CacheA::new(None, &[]);
     let triage = crate::triage::Triage::load(&out);
-    let ctx = crate::Ctx { reporter: &reporter, known: &known, cache: &cache, triage: &triage, medido: None };
     let preload = crate::runner::Preload::write_tagged("e2e").unwrap();
     let mut resumen = Vec::new();
     for f in &filas {
         let cli = cli_de(f.args);
-        let runner = crate::runner::Runner::new(&preload, crate::test_util::id_runner(), cli.timeout);
-        let cfg = f.back.config();
+        // M5: el runner de produccion (el sensor lo decide la politica de `--minifier`).
+        let runner = crate::runner_de_celda(&preload, crate::test_util::id_runner(), &cli);
+        let cfg = f.back.config(&cli);
+        // Los backends falsos no se re-minifican: sin re-chequeos propios (`medido = None`).
+        let celda = matches!(f.back, Back::Celda);
+        let medido = celda.then(|| crate::medido_de_celda(&cli));
+        let names_cfg = if celda { crate::configs_de_celda(&cli).1 } else { None };
+        let ctx = crate::Ctx { reporter: &reporter, known: &known, cache: &cache, triage: &triage, medido };
         let mut st = crate::Stats::default();
-        crate::process_case(&ctx, &runner, &cfg, None, &cli, &mut st, &corpus.join(f.caso).join("input.js"));
+        crate::process_case(&ctx, &runner, &cfg, names_cfg.as_ref(), &cli, &mut st, &corpus.join(f.caso).join("input.js"));
         drop(runner);
         // Las cuentas de la linea de stats, una por destino.
         let cuentas = (st.divergences, st.known, st.panics, st.solo_asserts_sin_div, st.recursos_timeout, st.lint, st.same);

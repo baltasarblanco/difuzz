@@ -53,6 +53,12 @@ impl Traza {
         self.pasos.push((nombre, resultado.into()));
     }
 
+    /// M1 (revision-b456): un paso previo a clasificar (hoy: A y B repetidos sin
+    /// el sensor, main::compare_and_report), primero en la seccion.
+    pub fn anteponer(&mut self, nombre: &'static str, resultado: impl Into<String>) {
+        self.pasos.insert(0, (nombre, resultado.into()));
+    }
+
     /// Un re-chequeo de asuncion (`recheck::Recheck`) y que hizo con el flag.
     fn recheck(&mut self, flag: &'static str, r: &recheck::Recheck, (irrelevante, inconcluso): (&str, &str)) {
         let t = match r {
@@ -220,6 +226,8 @@ pub fn clasificar<'a>(
                 let par = match f {
                     "tdz_atrapada" => ("tdz_atrapada_irrelevante", "tdz_atrapada_inconcluso"),
                     "coercion_symbol" => ("coercion_symbol_irrelevante", "coercion_symbol_inconcluso"),
+                    // I2 (revision-b456): la TDZ no atrapada.
+                    "tdz" => ("tdz_irrelevante", "tdz_inconcluso"),
                     _ => ("extends_atrapado_irrelevante", "extends_atrapado_inconcluso"),
                 };
                 // La nota ya va una vez arriba: aca solo el flag.
@@ -454,6 +462,8 @@ fn depth_recheck(a: &runner::Exec, b: &runner::Exec, deep: &runner::Exec) -> Opt
 /// (`recheck::rename_arguments`) y rige el mismo `veredicto`: solo si la
 /// divergencia desaparece y el camino se sostiene es "solo sloppy"
 /// (`SiRenombrando`). Si renombrar no alcanza para que compile, sigue `Err`.
+/// B1 (revision-b456): ademas el renombre solo (en sloppy) tiene que dar lo mismo
+/// que A; si no, `Err` (el renombre cambio el programa, p. ej. `var arguments;`).
 fn sloppy_only(
     runner: &runner::Runner,
     (minifier, preset): (backend::Minifier, minify::Preset),
@@ -471,9 +481,24 @@ fn sloppy_only(
                 None
             }
         };
-        let variante = renombrado.map(|r| format!("\"use strict\";\n{r}"));
+        let variante = renombrado.as_ref().map(|r| format!("\"use strict\";\n{r}"));
         match variante {
             Some(v) if runner.node_accepts(&v) => {
+                // B1 (revision-b456, r01-args-getter): el renombre tiene que ser neutro.
+                // `var arguments;` sin inicializador conserva el objeto `arguments` en
+                // sloppy; renombrado vale `undefined`, A' lanza en la linea del bug y la
+                // tapa. Se corre el renombrado SIN "use strict": si no da lo mismo que A,
+                // renombrar cambio el programa y el re-chequeo no prueba nada (inconcluso).
+                // Asi el veredicto de abajo solo mide lo que cambia el estricto.
+                let ren = renombrado.as_deref().unwrap_or_default();
+                let a_ren = runner.run(ren);
+                if !crate::same_exec(&a_ren, a) {
+                    return Err(format!(
+                        "re-chequeo sloppy inconcluso: con el binding `arguments` renombrado a {} (sin \"use strict\") el original ya cambia ({:?})",
+                        recheck::ARGUMENTS_RENOMBRADO,
+                        a_ren.status
+                    ));
+                }
                 strict = v;
                 si = Sloppy::SiRenombrando;
             }
@@ -644,6 +669,17 @@ mod tests {
         assert_eq!(a.stdout, "1\nrest\nfin\n");
         assert_ne!(b.stdout, a.stdout, "oxc ya no tiene el bug de 9460: buscar otro");
         assert_eq!(sloppy_only(&r, (Minifier::Oxc, Preset::CoreDefaults), &o, &a, &b), Ok(Sloppy::No));
+        // B1 (revision-b456, r01-args-getter): `var arguments;` sin inicializador conserva
+        // el objeto `arguments`; renombrado vale `undefined` y A' lanza en la linea del
+        // bug (Issue A de ENVIAR.md: el spread con getter se mueve). Antes: SiRenombrando
+        // (known/). Ahora el renombre solo ya cambia A: inconcluso (div/).
+        let r01 = "function f() {\n  var arguments;\n  let result = \"FAIL\";\n  const o = { ...{ get prop() { result = \"PASS\"; } } };\n  console.log(arguments.length, result);\n  return o;\n}\nf(1, 2);\n";
+        for preset in [Preset::CoreDefaults, Preset::CarrilA] {
+            let (o, a, b) = ab(r01, preset);
+            assert_ne!(b.stdout, a.stdout, "oxc ya no tiene el Issue A: buscar otro");
+            let s = sloppy_only(&r, (Minifier::Oxc, preset), &o, &a, &b);
+            assert!(s.as_ref().is_err_and(|n| n.contains("ya cambia")), "{preset:?}: {s:?}");
+        }
         // Miente (como c4 10-rt-sloppy-miente): el bug esta en la rama que el
         // estricto apaga. Con `arguments` renombrado sigue siendo inconcluso.
         let (o, a, b) = ab("function rec(v) { console.log(v); }\nfunction g() { var arguments = 1; return arguments; }\ng();\nfunction f() { return this; }\nif (f() === undefined) {\n  console.log(\"estricto\");\n} else {\n  (function (...[value = rec(\"rest\")]) {})();\n}\nconsole.log(\"fin\");\n", Preset::CoreDefaults);
@@ -730,7 +766,18 @@ mod tests {
         let r = runner::Runner::new(&preload, crate::test_util::id_runner(), std::time::Duration::from_secs(20));
         let cfg = preset.build(Minifier::Oxc, kind);
         let tdz = "try { x; console.log(\"sin tdz\"); } catch (e) { console.log(\"tdz\"); }\nlet x = 1;\n";
-        for (rel, src, known_div) in [("pos", tdz.to_string(), (1, 0)), ("neg", format!("{tdz}console.log(delete (0 / 0));\n"), (0, 1))] {
+        // I2 (revision-b456): la TDZ NO atrapada tambien pasa por el re-chequeo. oxc borra
+        // `x;` (asume que no hay TDZ): known/. r09-tdz-final-getter: el Issue A de
+        // ENVIAR.md (el spread con getter se mueve) y `x; let x;` al final: antes known/
+        // ("No TDZ Violation") sin re-chequeo, ahora div/ (`tdz_irrelevante`).
+        let nc = "console.log(\"a\");\nx;\nlet x = 1;\n";
+        let r09 = "let result = \"FAIL\";\nconst o = { ...{ get prop() { result = \"PASS\"; } } };\nconsole.log(result);\nconsole.log(o);\nx;\nlet x;\n";
+        for (rel, src, known_div) in [
+            ("pos", tdz.to_string(), (1, 0)),
+            ("neg", format!("{tdz}console.log(delete (0 / 0));\n"), (0, 1)),
+            ("pos-nc", nc.to_string(), (1, 0)),
+            ("neg-nc", r09.to_string(), (0, 1)),
+        ] {
             let minify::Outcome::Ok { original, minified, .. } = minify::prepare(&src, &cfg) else { panic!("no minifica") };
             let mut st = Stats::default();
             let p = format!("{rel}/input.js");
@@ -741,6 +788,10 @@ mod tests {
         assert!(meta.contains("oxc: No TDZ Violation (atrapada)") && meta.contains("  violaciones: Explica (quedan tdz_atrapada)\n"), "{meta}");
         let meta = std::fs::read_to_string(d.join("div/neg/meta.txt")).unwrap();
         assert!(meta.contains("tdz_atrapada_irrelevante") && meta.contains("  violaciones: NoExplica"), "{meta}");
+        let meta = std::fs::read_to_string(d.join("known/pos-nc/meta.txt")).unwrap();
+        assert!(meta.contains("\nknown: sensor, asuncion: oxc: No TDZ Violation\n") && meta.contains("  violaciones: Explica (quedan tdz)\n"), "{meta}");
+        let meta = std::fs::read_to_string(d.join("div/neg-nc/meta.txt")).unwrap();
+        assert!(meta.contains("tdz_irrelevante") && meta.contains("  violaciones: NoExplica"), "{meta}");
         std::fs::remove_dir_all(&d).unwrap();
     }
 }

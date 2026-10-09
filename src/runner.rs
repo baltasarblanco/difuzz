@@ -38,6 +38,11 @@ pub const DEEP_STACK: &str = "--stack-size=1968";
 /// THROW_EXIT porque no es un throw comparable.
 pub const LINK_EXIT: i32 = 71;
 
+/// I3 (revision-b456): lineas del canal de control cuando el sensor de
+/// violaciones no corrio entero (`Exec::sensor_degradado`).
+pub const SENSOR_CAIDO: &str = "sensor_caido";
+pub const SENSOR_TOPE: &str = "sensor_tope";
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Status {
     Exited(i32),
@@ -79,6 +84,14 @@ impl Exec {
     /// M10: no enlazo (exit 71 **y** `link` en el canal).
     pub fn link_failed(&self) -> bool {
         self.status == Status::Exited(LINK_EXIT) && self.ctl_count("link ") > 0
+    }
+
+    /// I3 (revision-b456): esta ejecucion no corrio entera con el sensor de
+    /// violaciones: `SENSOR_CAIDO` (se repitio sin el tras una senal o un
+    /// timeout, `run_inner`) o `SENSOR_TOPE` (el preload llego a MAX_PAUSAS y lo
+    /// apago a mitad). `None`: entera con el sensor, o sin el por politica.
+    pub fn sensor_degradado(&self) -> Option<&'static str> {
+        [SENSOR_CAIDO, SENSOR_TOPE].into_iter().find(|s| self.ctl.lines().any(|l| l == *s))
     }
 
     /// M21: mensaje y stack del throw no atrapado (linea `exc` del canal, con
@@ -280,6 +293,13 @@ pub struct Runner {
     /// M30 (`--stubs`): manifiesto de stubs del caso (stubs.rs), uno por
     /// worker. `None`: sin stubs (no se pasa DIFUZZ_STUBS).
     stubs: Option<PathBuf>,
+    /// Decision del usuario (09-oct): el sensor de violaciones del preload (b4-a)
+    /// solo corre si la politica del backend lo usa (`Politica::usa_sensor`).
+    /// `false`: toda ejecucion lleva DIFUZZ_SENSOR=0. Por defecto `true`.
+    sensor: bool,
+    /// Copia que comparte los archivos del runner original (`observing`,
+    /// `sin_sensor`): al soltarse no borra nada.
+    prestado: bool,
 }
 
 impl Runner {
@@ -299,6 +319,46 @@ impl Runner {
             ctl: dir.join(format!("difuzz-{pid}-w{worker}-ctl.txt")),
             cwd: dir.join(format!("difuzz-{pid}-w{worker}-cwd")),
             stubs: None,
+            sensor: true,
+            prestado: false,
+        }
+    }
+
+    /// Decision del usuario (09-oct): con `false`, node corre siempre sin el
+    /// sensor de violaciones (A, B y re-chequeos: todo pasa por este runner).
+    pub fn with_sensor(mut self, on: bool) -> Runner {
+        self.sensor = on;
+        self
+    }
+
+    /// Si este runner corre node con el sensor de violaciones.
+    pub fn con_sensor(&self) -> bool {
+        self.sensor
+    }
+
+    /// I3 (revision-b456): el mismo runner (mismos archivos) sin el sensor, para
+    /// repetir A y B sin el cuando uno de los dos corrio sin el (o a medias).
+    pub fn sin_sensor(&self) -> Runner {
+        let mut r = self.prestar();
+        r.sensor = false;
+        r
+    }
+
+    /// Copia que usa los mismos archivos y no los borra al soltarse.
+    fn prestar(&self) -> Runner {
+        Runner {
+            script: self.script.clone(),
+            preload: self.preload.clone(),
+            timeout: self.timeout,
+            kind: self.kind,
+            wrapper: self.wrapper.clone(),
+            observe: self.observe,
+            invocar: self.invocar,
+            ctl: self.ctl.clone(),
+            cwd: self.cwd.clone(),
+            stubs: self.stubs.clone(),
+            sensor: self.sensor,
+            prestado: true,
         }
     }
 
@@ -339,18 +399,9 @@ impl Runner {
     /// preload. Lo que se compara es la salida del programa mas su namespace de
     /// exports. No borra nada al soltarse: los archivos son del runner original.
     pub fn observing(&self) -> Runner {
-        Runner {
-            script: self.script.clone(),
-            preload: self.preload.clone(),
-            timeout: self.timeout,
-            kind: self.kind,
-            wrapper: self.wrapper.clone(),
-            observe: true,
-            invocar: self.invocar,
-            ctl: self.ctl.clone(),
-            cwd: self.cwd.clone(),
-            stubs: self.stubs.clone(),
-        }
+        let mut r = self.prestar();
+        r.observe = true;
+        r
     }
 
     pub fn run(&self, js: &str) -> Exec {
@@ -420,12 +471,13 @@ impl Runner {
     /// programa que muere o cuelga por su cuenta hace lo mismo otra vez (cuesta
     /// el doble).
     fn run_inner(&self, js: &str, opts: Opts) -> Exec {
+        let opts = Opts { sin_sensor: opts.sin_sensor || !self.sensor, ..opts };
         let e = self.run_once(js, opts);
         if !matches!(e.status, Status::Signal | Status::Timeout) || opts.sin_sensor {
             return e;
         }
         let mut e = self.run_once(js, Opts { sin_sensor: true, ..opts });
-        e.ctl.insert_str(0, "sensor_caido\n");
+        e.ctl.insert_str(0, &format!("{SENSOR_CAIDO}\n"));
         e
     }
 
@@ -447,7 +499,7 @@ impl Runner {
 
 impl Drop for Runner {
     fn drop(&mut self) {
-        if self.observe {
+        if self.prestado {
             return;
         }
         let _ = std::fs::remove_file(&self.script);

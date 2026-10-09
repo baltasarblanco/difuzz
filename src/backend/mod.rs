@@ -59,6 +59,16 @@ pub struct Politica {
     pub flags_estaticos: Option<fn(&swc_ecma_ast::Program) -> Vec<&'static str>>,
 }
 
+impl Politica {
+    /// Decision del usuario (09-oct): el sensor de violaciones del preload (b4-a,
+    /// inspector de V8, x1,67 por ejecucion de node) corre solo para los backends
+    /// que usan su resultado: los que piden `Rechequeo::Violaciones` (hoy oxc). Sale
+    /// de `rechequeos` y no de un campo aparte, para que no puedan desacoplarse.
+    pub fn usa_sensor(&self) -> bool {
+        self.rechequeos.contains(&Rechequeo::Violaciones)
+    }
+}
+
 /// 7b: el backlog de un minifier: listas de casos que el minifier sabe que no
 /// cumple, en la raiz del corpus.
 #[derive(Debug)]

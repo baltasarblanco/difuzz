@@ -347,10 +347,15 @@
   // atrapa errores que no son del programa (el hook de --stubs): al pausar, V8 formatea su
   // stack y prenderia `stack`. Lo define el sensor; sin inspector no hace nada.
   let sensor = () => {};
+  // I3 (revision-b456): el sensor llego a MAX_PAUSAS y se apago a mitad de la corrida
+  // (linea `sensor_tope` del canal, al salir): el resto corrio sin sus efectos.
+  let sensorTope = false;
   const violaciones = [];
   // `desc`: la descripcion de V8 (el stack formateado), para reconocer despues el mismo error.
-  const registrarViolacion = (k, pos, desc) => {
-    if (violaciones.length < MAX_VIOL) violaciones.push([k, pos, desc]);
+  // `noAtrapada` (I2, revision-b456): la TDZ que nadie del programa atrapo; ya tiene su flag
+  // (`tdz`), asi que al salir solo deja su linea `viol` (para el re-chequeo) y no `tdz_atrapada`.
+  const registrarViolacion = (k, pos, desc, noAtrapada) => {
+    if (violaciones.length < MAX_VIOL) violaciones.push([k, pos, desc, noAtrapada === true]);
   };
   const posDeMarco = (e) => {
     try {
@@ -361,6 +366,18 @@
       if (Number.isInteger(l) && Number.isInteger(c)) return `${l - 1}:${c - 1}`;
     } catch {}
     return '-';
+  };
+  // I2: la posicion de un error que el programa no atrapo. Lee `.stack` en silencio (no es
+  // uso del programa) para que V8 llame a prepareStackTrace y queden sus `marcos`.
+  const posDeThrow = (e) => {
+    try {
+      quiet = true;
+      void e.stack;
+    } catch {
+    } finally {
+      quiet = false;
+    }
+    return posDeMarco(e);
   };
   const onThrow = (e) => {
     try {
@@ -394,6 +411,9 @@
     }
     // La coercion de un Symbol no tenia flag ni atrapada ni sin atrapar.
     if (k === 'symbol') registrarViolacion('symbol', posDeMarco(e));
+    // I2 (revision-b456, r09-tdz-final-getter): la TDZ no atrapada tambien se ubica, para
+    // que `tdz` pase por el re-chequeo de violaciones (antes iba directo a known/).
+    if (k === 'tdz') registrarViolacion('tdz', posDeThrow(e), null, true);
     writeDz(`!dz throw ${t}\n`);
     realExit(70);
   };
@@ -543,10 +563,11 @@
     }
     // b4-a: una violacion atrapada (o la de Symbol) es un flag por clase y una linea `viol`.
     const FLAG_VIOL = { tdz: 'tdz_atrapada', symbol: 'coercion_symbol', extends: 'extends_atrapado' };
-    for (const [k, pos] of violaciones) {
-      flags.add(FLAG_VIOL[k]);
+    for (const [k, pos, , noAtrapada] of violaciones) {
+      if (!noAtrapada) flags.add(FLAG_VIOL[k]);
       ctl(`viol ${k} ${pos}`);
     }
+    if (sensorTope) ctl('sensor_tope');
     ctl(`flags ${[...flags].sort().join(',')}`);
   });
 
@@ -604,6 +625,8 @@
           }
         }
       }
+      // I2: como en onThrow, la TDZ no atrapada se ubica para el re-chequeo.
+      if (k === 'tdz') registrarViolacion('tdz', posDeThrow(e), null, true);
       return `${name}() throws ${thrownType(e)}`;
     }
     let isPromise = false;
@@ -885,7 +908,10 @@
       } catch {
       } finally {
         sesion.post('Debugger.resume');
-        if (++pausas === MAX_PAUSAS) sesion.post('Debugger.setPauseOnExceptions', { state: 'none' });
+        if (++pausas === MAX_PAUSAS) {
+          sensorTope = true;
+          sesion.post('Debugger.setPauseOnExceptions', { state: 'none' });
+        }
       }
     });
     sensor = (on) => sesion.post('Debugger.setPauseOnExceptions', { state: on && pausas < MAX_PAUSAS ? 'caught' : 'none' });

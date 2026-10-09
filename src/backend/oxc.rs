@@ -56,6 +56,8 @@ pub const POLITICA: Politica = Politica {
 const FLAG_REASONS_OXC: &[(&str, &str)] = &[
     ("fn_tostring", "oxc: Function.prototype.toString is not relied on"),
     ("builtins", "oxc: No Monkey-Patching Built-ins"),
+    // I2 (revision-b456): la TDZ no atrapada tambien pasa por el re-chequeo de
+    // violaciones (recheck::FLAGS_VIOLACION); solo llega aca si dio Explica.
     ("tdz", "oxc: No TDZ Violation"),
     ("coercion", "oxc: Coercion Methods Are Pure"),
     ("nombres", "oxc: No Reliance on Function.prototype.name (keep_names apagado en core_defaults)"),

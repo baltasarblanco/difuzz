@@ -88,13 +88,21 @@ pub fn veredicto(a: &runner::Exec, b: &runner::Exec, a2: &runner::Exec, b2: &run
 /// `with` eso da otros valores, ni los de A ni los de A'). Un bug en una linea
 /// que la asuncion no toca, o una linea de mas o de menos, no pasa.
 /// Tambien lo usa M16 (clasificar::depth_recheck), con A' = A con mas pila.
+///
+/// I1 (revision-b456, r08-readonly-getter): un throw de A' no es "una linea que la
+/// asuncion cambia" sino otro camino: corta el programa justo donde B difiere y
+/// la tapa (`NaN = 1` lanza en estricto en la linea del bug). Por eso A y A' tienen
+/// que lanzar los dos o ninguno, y una linea `!dz throw` de A' no cubre la
+/// diferencia de B en esa linea.
 pub fn localizada(a: &runner::Exec, b: &runner::Exec, a2: &runner::Exec) -> bool {
     let lines = |e: &runner::Exec| oracle::normalize_names(&e.stdout).lines().map(String::from).collect::<Vec<_>>();
     let (la, lb, l2) = (lines(a), lines(b), lines(a2));
+    let throw = format!("{}throw ", runner::DZ);
     b.completed()
+        && a.threw() == a2.threw()
         && la.len() == lb.len()
         && la.len() == l2.len()
-        && la.iter().zip(&lb).zip(&l2).all(|((x, y), z)| x == y || x != z)
+        && la.iter().zip(&lb).zip(&l2).all(|((x, y), z)| x == y || (x != z && !z.starts_with(&throw)))
 }
 
 /// b1-b: A y A' recorren el mismo camino: dicen lo mismo, o imprimen lo mismo y
@@ -178,8 +186,12 @@ pub fn with_matters(
 
 /// b4-a: los flags del sensor de violaciones (preload.js) que re-chequea
 /// `violaciones_matter`, cada uno con la clase de su linea `viol`.
-pub const FLAGS_VIOLACION: [(&str, &str); 3] =
-    [("tdz_atrapada", "tdz"), ("coercion_symbol", "symbol"), ("extends_atrapado", "extends")];
+/// I2 (revision-b456): `tdz` (la no atrapada) tambien: antes iba a known/ sin
+/// re-chequeo (r09-tdz-final-getter: un bug ajeno y `x; let x;` al final). El
+/// `extends` no atrapado no esta aca: es el flag `extends`, que ya re-chequea
+/// `Rechequeo::Extends` (clasificar::extends_matters).
+pub const FLAGS_VIOLACION: [(&str, &str); 4] =
+    [("tdz_atrapada", "tdz"), ("coercion_symbol", "symbol"), ("extends_atrapado", "extends"), ("tdz", "tdz")];
 
 /// b4-a: las violaciones que el preload ubico en `a` (lineas `viol <clase> <pos>`
 /// del canal de control), sin repetir, en el orden en que pasaron.
@@ -583,6 +595,16 @@ mod tests {
         // ... y si B ademas difiere en una linea que la asuncion no toca, no.
         let r = veredicto(&ok("u\n3\nx\n"), &ok("u\n4\ny\n"), &ok("u\nu\nx\n"), &ok("u\nu\nx\n"));
         assert!(matches!(r, Recheck::Inconcluso(_)), "{r:?}");
+        // I1 (revision-b456, r08-readonly-getter): A' lanza en la linea donde B difiere.
+        // Antes la linea `!dz throw` de A' "cubria" esa diferencia (Explica, known/).
+        let r = veredicto(&ok("1 PASS\n"), &ok("1 FAIL\n"), &th("!dz throw TypeError\n"), &th("!dz throw TypeError\n"));
+        assert!(matches!(r, Recheck::Inconcluso(ref n) if n.contains("otro camino")), "{r:?}");
+        // ... y si A tambien lanza, la linea `!dz throw` de A' sigue sin cubrir la de B.
+        // (veredicto lo aceptaria por `mismo_camino`: mismo punto, otro tipo; aca solo `localizada`.)
+        assert!(!super::localizada(&th("k\n!dz throw Error\n"), &th("k\n!dz throw TypeError\n"), &th("k\n!dz throw RangeError\n")));
+        assert!(super::localizada(&ok("u\n3\n"), &ok("u\n4\n"), &ok("u\nu\n")));
+        // A lanza y A' no (otro camino), aunque las lineas "cubran" la de B: no.
+        assert!(!super::localizada(&th("1\n!dz throw Error\n"), &th("2\n!dz throw Error\n"), &ok("3\nfin\n")));
         // La divergencia sigue con la asuncion neutralizada.
         assert_eq!(veredicto(&ok("1\n"), &ok("2\n"), &ok("1\n"), &ok("2\n")), Recheck::NoExplica);
         // 10-rt-*-miente: A' toma otra rama y B no es A': un bug real no se esconde.
@@ -750,9 +772,14 @@ mod tests {
         assert_eq!(e.stdout, "300\n");
         assert!(e.flags.iter().any(|f| f == "tdz_atrapada"), "{:?}", e.flags);
         assert_eq!(super::violaciones(&e), ["tdz 1:38"], "{}", e.ctl);
-        // No atrapada: `tdz` como siempre, sin `tdz_atrapada`.
+        // No atrapada: `tdz` como siempre, sin `tdz_atrapada`. I2: ahora con su posicion
+        // (para el re-chequeo de violaciones), tambien sin el sensor del inspector.
         let e = r.run("x;\nlet x;\n");
         assert!(e.flags == ["tdz"], "{:?}", e.flags);
+        assert_eq!(super::violaciones(&e), ["tdz 0:0"], "{}", e.ctl);
+        let e = r.sin_sensor().run("console.log(1);\n  x;\nlet x;\n");
+        assert!(e.flags == ["tdz"], "{:?}", e.flags);
+        assert_eq!(super::violaciones(&e), ["tdz 1:2"], "{}", e.ctl);
         // Symbol no atrapado: flag y posicion por el primer frame.
         let e = r.run("console.log(1);\nMath.abs(Symbol());\n");
         assert!(e.threw() && e.flags.iter().any(|f| f == "coercion_symbol"), "{:?}", e.flags);
@@ -777,6 +804,9 @@ mod tests {
         let e = r.run("function f() { return z; }\n__difuzzObserveInvocar([\"f\", f]);\nlet z = 1;\n");
         assert!(e.stdout.contains("f() throws ReferenceError"), "{}", e.stdout);
         assert!(e.flags.iter().any(|f| f == "tdz") && !e.flags.iter().any(|f| f == "tdz_atrapada"), "{:?}", e.flags);
+        // V8 ubica una TDZ dentro de `return`/`throw` en la sentencia (MEDIDO, node 24), no
+        // en el identificador: el re-chequeo no la puede neutralizar y queda inconcluso (div/).
+        assert_eq!(super::violaciones(&e), ["tdz 0:15"], "{}", e.ctl);
         // Carril B: el programa es el modulo que importa el envoltorio.
         let m = Runner::new(&preload, crate::test_util::id_runner(), std::time::Duration::from_secs(20)).with_kind(SourceKind::Module);
         let e = m.run("try { x; } catch {}\nexport let x = 1;\n");
@@ -785,5 +815,12 @@ mod tests {
         // maneja node), pero onThrow la reconoce y queda solo `tdz`.
         let e = m.run("x;\nexport let x;\n");
         assert!(e.flags.iter().any(|f| f == "tdz") && !e.flags.iter().any(|f| f == "tdz_atrapada"), "{:?}", e.flags);
+        assert_eq!(super::violaciones(&e), ["tdz 0:0"], "{}", e.ctl);
+        // I3 (revision-b456): tras MAX_PAUSAS (256) el sensor se apaga y el canal lo dice.
+        let e = r.run("let n = 0;\nfor (let i = 0; i < 300; i++) { try { null.x; } catch (e) { n++; } }\nconsole.log(n);\n");
+        assert_eq!(e.stdout, "300\n");
+        assert_eq!(e.sensor_degradado(), Some(crate::runner::SENSOR_TOPE), "{}", e.ctl);
+        let e = r.run("console.log(1);\n");
+        assert_eq!(e.sensor_degradado(), None, "{}", e.ctl);
     }
 }

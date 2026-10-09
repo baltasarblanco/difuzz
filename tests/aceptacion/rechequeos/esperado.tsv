@@ -97,3 +97,50 @@
 10-rt-solo	oxc-a-carril_a	div:Stdout
 10-rt-solo	oxc-b-core_defaults	div:Stdout
 10-rt-solo	oxc-b-carril_a	div:Stdout
+# Fase R (revision-b456, 09-oct): casos adversariales del revisor (revision-b456/corpus-*), con su numero rNN.
+# Todos llevan el Issue A de ENVIAR.md (el spread con getter se mueve: oxc imprime "FAIL" donde va "PASS").
+# Un bug real nunca va a known/: div/ donde se ve; descarte o igual donde no se ve. MEDIDO con el binario de
+# la fase R. B1: r01 (`var arguments;` + bug) iba a known/ ("solo sloppy ... renombrado"): el renombre solo ya
+# cambia A (`arguments` pasa a undefined). En B `var arguments` no parsea en modulo (descarte).
+11-r01-args-getter	oxc-a-core_defaults	div:Stdout
+11-r01-args-getter	oxc-a-carril_a	div:Stdout
+11-r01-args-getter	oxc-b-core_defaults	descarte:parse_script
+11-r01-args-getter	oxc-b-carril_a	descarte:parse_script
+# Control de r01: el mismo bug sin `var arguments` (div/ antes y ahora).
+11-r02-args-getter-control	oxc-a-core_defaults	div:Stdout
+11-r02-args-getter-control	oxc-a-carril_a	div:Stdout
+11-r02-args-getter-control	oxc-b-core_defaults	div:Stdout
+11-r02-args-getter-control	oxc-b-carril_a	div:Stdout
+# Controles del re-chequeo de violaciones atrapadas (TDZ, Symbol) con el bug al lado: div/ (antes y ahora).
+12-r03-tdz-atrapada-getter	oxc-a-core_defaults	div:Stdout
+12-r03-tdz-atrapada-getter	oxc-a-carril_a	div:Stdout
+12-r03-tdz-atrapada-getter	oxc-b-core_defaults	div:Stdout
+12-r03-tdz-atrapada-getter	oxc-b-carril_a	div:Stdout
+12-r04-symbol-getter	oxc-a-core_defaults	div:Stdout
+12-r04-symbol-getter	oxc-a-carril_a	div:Stdout
+12-r04-symbol-getter	oxc-b-core_defaults	div:Stdout
+12-r04-symbol-getter	oxc-b-carril_a	div:Stdout
+# I1: r08 (`NaN = 1` en la linea del bug) iba a known/ (solo sloppy: A' lanza en estricto y `localizada` lo
+# aceptaba). Control r06 (`zz = 1`: en estricto tambien lanza) y r07 (r01 con el bug en otra linea). En B (modulo)
+# r06 y r08 lanzan en A y en B antes de imprimir: igual.
+13-r06-undeclared-getter	oxc-a-core_defaults	div:Stdout
+13-r06-undeclared-getter	oxc-a-carril_a	div:Stdout
+13-r07-args-control-sin-linea	oxc-a-core_defaults	div:Stdout
+13-r07-args-control-sin-linea	oxc-a-carril_a	div:Stdout
+13-r07-args-control-sin-linea	oxc-b-core_defaults	descarte:parse_script
+13-r07-args-control-sin-linea	oxc-b-carril_a	descarte:parse_script
+13-r08-readonly-getter	oxc-a-core_defaults	div:Stdout
+13-r08-readonly-getter	oxc-a-carril_a	div:Stdout
+# I2: r09 (`x; let x;` al final, TDZ NO atrapada) iba a known/ ("No TDZ Violation") sin re-chequeo; ahora el
+# re-chequeo de violaciones da NoExplica (tdz_irrelevante). B ademas pierde el throw (ThrowLost).
+14-r09-tdz-final-getter	oxc-a-core_defaults	div:ThrowLost
+14-r09-tdz-final-getter	oxc-a-carril_a	div:ThrowLost
+14-r09-tdz-final-getter	oxc-b-core_defaults	div:ThrowLost
+14-r09-tdz-final-getter	oxc-b-carril_a	div:ThrowLost
+# 14-r10-tdz-atrapada-linea: no diverge en ninguna celda (igual, MEDIDO; tambien con el binario de b456).
+# Positivo de I2 (nuevo, no es del revisor): oxc borra `x;` (asume que no hay TDZ); el re-chequeo de
+# violaciones neutraliza `x` y da Explica: known/.
+14-tdz-positivo	oxc-a-core_defaults	known
+14-tdz-positivo	oxc-a-carril_a	known
+14-tdz-positivo	oxc-b-core_defaults	known
+14-tdz-positivo	oxc-b-carril_a	known

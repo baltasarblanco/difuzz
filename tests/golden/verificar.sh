@@ -77,7 +77,13 @@ clase_de() { # $1 = --out de la celda, $2 = caso
   [ -d "$o/asserts/$c" ] && { echo asserts; return; }
   [ -d "$o/known/$c" ] && { echo known; return; }
   [ -d "$o/lint/$c" ] && { echo lint; return; }
-  k=$(rg -o -r '$1' "^$c/input.js\t([^\t]+)" "$o/descartes.tsv" 2>/dev/null | rg -v '^$')
+  # M7 (revision-b456): comparacion exacta del nombre del caso (antes iba sin escapar en una regex).
+  k=
+  if [ -f "$o/descartes.tsv" ]; then
+    while IFS=$'\t' read -r ca cau _; do
+      [ "$ca" == "$c/input.js" ] && [ -n "$cau" ] && { k=$cau; break; }
+    done < "$o/descartes.tsv"
+  fi
   [ -n "$k" ] && { echo "descarte:$k"; return; }
   echo igual
 }
