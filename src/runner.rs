@@ -157,6 +157,40 @@ pub fn run_dir() -> PathBuf {
     std::env::temp_dir().join(format!("difuzz-{}-tmp", std::process::id()))
 }
 
+/// R1-H22: cuenta los `Runner` vivos (no los observadores) que usan un
+/// directorio. El ultimo en soltarse lo borra si quedo vacio. Sin esto, cada
+/// `cargo test` dejaba un `run_dir()` vacio: los tests usan preloads fuera de
+/// el (`write_tagged`) y el Drop de `Preload` no lo tocaba. En una corrida el
+/// preload esta adentro, el directorio no queda vacio y lo borra el Drop de
+/// `Preload`, como antes. Crear y borrar van bajo el mismo lock: mientras un
+/// runner vive, su directorio existe.
+struct Inquilinos(Mutex<usize>);
+
+impl Inquilinos {
+    const fn new() -> Inquilinos {
+        Inquilinos(Mutex::new(0))
+    }
+
+    fn entrar(&self, dir: &Path) {
+        let mut n = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        *n += 1;
+        // Si falla, el primer `run` lo reporta como Failed (no se puede escribir).
+        let _ = std::fs::create_dir_all(dir);
+    }
+
+    fn salir(&self, dir: &Path) {
+        let mut n = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        *n = n.saturating_sub(1);
+        if *n == 0 {
+            // remove_dir, no remove_dir_all: si queda algo ajeno, no se toca.
+            let _ = std::fs::remove_dir(dir);
+        }
+    }
+}
+
+/// R1-H22: los inquilinos de `run_dir()`.
+static INQUILINOS: Inquilinos = Inquilinos::new();
+
 /// M23: borra de `<tmp>` lo que dejaron corridas cortadas (abort, SIGKILL): las
 /// entradas `difuzz-<pid>-...` cuyo pid ya no existe (`/proc/<pid>`). Devuelve
 /// cuantas borro.
@@ -251,8 +285,8 @@ pub struct Runner {
 impl Runner {
     pub fn new(preload: &Preload, worker: usize, timeout: Duration) -> Runner {
         let dir = run_dir();
-        // Si falla, el primer `run` lo reporta como Failed (no se puede escribir).
-        let _ = std::fs::create_dir_all(&dir);
+        // R1-H22: crea el directorio y lo cuenta (lo borra el ultimo Drop).
+        INQUILINOS.entrar(&dir);
         let pid = std::process::id();
         Runner {
             script: dir.join(format!("difuzz-{pid}-w{worker}.cjs")),
@@ -422,6 +456,10 @@ impl Drop for Runner {
         let _ = std::fs::remove_dir_all(&self.cwd);
         if let Some(p) = &self.stubs {
             let _ = std::fs::remove_file(p);
+        }
+        // R1-H22: el directorio de este runner es el de `script` (Runner::new).
+        if let Some(dir) = self.script.parent() {
+            INQUILINOS.salir(dir);
         }
     }
 }
@@ -947,6 +985,31 @@ mod tests {
         assert_eq!(super::clean_stale_in(&tmp), 2);
         assert!(!muerto.exists() && !tmp.join("difuzz-0-w1.cjs").exists());
         assert!(vivo.exists() && ajeno.exists());
+        std::fs::remove_dir_all(&tmp).unwrap();
+    }
+
+    /// R1-H22: el directorio de los runners existe mientras viva alguno y el
+    /// ultimo en irse lo borra si quedo vacio (con algo ajeno adentro, no). Con
+    /// un contador propio sobre un directorio propio: el de `run_dir()` lo
+    /// comparten los tests que corren en paralelo.
+    #[test]
+    fn el_ultimo_runner_borra_su_directorio() {
+        let tmp = std::env::temp_dir().join(format!("difuzz-test-inquilinos-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        let dir = tmp.join("run");
+        let inq = super::Inquilinos::new();
+        inq.entrar(&dir);
+        inq.entrar(&dir);
+        assert!(dir.is_dir());
+        inq.salir(&dir);
+        assert!(dir.is_dir(), "queda un inquilino: el directorio sigue");
+        inq.salir(&dir);
+        assert!(!dir.exists(), "el ultimo lo borra");
+        inq.entrar(&dir);
+        assert!(dir.is_dir(), "se vuelve a crear");
+        std::fs::write(dir.join("ajeno"), "x").unwrap();
+        inq.salir(&dir);
+        assert!(dir.join("ajeno").exists(), "lo ajeno no se borra");
         std::fs::remove_dir_all(&tmp).unwrap();
     }
 

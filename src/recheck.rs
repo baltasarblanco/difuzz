@@ -398,6 +398,140 @@ pub fn neutralize_with(src: &str, kind: SourceKind) -> Option<String> {
     .flatten()
 }
 
+/// R2-H10: el nombre que toma el binding `arguments` en la variante estricta.
+pub const ARGUMENTS_RENOMBRADO: &str = "__dz_arguments";
+
+/// R2-H10: el programa (carril A) con cada binding llamado `arguments` renombrado
+/// a `ARGUMENTS_RENOMBRADO`, junto con las referencias que lo ven. Ligar
+/// `arguments` es error temprano en estricto (`var arguments` no compila con
+/// "use strict"), asi que sin esto el re-chequeo sloppy de un caso asi no podia
+/// ni empezar (terser collapse_vars_arguments). Alcance: en una funcion no flecha
+/// (o el tope del archivo, que en CommonJS es la funcion envoltorio) que liga
+/// `arguments` como parametro, `var` o declaracion de funcion, se renombra todo
+/// identificador `arguments` de su cuerpo, entrando en flechas (no tienen
+/// `arguments` propio) y no en otras funciones no flecha (tienen el suyo, salvo
+/// que tambien lo liguen). `None` si no parsea, si no hay nada que renombrar, si
+/// el nombre nuevo ya aparece en el fuente o si renombrar cambiaria una clave de
+/// objeto (`{ arguments }`, `var { arguments } = o`).
+/// Lo que no cubre (p. ej. `let arguments` en un bloque, o en un constructor)
+/// queda sin renombrar: la variante sigue sin compilar en estricto y el
+/// re-chequeo queda inconcluso, como antes. El renombre es un cambio del
+/// programa: lo que pueda cambiar (`.name` inferido de `var arguments = function
+/// () {}`, `eval("arguments")`) lo juzga `veredicto` con el chequeo de camino.
+pub fn rename_arguments(src: &str) -> Option<String> {
+    use swc_ecma_ast::{ArrowExpr, Constructor, FnDecl, Function, ObjectPatProp, Pat, Prop, Script, Stmt, VarDecl, VarDeclKind};
+    use swc_ecma_visit::{Visit, VisitWith};
+
+    const NOMBRE: &str = "arguments";
+    if src.contains(ARGUMENTS_RENOMBRADO) {
+        return None;
+    }
+    /// Algun binding `arguments` en un patron (sin entrar en expresiones:
+    /// defaults ni claves computadas).
+    struct Liga(bool);
+    impl Visit for Liga {
+        fn visit_binding_ident(&mut self, b: &swc_ecma_ast::BindingIdent) {
+            self.0 |= &*b.id.sym == NOMBRE;
+        }
+        fn visit_assign_pat_prop(&mut self, p: &swc_ecma_ast::AssignPatProp) {
+            self.0 |= &*p.key.id.sym == NOMBRE;
+        }
+        fn visit_expr(&mut self, _: &swc_ecma_ast::Expr) {}
+    }
+    fn liga(p: &Pat) -> bool {
+        let mut l = Liga(false);
+        p.visit_with(&mut l);
+        l.0
+    }
+    /// El scope de variables de una funcion liga `arguments`: `var` a cualquier
+    /// profundidad o declaracion de funcion, sin entrar en otras funciones ni
+    /// en flechas (que tienen su propio scope de `var`).
+    struct Declara(bool);
+    impl Visit for Declara {
+        fn visit_function(&mut self, _: &Function) {}
+        fn visit_constructor(&mut self, _: &Constructor) {}
+        fn visit_arrow_expr(&mut self, _: &ArrowExpr) {}
+        fn visit_fn_decl(&mut self, f: &FnDecl) {
+            self.0 |= &*f.ident.sym == NOMBRE;
+        }
+        fn visit_var_decl(&mut self, v: &VarDecl) {
+            if v.kind == VarDeclKind::Var {
+                self.0 |= v.decls.iter().any(|d| liga(&d.name));
+            }
+            v.visit_children_with(self);
+        }
+    }
+    fn declara(stmts: &[Stmt]) -> bool {
+        let mut d = Declara(false);
+        stmts.iter().for_each(|s| s.visit_with(&mut d));
+        d.0
+    }
+    struct R {
+        /// Por cada funcion no flecha abierta: si renombra en su cuerpo.
+        pila: Vec<bool>,
+        hecho: bool,
+        no_se: bool,
+    }
+    impl R {
+        fn activo(&self) -> bool {
+            self.pila.last().copied().unwrap_or(false)
+        }
+    }
+    impl VisitMut for R {
+        fn visit_mut_script(&mut self, s: &mut Script) {
+            self.pila.push(declara(&s.body));
+            s.visit_mut_children_with(self);
+            self.pila.pop();
+        }
+        fn visit_mut_function(&mut self, f: &mut Function) {
+            let cuerpo = f.body.as_ref().is_some_and(|b| declara(&b.stmts));
+            self.pila.push(cuerpo || f.params.iter().any(|p| liga(&p.pat)));
+            f.visit_mut_children_with(self);
+            self.pila.pop();
+        }
+        fn visit_mut_constructor(&mut self, c: &mut Constructor) {
+            // Sin renombrar adentro (parametros con TS y propiedades): si liga
+            // `arguments`, la variante no compila y queda inconcluso.
+            self.pila.push(false);
+            c.visit_mut_children_with(self);
+            self.pila.pop();
+        }
+        fn visit_mut_ident(&mut self, i: &mut swc_ecma_ast::Ident) {
+            if self.activo() && &*i.sym == NOMBRE {
+                i.sym = ARGUMENTS_RENOMBRADO.into();
+                self.hecho = true;
+            }
+        }
+        fn visit_mut_prop(&mut self, p: &mut Prop) {
+            if matches!(p, Prop::Shorthand(i) if &*i.sym == NOMBRE) && self.activo() {
+                self.no_se = true;
+            }
+            p.visit_mut_children_with(self);
+        }
+        fn visit_mut_object_pat_prop(&mut self, p: &mut ObjectPatProp) {
+            if matches!(p, ObjectPatProp::Assign(a) if &*a.key.id.sym == NOMBRE) && self.activo() {
+                self.no_se = true;
+            }
+            p.visit_mut_children_with(self);
+        }
+    }
+    catch_unwind(AssertUnwindSafe(|| {
+        GLOBALS.set(&Globals::new(), || {
+            let cm: Lrc<SourceMap> = Default::default();
+            let fm = cm.new_source_file(FileName::Anon.into(), src.to_string());
+            let mut program = backend::swc::parse_program(&fm, SourceKind::Script)?;
+            let mut r = R { pila: Vec::new(), hecho: false, no_se: false };
+            program.visit_mut_with(&mut r);
+            if !r.hecho || r.no_se {
+                return None;
+            }
+            emit(cm, &program.apply(fixer(None)))
+        })
+    }))
+    .ok()
+    .flatten()
+}
+
 fn emit(cm: Lrc<SourceMap>, program: &Program) -> Option<String> {
     let mut buf = Vec::new();
     {
@@ -466,6 +600,27 @@ mod tests {
         let out = neutralize_with("var o = {a: 1};\nwith (o) { console.log(a); }\n", SourceKind::Script).unwrap();
         assert!(out.contains("{\n    o;\n    {\n        console.log(a);\n    }\n}"), "{out}");
         assert!(neutralize_with("console.log(1);\n", SourceKind::Script).is_none());
+    }
+
+    /// R2-H10: el binding `arguments` y lo que lo ve se renombran; el
+    /// `arguments` propio de otra funcion no flecha, no.
+    #[test]
+    fn renombra_arguments() {
+        use super::rename_arguments;
+        // collapse_vars_arguments: el `arguments` de `inner` es el suyo.
+        let out = rename_arguments("var outer=function(){var k=7,arguments=5,inner=function(){console.log(arguments)};inner(k,1)};outer();").unwrap();
+        assert!(out.contains("__dz_arguments = 5") && out.contains("console.log(arguments)"), "{out}");
+        // Las flechas no tienen `arguments` propio: ven el ligado.
+        let out = rename_arguments("function f(){var arguments=1;return()=>arguments}").unwrap();
+        assert!(out.contains("__dz_arguments") && !out.replace("__dz_arguments", "").contains("arguments"), "{out}");
+        // Parametro: se renombra en su funcion, no en la anidada.
+        let out = rename_arguments("function f(arguments){return function(){return arguments}}").unwrap();
+        assert!(out.contains("f(__dz_arguments)") && out.contains("return arguments"), "{out}");
+        // Nada que renombrar, o renombrar cambiaria una clave: None.
+        assert!(rename_arguments("console.log(arguments);").is_none());
+        assert!(rename_arguments("function f(){var arguments=1;return{arguments}}").is_none());
+        assert!(rename_arguments("function f(){var arguments=1;var{arguments}=o}").is_none());
+        assert!(rename_arguments("var __dz_arguments;function f(){var arguments=1}").is_none());
     }
 
     /// Con node: el re-chequeo saca el flag solo si la divergencia sigue.

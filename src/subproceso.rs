@@ -247,7 +247,9 @@ fn args_config(minifier: Minifier, preset: Preset, kind: SourceKind, keep_names:
 pub struct Remoto {
     lanzador: Lanzador,
     /// Si el hijo no se puede lanzar, se minifica en proceso (con aviso).
-    local: Box<dyn Fn() -> Box<dyn Backend>>,
+    /// `None` (el oraculo, R1-H05): no hay respaldo en proceso (este proceso
+    /// lleva debug assertions) y el caso queda como panic, con el motivo.
+    local: Option<Box<dyn Fn() -> Box<dyn Backend>>>,
     hijo: Mutex<Option<Hijo>>,
     timeout: Duration,
     /// R2-H04: presupuesto de RSS (bytes) de los hijos del worker; `None`: el
@@ -272,7 +274,7 @@ impl Remoto {
         args.extend(args_config(minifier, preset, kind, keep_names));
         Remoto {
             lanzador: Lanzador { exe, args, env: Vec::new() },
-            local: Box::new(move || local_backend(minifier, preset, kind, keep_names)),
+            local: Some(Box::new(move || local_backend(minifier, preset, kind, keep_names))),
             hijo: Mutex::new(None),
             timeout: TIMEOUT_MINIFICAR,
             presupuesto: None,
@@ -287,7 +289,7 @@ impl Remoto {
         args.extend(args_config(minifier, preset, kind, keep_names));
         Remoto {
             lanzador: Lanzador { exe, args, env: Vec::new() },
-            local: Box::new(|| Box::new(SinOraculo)),
+            local: None,
             hijo: Mutex::new(None),
             timeout: TIMEOUT_MINIFICAR,
             presupuesto: None,
@@ -301,6 +303,8 @@ impl Remoto {
     }
 
     fn lanzar(&self) -> std::io::Result<Hijo> {
+        // R1-H18: si el binario (o el oraculo) cambio desde el arranque, no se lanza.
+        crate::binario::comprobar().map_err(std::io::Error::other)?;
         let mut cmd = Command::new(&self.lanzador.exe);
         cmd.args(&self.lanzador.args)
             .envs(self.lanzador.env.iter().map(|(k, v)| (k, v)))
@@ -324,14 +328,9 @@ impl Remoto {
     }
 }
 
-/// R1-H05: lo que contesta el oraculo si su ejecutable no se pudo lanzar.
-struct SinOraculo;
-
-impl Backend for SinOraculo {
-    fn prepare(&self, _src: &str) -> Outcome {
-        Outcome::Panic("subproceso: no pude lanzar el oraculo sin debug assertions".into())
-    }
-}
+/// R1-H05 / R1-H18: comienzo del panic de un oraculo que no se pudo lanzar
+/// (`minify::respaldo` no lo presenta como "tambien falla (es real)").
+pub const ORACULO_NO_LANZA: &str = "subproceso: no pude lanzar el oraculo sin debug assertions";
 
 /// R1-H05: ruta del oraculo validado, o `None`. La fija `configurar_oraculo`
 /// (main, al arrancar); sin llamarla (tests, `--emitir`) no hay oraculo.
@@ -485,9 +484,18 @@ impl Backend for Remoto {
             match self.lanzar() {
                 Ok(h) => *slot = Some(h),
                 Err(e) => {
-                    eprintln!("subproceso: no pude lanzar {}: {e}; minifico en proceso", self.lanzador.exe.display());
                     drop(slot);
-                    return (self.local)().prepare(src);
+                    let Some(local) = &self.local else {
+                        // El oraculo (R1-H05): no minifica en proceso. Con R1-H18 el motivo
+                        // es que el ejecutable cambio a mitad de corrida (binario.rs).
+                        eprintln!(
+                            "subproceso: no pude lanzar el oraculo {}: {e}; el caso queda en panic/ (el oraculo no tiene respaldo en proceso)",
+                            self.lanzador.exe.display()
+                        );
+                        return Outcome::Panic(format!("{ORACULO_NO_LANZA}: {e}"));
+                    };
+                    eprintln!("subproceso: no pude lanzar {}: {e}; minifico en proceso", self.lanzador.exe.display());
+                    return local().prepare(src);
                 }
             }
         }
@@ -984,7 +992,7 @@ pub(crate) mod tests {
                     .to_vec(),
                 env,
             },
-            local: Box::new(move || local_backend(minifier, Preset::CarrilA, kind, false)),
+            local: Some(Box::new(move || local_backend(minifier, Preset::CarrilA, kind, false))),
             hijo: Mutex::new(None),
             timeout,
             presupuesto,

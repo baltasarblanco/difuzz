@@ -119,8 +119,10 @@ for caso in "${casos[@]}"; do
 done
 # Las stats de cada celda tienen que cerrar. MEDIDO en el corpus completo (07-oct): LINT es un
 # contador ortogonal (chequeo estatico; un caso puede estar en div/ y en lint/ a la vez, p. ej.
-# swc/B fixture/issues/12188) y descartes.tsv NO lista mudos_sin_bindings ni ilegibles, asi que
-#   total = iguales + DIVERGENCIAS + conocidas + PANICS + RECURSOS + filas(descartes.tsv) + mudos_sin_bindings + ilegibles
+# swc/B fixture/issues/12188). Desde R2-H06 (b6-usuario) descartes.tsv SI lista mudo_sin_bindings,
+# ilegible y panic_del_fuzzer (antes se sumaban aparte mudos_sin_bindings + ilegibles), asi que
+#   total = iguales + DIVERGENCIAS + conocidas + PANICS + RECURSOS + filas(descartes.tsv)
+# (la misma identidad que documenta el USAGE de difuzz, sin --mutaciones).
 # b2-int: RECURSOS (b2-b) es un destino terminal como PANICS (recursos/), no un contador ortogonal.
 # Los descartes con causa `analisis` (b2-c) ya son filas de descartes.tsv. Los contadores de c y d
 # (casos_con_fallo, analisis_swc, bloques) van en lineas aparte y no entran. Los de asserts/ van en
@@ -129,9 +131,9 @@ for cel in "${celdas[@]}"; do
   s=$(rg '^total=' "$out/$cel.log")
   v() { rg -o -r '$1' "(?:^| )$1=([0-9]+)" <<< "$s" | rg -v '^$' | { read -r x; echo "${x:-0}"; }; }
   t=$(v total); ig=$(v iguales); dv=$(v DIVERGENCIAS); kn=$(v conocidas)
-  pa=$(v PANICS); re=$(v RECURSOS); mu=$(v mudos_sin_bindings); il=$(v ilegibles); ndesc=$(rg -c -v '^#' "$(celdir "$out/$cel")/descartes.tsv" 2>/dev/null || echo 0)
-  suma=$((ig+dv+kn+pa+re+ndesc+mu+il))
-  if [ "$t" != "$suma" ]; then echo "celda $cel: stats no cierran: total=$t != $ig+$dv+$kn+$pa+$re+$ndesc+$mu+$il=$suma"; fallas=$((fallas+1)); fi
+  pa=$(v PANICS); re=$(v RECURSOS); ndesc=$(rg -c -v '^#' "$(celdir "$out/$cel")/descartes.tsv" 2>/dev/null || echo 0)
+  suma=$((ig+dv+kn+pa+re+ndesc))
+  if [ "$t" != "$suma" ]; then echo "celda $cel: stats no cierran: total=$t != $ig+$dv+$kn+$pa+$re+$ndesc=$suma"; fallas=$((fallas+1)); fi
 done
 # Los modos opt-in no pueden perder lo que la celda base encuentra (H01: --invocar lo perdia).
 # Corre oxc-b-core_defaults y oxc-a-core_defaults con cada modo y exige que cada div/panic de la base siga en div/panic.

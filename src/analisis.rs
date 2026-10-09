@@ -336,6 +336,11 @@ pub fn sin_with(src: &str, kind: SourceKind) -> Result<Option<String>, String> {
     correr("with", kind, &[src]).map(|v| v.and_then(|mut v| v.pop()))
 }
 
+/// R2-H10: `recheck::rename_arguments` (carril A).
+pub fn sin_arguments(src: &str) -> Result<Option<String>, String> {
+    correr("arguments", SourceKind::Script, &[src]).map(|v| v.and_then(|mut v| v.pop()))
+}
+
 /// `backend::swc::neutralize_extends`.
 pub fn sin_extends(src: &str, kind: SourceKind) -> Result<Option<String>, String> {
     correr("extends", kind, &[src]).map(|v| v.and_then(|mut v| v.pop()))
@@ -392,6 +397,7 @@ fn ejecutar(op: &str, kind: SourceKind, p: &[&str]) -> Option<Vec<String>> {
             crate::backend::swc::parse_for(src, kind).map(|p| crate::checks::known_globals_used(&p))
         }),
         ("with", [src]) => crate::recheck::neutralize_with(src, kind).map(|s| vec![s]),
+        ("arguments", [src]) => crate::recheck::rename_arguments(src).map(|s| vec![s]),
         ("extends", [src]) => crate::backend::swc::neutralize_extends(src, kind).map(|s| vec![s]),
         ("violaciones", [src, spec]) => crate::recheck::neutralize_violaciones(src, kind, spec).map(|s| vec![s]),
         ("checks", [src, o, m]) => {
@@ -429,6 +435,8 @@ struct Hijo {
 }
 
 fn lanzar() -> std::io::Result<Hijo> {
+    // R1-H18: si el binario cambio desde el arranque, no se lanza (analiza en proceso).
+    crate::binario::comprobar().map_err(std::io::Error::other)?;
     let (exe, args, env) = lanzador();
     let mut cmd = Command::new(&exe);
     cmd.args(&args)

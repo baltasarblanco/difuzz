@@ -243,6 +243,18 @@ fn prepare_inner(src: &str, cfg: &Swc) -> Outcome {
         Err(_) => return Outcome::CodegenError,
     };
 
+    // R1-H21: `optimize` no es la identidad aunque `compress` y `mangle` vengan en
+    // `None`. La auditoria A1 del revisor 1 (07-oct, `trabajo-07oct/revision-1/out/
+    // a1-swc-b.tsv`, MEDIDO por el) paso los 3119 fixtures con los dos en `None`:
+    // en carril B, 3051 de 3053 salen iguales al original y 2 no, porque igual
+    // reescribe los `export {...}`: `terser/compress/export/issue_2126` fusiona
+    // `export{bar as qux};export{dog}` en `export{bar as qux,dog}` y
+    // `terser/compress/export/redirection` los reordena. Consecuencia: con SWC
+    // "mismo printer" (original y minificado salen del mismo `emit`) no garantiza
+    // que toda diferencia de texto venga de la compresion o del mangle; en
+    // codigo con exports parte puede ser de `optimize` mismo. Carril A y oxc: 0
+    // diferencias en esa auditoria. No se corrige aca: el original es el programa
+    // tal cual, sin pasar por `optimize`.
     let minified = optimize(
         program,
         cm.clone(),

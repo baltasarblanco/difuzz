@@ -216,10 +216,20 @@ impl Backend for Oxc {
 }
 
 /// Solo para el desglose de descartes: si el fuente parsea con el otro tipo.
+/// R1-H06: con el mismo criterio que `prepare` (parser y despues los errores
+/// tempranos de la semantica, M19). Antes solo el parser: un fuente que la
+/// semantica rechaza en los dos tipos salia `esm=1` en A y `script=1` en B.
 fn parses_as(src: &str, source_type: SourceType) -> bool {
     let allocator = Allocator::default();
     let parsed = Parser::new(&allocator, src, source_type).parse();
-    !parsed.fatal_error && parsed.diagnostics.is_empty()
+    if parsed.fatal_error || !parsed.diagnostics.is_empty() {
+        return false;
+    }
+    oxc_semantic::SemanticBuilder::new()
+        .with_check_syntax_error(true)
+        .build(&parsed.program)
+        .diagnostics
+        .is_empty()
 }
 
 #[cfg(test)]
@@ -299,6 +309,24 @@ mod tests {
             m.prepare("var = ;"),
             Outcome::ParseError { esm: false, script: false }
         ));
+    }
+
+    /// R1-H06: el rotulo del otro carril usa la semantica, como `prepare`. Lo
+    /// que node rechaza como script y como modulo no sale `esm` en A ni
+    /// `script` en B (terser parameters/accept_duplicated_parameters_in_non_strict...).
+    #[test]
+    fn oxc_rotulo_del_otro_carril_con_semantica() {
+        let a = Oxc::new(Preset::CoreDefaults, SourceType::cjs());
+        let b = Oxc::new(Preset::CoreDefaults, SourceType::mjs());
+        let dup = "function a(b, b) {}\nfunction b({ c: test, c: test }) {}\n";
+        assert!(matches!(a.prepare(dup), Outcome::ParseError { esm: false, script: false }));
+        assert!(matches!(b.prepare(dup), Outcome::ParseError { esm: false, script: false }));
+        let redecl = "let x = 1;\nlet x = 2;\n";
+        assert!(matches!(a.prepare(redecl), Outcome::ParseError { esm: false, script: false }));
+        assert!(matches!(b.prepare(redecl), Outcome::ParseError { esm: false, script: false }));
+        // Lo que el otro carril si acepta sigue rotulado.
+        assert!(matches!(a.prepare("export const a = 1;"), Outcome::ParseError { esm: true, script: false }));
+        assert!(matches!(b.prepare("with (o) { x; }"), Outcome::ParseError { esm: false, script: true }));
     }
 
     /// M35: una llamada anotada con efectos se conserva en los tres presets.

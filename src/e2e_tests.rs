@@ -130,6 +130,8 @@ const TRAZA_BUILTINS: &str = "\nclasificacion:\n  profundidad: no aplica (A con 
 /// descarta (`contenido_irrelevante` en A).
 const TRAZA_TDZ_ATRAPADA: &str = "\nclasificacion:\n  contenido: NoExplica -> contenido_irrelevante (A con toString/.stack cambiados da lo mismo)\n  profundidad: no aplica (A con mas pila da lo mismo, o la corrida honda fallo)\n  asunciones: sensor, asuncion: oxc: No TDZ Violation (atrapada)\n  minificado_invalido: no (node --check acepta el minificado)\n  sintoma: el de known-sintomas.tsv (o primero registrado)\n  decision: known/ (sensor, asuncion: oxc: No TDZ Violation (atrapada))\n";
 
+const TRAZA_CAUSA: &str = "\nclasificacion:\n  contenido: Explica (A con toString/.stack cambiados da otra salida)\n  profundidad: no aplica (A con mas pila da lo mismo, o la corrida honda fallo)\n  asunciones: sensor, asuncion: difuzz: el contenido de Error.prototype.stack cambia al minificar (oxc no lo documenta)\n  minificado_invalido: no (node --check acepta el minificado)\n  sintoma: el de known-sintomas.tsv (o primero registrado)\n  decision: known/ (sensor, asuncion: difuzz: el contenido de Error.prototype.stack cambia al minificar (oxc no lo documenta))\n";
+
 const TRAZA_INVALIDO: &str = "\nclasificacion:\n  profundidad: no aplica (A con mas pila da lo mismo, o la corrida honda fallo)\n  asunciones: sensor, asuncion: oxc: Coercion Methods Are Pure\n  minificado_invalido: si (node --check rechaza el minificado y acepta el original): sin flags, ninguna\n  decision: div/\n";
 
 fn tabla() -> Vec<Fila> {
@@ -182,6 +184,17 @@ fn tabla() -> Vec<Fila> {
             args: &[],
             destino: Destino::Known,
             meta: &["\nknown: sensor, asuncion: oxc: No TDZ Violation (atrapada)\n", "\nflags_a: tdz_atrapada,contenido_irrelevante\nflags_b: stack,tdz_atrapada\n", TRAZA_TDZ_ATRAPADA],
+        },
+        // R2-H07 (b6-usuario): `coercion` (estatico, sin re-chequeo) y `stack`, que el
+        // re-chequeo de contenido confirma: la razon es la de `stack`, no la del primer
+        // flag de la tabla (antes: "Coercion Methods Are Pure").
+        Fila {
+            caso: "known-causa",
+            programa: "var o = { valueOf() { return 1; } };\nconsole.log(new Error('e').stack.split('\\n').length, 41);\n",
+            back: Back::Rompe("41", "42"),
+            args: &[],
+            destino: Destino::Known,
+            meta: &["\nknown: sensor, asuncion: difuzz: el contenido de Error.prototype.stack cambia al minificar (oxc no lo documenta)\n", TRAZA_CAUSA],
         },
         // b1-b (R1-H03): con el mismo flag, un minificado que node no acepta no es asuncion.
         Fila {
@@ -259,6 +272,16 @@ fn tabla() -> Vec<Fila> {
             back: Back::Rompe("41", "42"),
             args: &["--no-observe"],
             destino: Destino::Descarte("mudo_sin_observar"),
+            meta: &[],
+        },
+        // R2-H06 (b6-usuario): un mudo sin nada que observar ahora tiene su fila en
+        // descartes.tsv (antes no dejaba rastro y la identidad de stats no cerraba).
+        Fila {
+            caso: "mudo-sin-bindings",
+            programa: "0;\n",
+            back: Back::Rompe("0", "1"),
+            args: &[],
+            destino: Destino::Descarte("mudo_sin_bindings"),
             meta: &[],
         },
     ]

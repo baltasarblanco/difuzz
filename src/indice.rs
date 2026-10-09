@@ -234,6 +234,9 @@ fn kind_letter(kind: &str) -> char {
         "ThrowNew" => 'N',
         "ThrowLost" => 'L',
         "ThrowType" => 'Y',
+        // R2-H11: destinos panic/ y recursos/ en la tabla por caso.
+        "Panic" => 'P',
+        "Recursos" => 'R',
         other => other.chars().next().unwrap_or('?'),
     }
 }
@@ -258,18 +261,25 @@ pub fn cruce(dir: &Path) -> std::io::Result<String> {
     let mut counts: BTreeMap<(&str, &str), usize> = BTreeMap::new();
     for r in &rows {
         *counts.entry((r.cell.as_str(), r.dest.as_str())).or_default() += 1;
-        if r.dest == "div" {
-            by_case
-                .entry(r.case.as_str())
-                .or_default()
-                .entry(r.cell.as_str())
-                .or_insert(r.kind.as_str());
+        // R2-H11: tambien panic/ (P) y recursos/ (R) por caso, no solo el conteo
+        // por celda. Si un caso tuviera div y panic en la misma celda, gana div.
+        let celda = match r.dest.as_str() {
+            "div" => Some(r.kind.as_str()),
+            "panic" => Some("Panic"),
+            "recursos" => Some("Recursos"),
+            _ => None,
+        };
+        if let Some(k) = celda {
+            let e = by_case.entry(r.case.as_str()).or_default().entry(r.cell.as_str()).or_insert(k);
+            if r.dest == "div" {
+                *e = k;
+            }
         }
     }
 
     let mut out = String::new();
     out.push_str(
-        "=== divergencias por caso: letra = kind en la celda (S=Stdout E=ExitStatus T=Timeout N=ThrowNew L=ThrowLost Y=ThrowType), . = no diverge\n",
+        "=== divergencias por caso: letra = kind en la celda (S=Stdout E=ExitStatus T=Timeout N=ThrowNew L=ThrowLost Y=ThrowType), P = panic/, R = recursos/, . = nada\n",
     );
     for sh in &shorts {
         out.push_str(&format!("{sh:<width$}"));
@@ -397,6 +407,42 @@ mod tests {
         let e = cruce(&vacio).unwrap_err().to_string();
         assert!(e.ends_with("corridas sin terminar: oxc+carril_a+tal_cual (interrumpida)"), "{e}");
         std::fs::remove_dir_all(&vacio).unwrap();
+    }
+
+    /// R2-H11: panic/ (P) y recursos/ (R) salen por caso en la tabla, no solo
+    /// en el conteo por celda; known/ y lint/ no; div gana si coinciden.
+    #[test]
+    fn cruce_muestra_panics_por_caso() {
+        let d = std::env::temp_dir().join(format!("difuzz-test-indice-panic-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        let a = Index::create(&d, "oxc+core_defaults+tal_cual").unwrap();
+        let b = Index::create(&d, "oxc+core_defaults+tal_cual+carril_b").unwrap();
+        a.record("fixture__utf16", "panic", "Panic", 1);
+        b.record("fixture__utf16", "panic", "Panic", 1);
+        a.record("fixture__lento", "recursos", "Recursos", 2);
+        b.record("fixture__mixto", "panic", "Panic", 3);
+        b.record("fixture__mixto", "div", "Stdout", 4);
+        a.record("fixture__conocida", "known", "Stdout", 5);
+        a.record("fixture__lint", "lint", "EscriturasSobreLiterales", 6);
+        a.commit().unwrap();
+        b.commit().unwrap();
+        drop((a, b));
+        let t = cruce(&d).unwrap();
+        std::fs::remove_dir_all(&d).unwrap();
+        let fila = |caso: &str| -> Vec<String> {
+            t.lines()
+                .find(|l| l.ends_with(caso))
+                .unwrap_or_else(|| panic!("falta {caso} en\n{t}"))
+                .split_whitespace()
+                .map(String::from)
+                .collect()
+        };
+        assert_eq!(fila("fixture__utf16"), ["P", "P", "fixture__utf16"], "{t}");
+        assert_eq!(fila("fixture__lento"), ["R", ".", "fixture__lento"], "{t}");
+        assert_eq!(fila("fixture__mixto"), [".", "S", "fixture__mixto"], "{t}");
+        assert!(!t.lines().any(|l| l.ends_with("fixture__conocida") || l.ends_with("fixture__lint")), "{t}");
+        assert!(t.lines().next().unwrap().contains("P = panic/, R = recursos/"), "{t}");
+        assert!(t.contains("oxc+core_defaults+tal_cual: div=0 known=1 panic=1 lint=1 recursos=1"), "{t}");
     }
 
     /// 7b (aceptacion): un backend nuevo (el falso `identidad`) sale en `--cruce`

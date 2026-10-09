@@ -226,6 +226,11 @@ fn respaldo(src: &str, msg: String, oraculo: &dyn Backend) -> Outcome {
         Outcome::Panic(m2) if m2 == msg => {
             Outcome::Panic(format!("{msg}\noraculo sin debug assertions: el mismo panic (es real, no solo de un debug_assert)"))
         }
+        // R1-H18: el oraculo no se pudo lanzar (p. ej. cambio a mitad de corrida): no
+        // se sabe si el panic es real.
+        Outcome::Panic(m2) if m2.starts_with(crate::subproceso::ORACULO_NO_LANZA) => {
+            Outcome::Panic(format!("{msg}\noraculo sin debug assertions: no se pudo lanzar (no se sabe si el panic es real):\n{m2}"))
+        }
         Outcome::Panic(m2) => Outcome::Panic(format!("{msg}\noraculo sin debug assertions: tambien falla (es real):\n{m2}")),
         Outcome::ParseError { .. } => Outcome::Panic(format!("{msg}\noraculo sin debug assertions: no parsea el fuente")),
         Outcome::CodegenError => Outcome::Panic(format!("{msg}\noraculo sin debug assertions: error de codegen")),

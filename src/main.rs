@@ -7,6 +7,7 @@
 
 mod analisis;
 mod backend;
+mod binario;
 mod cache;
 mod checks;
 mod clasificar;
@@ -41,9 +42,11 @@ use runner::Status;
 
 const USAGE: &str = "\
 uso: difuzz <corpus_dir> [--out DIR] [--minifier M] [--config C] [--forma F] [--carril K] [--timeout-ms N] [--limit N] [--jobs N] [--no-observe]
-             [--invocar] [--mutaciones N] [--cache DIR | --no-cache] [--indice DIR] [--en-proceso] [--mem-hijo MiB]
+             [--invocar] [--mutaciones N] [--mutaciones-extra N] [--stubs] [--cache DIR | --no-cache] [--indice DIR] [--en-proceso]
+             [--mem-hijo MiB]
        difuzz --cruce DIR
        difuzz --emitir ARCHIVO [--minifier M] [--config C] [--forma F] [--carril K]
+       difuzz --help
 
   corpus_dir     raiz con archivos input.js (p. ej. crates/swc_ecma_minifier/tests)
   --out DIR      donde guardar hallazgos, en DIR/<celda>/ (default: ./difuzz-out)
@@ -53,7 +56,7 @@ uso: difuzz <corpus_dir> [--out DIR] [--minifier M] [--config C] [--forma F] [--
   --forma F      tal_cual | en_funcion              (default: tal_cual)
   --carril K     a (script, .cjs) | b (modulo ES, .mjs) (default: a)
   --timeout-ms N timeout por ejecucion de node    (default: 5000)
-  --limit N      procesar solo los primeros N casos
+  --limit N      procesar solo los primeros N casos (N >= 1)
   --jobs N       workers en paralelo                (default: nucleos disponibles)
   --no-observe   no agregar el epilogo observador a programas que no imprimen
   --invocar      el epilogo observador ademas llama a las funciones observadas
@@ -87,7 +90,29 @@ uso: difuzz <corpus_dir> [--out DIR] [--minifier M] [--config C] [--forma F] [--
   Se compila con:  cargo build --release && cargo build --profile oraculo
   y se busca en <este binario>-oraculo y <dir>/../oraculo/difuzz, o solo en DIFUZZ_ORACULO=RUTA si
   esta (DIFUZZ_ORACULO=ninguno lo apaga). Si no hay, un aviso al arrancar y los panics van a
-  panic/ como siempre";
+  panic/ como siempre
+  --help, -h     imprimir esta ayuda (stdout) y salir con 0
+
+  salida (R2-H06): cada caso termina en un destino, div/ known/ panic/ recursos/ (un directorio por
+  caso), en iguales (sin archivo) o con una fila en descartes.tsv (caso, causa, elapsed_ms), incluidos
+  mudo_sin_bindings, ilegible y panic_del_fuzzer. lint/ y asserts/ son ortogonales (el caso cuenta
+  tambien donde termino). Sin --mutaciones (las variantes caso__mutK tambien dejan filas):
+    total = iguales + DIVERGENCIAS + conocidas + PANICS + RECURSOS + filas(descartes.tsv)
+  (un panic del fuzzer despues de contar el caso lo cuenta dos veces: panics_del_fuzzer= lo dice)
+
+  codigos de salida (R2-H09):
+    0    corrida entera (con o sin hallazgos; CORRIDA.txt: completa); --cruce, --emitir y --help sin error
+    1    error de entrada o de entorno: corpus inexistente, que no es directorio o sin input.js; --out
+         que no se puede escribir; escrituras perdidas o casos sin contar (CORRIDA.txt: incompleta);
+         el binario o el oraculo cambiaron a mitad de corrida (R1-H18; CORRIDA.txt: incompleta, con
+         binario_cambiado); --cruce sin indices; --emitir que no puede leer o minificar
+    2    error de uso: opcion desconocida, valor o combinacion invalida (con este texto en stderr)
+    130  interrumpida por SIGINT o SIGTERM (CORRIDA.txt: interrumpida)";
+
+/// R2-H09: los codigos de salida de la tabla del USAGE (0 es el exito).
+const SALIDA_ERROR: i32 = 1;
+const SALIDA_USO: i32 = 2;
+const SALIDA_INTERRUMPIDA: i32 = 130;
 
 struct Cli {
     corpus: PathBuf,
@@ -187,6 +212,11 @@ impl Cli {
                 "--limit" => {
                     let v = it.next().ok_or("--limit necesita un valor")?;
                     limit = Some(v.parse().map_err(|_| format!("--limit invalido: {v}"))?);
+                    // R2-H09: como --jobs 0, error de uso (antes salia con 1 despues
+                    // de borrar la salida de la celda y dejarla incompleta).
+                    if limit == Some(0) {
+                        return Err("--limit tiene que ser >= 1".into());
+                    }
                 }
                 "--jobs" => {
                     let v = it.next().ok_or("--jobs necesita un valor")?;
@@ -527,11 +557,16 @@ fn main() {
     if args.first().map(String::as_str) == Some("--analizar") {
         std::process::exit(analisis::serve());
     }
+    // R2-H09: la ayuda es un pedido, no un error de uso (antes: "opcion desconocida", 2).
+    if args.iter().any(|a| a == "--help" || a == "-h") {
+        println!("{USAGE}");
+        return;
+    }
     let cli = match Cli::parse(args) {
         Ok(c) => c,
         Err(e) => {
             eprintln!("error: {e}\n\n{USAGE}");
-            std::process::exit(2);
+            std::process::exit(SALIDA_USO);
         }
     };
     // `--cruce DIR`: solo lee los indices, no corre nada. Sin index-*.tsv: exit 1.
@@ -540,7 +575,7 @@ fn main() {
             Ok(t) => print!("{t}"),
             Err(e) => {
                 eprintln!("no pude leer los indices en {}: {e}", dir.display());
-                std::process::exit(1);
+                std::process::exit(SALIDA_ERROR);
             }
         }
         return;
@@ -552,7 +587,7 @@ fn main() {
             Ok(t) => print!("{t}"),
             Err(e) => {
                 eprintln!("{e}");
-                std::process::exit(1);
+                std::process::exit(SALIDA_ERROR);
             }
         }
         return;
@@ -573,15 +608,22 @@ fn main() {
     }
     // R1-H05: el oraculo sin debug assertions. Sin el, los panics van a panic/
     // como antes, con el aviso una sola vez aca.
+    let mut vigilados: Vec<PathBuf> = std::env::current_exe().into_iter().collect();
     match subproceso::configurar_oraculo() {
         Ok(Some(p)) => {
             eprintln!("oraculo sin debug assertions: {}", p.display());
             if let Some(aviso) = subproceso::aviso_viejo(&p) {
                 eprintln!("aviso: {aviso}");
             }
+            vigilados.push(p);
         }
         Ok(None) => {}
         Err(aviso) => eprintln!("aviso: {aviso}"),
+    }
+    // R1-H18: si este binario o el oraculo cambian a mitad de corrida, los hijos
+    // que se lancen despues serian otro codigo (binario.rs).
+    for sin in binario::fijar(&vigilados) {
+        eprintln!("aviso: no puedo vigilar si cambia {sin}");
     }
     let stale = runner::clean_stale();
     if stale > 0 {
@@ -591,12 +633,12 @@ fn main() {
     // M27 (d): "no existe", "no es directorio" y "sin input.js" son distintos.
     if let Err(e) = corpus::check_root(&cli.corpus) {
         eprintln!("{e}");
-        std::process::exit(1);
+        std::process::exit(SALIDA_ERROR);
     }
     let files = corpus::collect(&cli.corpus);
     if files.is_empty() {
         eprintln!("no encontre ningun input.js bajo {}", cli.corpus.display());
-        std::process::exit(1);
+        std::process::exit(SALIDA_ERROR);
     }
     let files: Vec<PathBuf> = match cli.limit {
         Some(n) => files.into_iter().take(n).collect(),
@@ -607,7 +649,7 @@ fn main() {
         Ok(p) => p,
         Err(e) => {
             eprintln!("no pude escribir el preload: {e}");
-            std::process::exit(1);
+            std::process::exit(SALIDA_ERROR);
         }
     };
     let cell = cli.cell();
@@ -660,7 +702,7 @@ fn main() {
         eprintln!("no puedo escribir en --out {}", cell_out.display());
         // exit no corre los Drop: el preload (y su directorio) se sueltan a mano.
         drop(preload);
-        std::process::exit(1);
+        std::process::exit(SALIDA_ERROR);
     }
     let triage = triage::Triage::load(&cli.out);
     let known = known::Known::load(
@@ -727,7 +769,8 @@ fn main() {
                         .with_stubs(cli.stubs);
                     let mut stats = Stats::default();
                     loop {
-                        if CANCEL.load(Ordering::SeqCst) {
+                        // R1-H18: con el binario cambiado, no se toma otro caso.
+                        if CANCEL.load(Ordering::SeqCst) || binario::cambio().is_some() {
                             break;
                         }
                         let i = next.fetch_add(1, Ordering::Relaxed);
@@ -743,6 +786,9 @@ fn main() {
                         if r.is_err() {
                             stats.fuzzer_panics += 1;
                             eprintln!("panic del fuzzer en {}", path.display());
+                            // R2-H06: tambien en descartes.tsv (la identidad del USAGE).
+                            let rel = path.strip_prefix(&cli.corpus).unwrap_or(path);
+                            ctx.reporter.discard(rel, "panic_del_fuzzer", Duration::ZERO);
                         }
                         // A6/R1-H12: un fallo del analisis no es hallazgo del minifier.
                         let notas = analisis::tomar_notas();
@@ -768,7 +814,7 @@ fn main() {
             .collect();
         if workers.is_empty() {
             eprintln!("no hay workers: nada que correr");
-            std::process::exit(1);
+            std::process::exit(SALIDA_ERROR);
         }
         for w in workers {
             match w.join() {
@@ -779,11 +825,13 @@ fn main() {
     });
 
     let cancelled = CANCEL.load(Ordering::SeqCst);
+    // R1-H18: el binario o el oraculo cambiaron a mitad de corrida (binario.rs).
+    let cambiado = binario::cambio();
     let late = huerfanos::cosechar();
     if late > 0 {
         eprintln!("subreaper: mate {late} procesos huerfanos al final de la corrida");
     }
-    reporter.finish(!cancelled);
+    reporter.finish(!cancelled && cambiado.is_none());
     if let Err(e) = known.save() {
         eprintln!("no pude guardar known-sintomas.tsv: {e}");
     }
@@ -820,17 +868,33 @@ fn main() {
     if lost > 0 {
         notas.push(format!("escrituras_perdidas: {lost}"));
     }
-    let entera = lost == 0 && stats.total == total;
+    if let Some(c) = &cambiado {
+        notas.push(format!("binario_cambiado: {c}"));
+    }
+    let entera = lost == 0 && stats.total == total && cambiado.is_none();
     corrida.cerrar(if cancelled { "interrumpida" } else if entera { "completa" } else { "incompleta" }, &notas);
     if lost > 0 && !cancelled {
         eprintln!("el reporter no pudo escribir {lost} archivos en {}: la corrida no es confiable", cell_out.display());
         drop(preload);
-        std::process::exit(1);
+        std::process::exit(SALIDA_ERROR);
     }
     if cancelled {
         eprintln!("corrida interrumpida: {} de {total} casos; el indice anterior quedo intacto", stats.total);
         drop(preload);
-        std::process::exit(130);
+        std::process::exit(SALIDA_INTERRUMPIDA);
+    }
+    // R1-H18 (b6-infra): antes que el "incompleta" generico, para que el mensaje diga por que.
+    if let Some(c) = cambiado {
+        eprintln!("corrida cortada (R1-H18): {c}; {} de {total} casos, el indice anterior quedo intacto", stats.total);
+        drop(preload);
+        std::process::exit(SALIDA_ERROR);
+    }
+    // R2-H09: CORRIDA.txt dice incompleta (un worker murio y sus casos no se
+    // contaron): antes salia con 0.
+    if !entera {
+        eprintln!("corrida incompleta: {} de {total} casos contados en {}", stats.total, cell_out.display());
+        drop(preload);
+        std::process::exit(SALIDA_ERROR);
     }
 }
 
@@ -844,7 +908,7 @@ static CANCEL: AtomicBool = AtomicBool::new(false);
 extern "C" fn on_signal(_: libc::c_int) {
     if CANCEL.swap(true, Ordering::SeqCst) {
         // SAFETY: _exit es async-signal-safe.
-        unsafe { libc::_exit(130) };
+        unsafe { libc::_exit(SALIDA_INTERRUMPIDA) };
     }
 }
 
@@ -879,6 +943,8 @@ fn process_case(
         Ok(s) => s,
         Err(_) => {
             stats.unreadable += 1;
+            // R2-H06: cada caso que no termina en un destino tiene su fila.
+            ctx.reporter.discard(rel, "ilegible", Duration::ZERO);
             return;
         }
     };
@@ -1115,6 +1181,8 @@ fn observe_epilogue(
             stats.same += 1;
         } else {
             stats.silent_unobservable += 1;
+            // R2-H06: mudo sin nada que observar, con su fila en descartes.tsv.
+            ctx.reporter.discard(rel, "mudo_sin_bindings", Duration::ZERO);
         }
         return;
     };
@@ -1137,6 +1205,7 @@ fn observe_epilogue(
         // del instrumentador, no un hallazgo.
         minify::Outcome::ParseError { .. } | minify::Outcome::CodegenError => {
             stats.silent_unobservable += 1;
+            ctx.reporter.discard(rel, "mudo_sin_bindings", Duration::ZERO);
             return;
         }
     };
@@ -1545,8 +1614,9 @@ fn confirm(
     Confirmed::Divergence(Box::new((a, b)))
 }
 
-/// Contadores de las variantes (mejora 10). `comparadas` = iguales + divergencias
-/// + conocidas (+ fallas del runner en B).
+/// Contadores de las variantes (mejora 10). R1-H15: `comparadas` = iguales +
+/// divergencias + conocidas + heredadas + fallas del runner en B (`runner - runner_a`);
+/// `no_determinista` es un descarte y queda fuera (ver `contar_variante`).
 #[derive(Default)]
 struct MutStats {
     variantes: usize,
@@ -1562,6 +1632,10 @@ struct MutStats {
     mudas: usize,
     /// El original de la variante no termina solo (timeout, exit, senal) o node no lo acepta.
     original: usize,
+    /// R1-H15: la variante diverge pero su original corrido otra vez en fresco da
+    /// otra salida (mismo criterio que el caso, `confirm` / M3): no es comparable.
+    /// Antes contaba como `iguales`. Tambien va a descartes.tsv (`no_determinista`).
+    no_determinista: usize,
     /// La variante no pasa por el minifier (parse o codegen).
     parse: usize,
     runner: usize,
@@ -1590,6 +1664,7 @@ impl MutStats {
         self.recursos += o.recursos;
         self.mudas += o.mudas;
         self.original += o.original;
+        self.no_determinista += o.no_determinista;
         self.parse += o.parse;
         self.runner += o.runner;
         self.runner_a += o.runner_a;
@@ -1606,7 +1681,7 @@ impl MutStats {
 
     fn line(&self) -> String {
         format!(
-            "mutaciones: variantes={} comparadas={} iguales={} DIVERGENCIAS={} conocidas={} heredadas={} PANICS={} RECURSOS={} LINT={} | descartadas: mudas={} original={} parse={} runner={} (a={} b={}) | bases_sin_parse={}",
+            "mutaciones: variantes={} comparadas={} iguales={} DIVERGENCIAS={} conocidas={} heredadas={} PANICS={} RECURSOS={} LINT={} | descartadas: mudas={} original={} no_determinista={} parse={} runner={} (a={} b={}) | bases_sin_parse={}",
             self.variantes,
             self.comparadas,
             self.iguales,
@@ -1618,6 +1693,7 @@ impl MutStats {
             self.lint,
             self.mudas,
             self.original,
+            self.no_determinista,
             self.parse,
             self.runner,
             self.runner_a,
@@ -1742,22 +1818,38 @@ fn process_mutants(
             m.original += 1;
             continue;
         }
-        m.comparadas += 1;
         let mut s = Stats { skip_kind: base_div, nota_pasada: analisis.nota(), ..Stats::default() };
         compare_and_report(ctx, runner, &mut s, &rel, &original, &minified, a, false, false, &static_flags, names_cfg);
-        m.divergencias += s.divergences;
-        m.conocidas += s.known;
-        m.heredadas += s.inherited;
-        m.runner += s.runner_failed;
-        if s.inherited > 0 {
-            continue;
-        }
-        if s.divergences + s.known > 0 {
+        if contar_variante(m, &s) {
             ctx.reporter.attach(&rel, &files);
-        } else if s.runner_failed == 0 {
-            m.iguales += 1;
         }
     }
+}
+
+/// R1-H15: suma a `m` lo que dejo `compare_and_report` para una variante.
+/// Devuelve `true` si hay hallazgo (div/ o known/) al que adjuntar la variante.
+/// Una variante cuyo A no se reproduce (`confirm` la descarto: `a_nondet`) no
+/// cuenta como comparada ni como igual: es un descarte con causa.
+fn contar_variante(m: &mut MutStats, s: &Stats) -> bool {
+    if s.a_nondet > 0 {
+        m.no_determinista += 1;
+        return false;
+    }
+    m.comparadas += 1;
+    m.divergencias += s.divergences;
+    m.conocidas += s.known;
+    m.heredadas += s.inherited;
+    m.runner += s.runner_failed;
+    if s.inherited > 0 {
+        return false;
+    }
+    if s.divergences + s.known > 0 {
+        return true;
+    }
+    if s.runner_failed == 0 {
+        m.iguales += 1;
+    }
+    false
 }
 
 fn print_hint(out: &Path, stats: &Stats) {
@@ -2183,6 +2275,31 @@ mod tests {
         assert!(t.line().contains(" runner=6 (a=2 b=4) "));
         let m = super::MutStats { runner: 2, runner_a: 2, ..super::MutStats::default() };
         assert!(m.line().contains(" runner=2 (a=2 b=0) "), "{}", m.line());
+    }
+
+    /// R1-H15: una variante descartada por no determinista (`confirm`) no cuenta
+    /// como igual ni como comparada; las demas salidas de `compare_and_report`
+    /// cierran la identidad de `comparadas`.
+    #[test]
+    fn variante_no_determinista_no_es_igual() {
+        use super::{contar_variante, MutStats, Stats};
+        let mut m = MutStats::default();
+        // Lo que deja `compare_and_report` en cada desenlace de una variante.
+        let nondet = Stats { a_nondet: 1, ..Stats::default() };
+        assert!(!contar_variante(&mut m, &nondet));
+        assert_eq!((m.no_determinista, m.iguales, m.comparadas), (1, 0, 0));
+        assert!(m.line().contains(" original=0 no_determinista=1 "), "{}", m.line());
+        assert!(!contar_variante(&mut m, &Stats::default()));
+        assert!(contar_variante(&mut m, &Stats { divergences: 1, ..Stats::default() }));
+        assert!(contar_variante(&mut m, &Stats { known: 1, ..Stats::default() }));
+        assert!(!contar_variante(&mut m, &Stats { inherited: 1, ..Stats::default() }));
+        assert!(!contar_variante(&mut m, &Stats { runner_failed: 1, ..Stats::default() }));
+        assert_eq!((m.iguales, m.divergencias, m.conocidas, m.heredadas, m.runner), (1, 1, 1, 1, 1));
+        assert_eq!(m.comparadas, m.iguales + m.divergencias + m.conocidas + m.heredadas + (m.runner - m.runner_a));
+        assert_eq!(m.no_determinista, 1);
+        let mut t = MutStats::default();
+        t.merge(&m);
+        assert_eq!((t.no_determinista, t.comparadas), (1, 5));
     }
 
     /// M29: --emitir excluye corpus y --cruce.

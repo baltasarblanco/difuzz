@@ -63,6 +63,25 @@ impl Traza {
         self.paso(flag, t);
     }
 
+    /// R2-H07: los flags que un re-chequeo confirmo como causa (`Explica`).
+    /// El paso `contenido` confirma `fn_tostring` y `stack` a la vez; el de
+    /// `violaciones` (b4-a), los flags de violacion que haya (`tdz_atrapada`,
+    /// `coercion_symbol`, `extends_atrapado`: Explica deja todos los presentes;
+    /// `Known::classify_causa` se queda con los que estan en los flags del caso).
+    fn explicados(&self) -> Vec<&'static str> {
+        let mut v = Vec::new();
+        for n in self.pasos.iter().filter(|(_, r)| r.starts_with("Explica")).map(|(n, _)| *n) {
+            if n == "contenido" {
+                v.extend_from_slice(&CONTENT_FLAGS);
+            } else if n == "violaciones" {
+                v.extend(recheck::FLAGS_VIOLACION.iter().map(|(f, _)| *f));
+            } else {
+                v.push(n);
+            }
+        }
+        v
+    }
+
     /// La seccion de meta.txt: `clasificacion:` y una linea por paso.
     pub fn texto(&self) -> String {
         let mut s = String::from("clasificacion:\n");
@@ -213,18 +232,31 @@ pub fn clasificar<'a>(
             }
         }
     }
-    let mut why = ctx.known.classify(rel, &flags);
+    // R2-H07: la razon es la del flag que un re-chequeo confirmo, si hay; si
+    // no, la del primero de la tabla (como antes).
+    let mut why = ctx.known.classify_causa(rel, &flags, &traza.explicados());
     traza.paso("asunciones", why.clone().unwrap_or_else(|| "ninguna (ni flag de la tabla, ni ruta, ni backlog)".into()));
     // M17: solo si la politica del backend lo pide y en el carril A (sloppy).
     let sloppy = ctx.medido.filter(|m| m.kind == minify::SourceKind::Script).and_then(|m| Some((m, m.minifier.politica().solo_sloppy?)));
     if let (None, Some((m, razon))) = (&why, sloppy) {
         match sloppy_only(runner, (m.minifier, m.preset), original, a, b) {
-            Ok(true) => {
+            Ok(Sloppy::Si) => {
                 flags.push("solo_sloppy");
                 why = Some(razon.into());
                 traza.paso("solo_sloppy", "Explica (con \"use strict\" la divergencia desaparece)");
             }
-            Ok(false) => traza.paso("solo_sloppy", "NoExplica (con \"use strict\" sigue)"),
+            Ok(Sloppy::SiRenombrando) => {
+                flags.push("solo_sloppy");
+                why = Some(format!("{razon} (con el binding `arguments` renombrado: ligarlo solo es valido en sloppy)"));
+                traza.paso(
+                    "solo_sloppy",
+                    format!(
+                        "Explica (`arguments` ligado no compila en estricto; con el binding renombrado a {} y \"use strict\" la divergencia desaparece)",
+                        recheck::ARGUMENTS_RENOMBRADO
+                    ),
+                );
+            }
+            Ok(Sloppy::No) => traza.paso("solo_sloppy", "NoExplica (con \"use strict\" sigue)"),
             Err(nota) => {
                 traza.paso("solo_sloppy", format!("Inconcluso: {nota}"));
                 notes.push(nota)
@@ -416,16 +448,37 @@ fn depth_recheck(a: &runner::Exec, b: &runner::Exec, deep: &runner::Exec) -> Opt
 /// b1-b (R1-H01): ademas el camino tiene que sostenerse (recheck::veredicto). Si
 /// en estricto el original toma otra rama, la divergencia puede "desaparecer"
 /// porque la rama con el bug no corre: eso es inconcluso (`Err`), no sloppy.
+/// R2-H10 (terser collapse_vars_arguments): si el original liga `arguments`
+/// (`var arguments = 5`), con "use strict" no compila. Antes eso cortaba el
+/// re-chequeo; ahora se prueba la variante estricta con ese binding renombrado
+/// (`recheck::rename_arguments`) y rige el mismo `veredicto`: solo si la
+/// divergencia desaparece y el camino se sostiene es "solo sloppy"
+/// (`SiRenombrando`). Si renombrar no alcanza para que compile, sigue `Err`.
 fn sloppy_only(
     runner: &runner::Runner,
     (minifier, preset): (backend::Minifier, minify::Preset),
     original: &str,
     a: &runner::Exec,
     b: &runner::Exec,
-) -> Result<bool, String> {
-    let strict = format!("\"use strict\";\n{original}");
+) -> Result<Sloppy, String> {
+    let mut strict = format!("\"use strict\";\n{original}");
+    let mut si = Sloppy::Si;
     if !runner.node_accepts(&strict) {
-        return Err("no es estricto-valido: confirmar en el carril B".into());
+        let renombrado = match analisis::sin_arguments(original) {
+            Ok(r) => r,
+            Err(e) => {
+                analisis::registrar("re-chequeo sloppy (renombrar `arguments`)", &e);
+                None
+            }
+        };
+        let variante = renombrado.map(|r| format!("\"use strict\";\n{r}"));
+        match variante {
+            Some(v) if runner.node_accepts(&v) => {
+                strict = v;
+                si = Sloppy::SiRenombrando;
+            }
+            _ => return Err(rechazo_estricto(runner, &strict)),
+        }
     }
     let cfg = preset.build(minifier, minify::SourceKind::Script);
     let minify::Outcome::Ok { original: o2, minified: m2, .. } = minify::prepare(&strict, &cfg) else {
@@ -437,9 +490,41 @@ fn sloppy_only(
     }
     let b2 = runner.run(&m2);
     match recheck::veredicto(a, b, &a2, &b2) {
-        recheck::Recheck::Explica => Ok(true),
-        recheck::Recheck::NoExplica => Ok(false),
+        recheck::Recheck::Explica => Ok(si),
+        recheck::Recheck::NoExplica => Ok(Sloppy::No),
         recheck::Recheck::Inconcluso(n) => Err(format!("re-chequeo sloppy inconcluso: {n}")),
+    }
+}
+
+/// M17 / R2-H10: resultado concluyente del re-chequeo sloppy.
+#[derive(Debug, PartialEq, Eq)]
+enum Sloppy {
+    /// Con "use strict" la divergencia sigue.
+    No,
+    /// Con "use strict" la divergencia desaparece.
+    Si,
+    /// Idem, con el binding `arguments` renombrado (si no, no compilaba).
+    SiRenombrando,
+}
+
+/// R2-H12: la nota cuando node rechaza la variante estricta. `node --check` no
+/// dice por que; "no es estricto-valido" solo si es un SyntaxError. Un
+/// RangeError es V8 que no puede compilar el fuente (anidamiento extremo), no
+/// sintaxis. Se corre la variante: no compila, asi que no ejecuta nada del
+/// programa; la primera linea del preload dice el tipo (como main.rs con el
+/// original invalido, R2-H03).
+fn rechazo_estricto(runner: &runner::Runner, strict: &str) -> String {
+    let e = runner.run(strict);
+    let primera = e.stdout.lines().next().unwrap_or_default();
+    if primera.starts_with(&format!("{}throw SyntaxError", runner::DZ)) {
+        "no es estricto-valido: confirmar en el carril B".into()
+    } else if primera.starts_with(&format!("{}throw RangeError", runner::DZ)) {
+        "re-chequeo sloppy inconcluso: V8 no compila la variante estricta (RangeError, no es sintaxis)".into()
+    } else {
+        format!(
+            "re-chequeo sloppy inconcluso: node --check rechaza la variante estricta sin SyntaxError ({:?}, {:?})",
+            e.status, primera
+        )
     }
 }
 
@@ -456,6 +541,32 @@ mod tests {
         assert!(!names_visible("a[index++]=1;", "member result 1 1"));
         assert!(!names_visible("o.names;", "x = { a: 1 }"));
         assert!(!names_visible("", "Map(1) { 'a' => 1 }"));
+    }
+
+    /// R2-H07 con los flags de b4-a: el paso `violaciones` con Explica confirma los
+    /// flags de violacion presentes, y la razon es la de ese flag aunque otro de la
+    /// tabla (`coercion`, sin re-chequeo) venga antes.
+    #[test]
+    fn explicados_incluye_violaciones() {
+        use crate::{backend::Minifier, known::Known};
+        use std::path::Path;
+        let mut t = super::Traza::default();
+        t.paso("violaciones", "Explica (quedan tdz_atrapada)");
+        t.paso("with", "NoExplica -> with_irrelevante");
+        let e = t.explicados();
+        for (f, _) in crate::recheck::FLAGS_VIOLACION {
+            assert!(e.contains(&f), "{e:?}");
+        }
+        assert!(!e.contains(&"with") && !e.contains(&"violaciones"), "{e:?}");
+        let dir = std::env::temp_dir().join(format!("difuzz-test-explicados-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let k = Known::load(&dir, &dir, 0, Minifier::Oxc);
+        std::fs::remove_dir_all(&dir).unwrap();
+        let p = Path::new("x/input.js");
+        let flags = ["coercion", "tdz_atrapada"];
+        assert!(k.classify(p, &flags).unwrap().contains("Coercion Methods Are Pure"));
+        let causa = k.classify_causa(p, &flags, &e).unwrap();
+        assert!(causa.contains("oxc: No TDZ Violation (atrapada)"), "{causa}");
     }
 
     /// M17: "solo sloppy" exige que el original sea estricto-valido y que la
@@ -483,11 +594,11 @@ mod tests {
         // TypeError, en estricto ReferenceError: mismo punto, se acepta como sloppy.
         let (o, a, b) = ab("function f(){g();x=10;throw new Error(`foo`);if(x){y();var x;function g(){}(function(){var q;function y(){}})()}}f();\n");
         assert_eq!(a.stdout, "!dz throw TypeError\n");
-        assert_eq!(sloppy_only(&r, (Minifier::Oxc, Preset::CoreDefaults), &o, &a, &b), Ok(true));
+        assert_eq!(sloppy_only(&r, (Minifier::Oxc, Preset::CoreDefaults), &o, &a, &b), Ok(super::Sloppy::Si));
         let with = "with ({}) { console.log(1); }\n";
         assert!(sloppy_only(&r, (Minifier::Oxc, Preset::CarrilA), with, &r.run(with), &r.run(with)).is_err());
         let (o, a, b) = ab("const __proto__ = 0;\nconsole.log(Object.keys({ __proto__ }));\n");
-        assert_eq!(sloppy_only(&r, (Minifier::Oxc, Preset::CoreDefaults), &o, &a, &b), Ok(false));
+        assert_eq!(sloppy_only(&r, (Minifier::Oxc, Preset::CoreDefaults), &o, &a, &b), Ok(super::Sloppy::No));
         // b1-b (R1-H01, c4 10-rt-sloppy-miente): el bug de oxc (borra la IIFE con
         // rest y default con efecto) esta en la rama sloppy. En estricto el
         // original toma la otra rama: antes `Ok(true)` (known/), ahora inconcluso.
@@ -496,6 +607,71 @@ mod tests {
         assert_ne!(b.stdout, a.stdout, "oxc ya no tiene el bug de 9460: buscar otro");
         let s = sloppy_only(&r, (Minifier::Oxc, Preset::CoreDefaults), &o, &a, &b);
         assert!(s.as_ref().is_err_and(|n| n.contains("otro camino")), "{s:?}");
+    }
+
+    /// R2-H10: un original que liga `arguments` no compila en estricto. El
+    /// re-chequeo sloppy lo prueba con el binding renombrado y el mismo
+    /// veredicto: el caso del corpus pasa a "solo sloppy"; un bug real al lado
+    /// (o en la rama que el estricto apaga) no.
+    #[test]
+    fn solo_sloppy_con_arguments_ligado() {
+        use super::{sloppy_only, Sloppy};
+        use crate::{backend::Minifier, minify, minify::Preset, runner};
+        if !crate::test_util::requiere_node() {
+            return;
+        }
+        let preload = runner::Preload::write_tagged("r2h10").unwrap();
+        let r = runner::Runner::new(&preload, crate::test_util::id_runner(), std::time::Duration::from_secs(20));
+        let ab = |src: &str, preset: Preset| {
+            let cfg = preset.build(Minifier::Oxc, minify::SourceKind::Script);
+            let minify::Outcome::Ok { original, minified, .. } = minify::prepare(src, &cfg) else {
+                panic!("no minifica: {src}");
+            };
+            let (a, b) = (r.run(&original), r.run(&minified));
+            (original, a, b)
+        };
+        // terser/compress/collapse_vars/collapse_vars_arguments (corpus completo).
+        let cva = "var outer = function () {\n    var k = 7,\n        arguments = 5,\n        inner = function () {\n            console.log(arguments);\n        };\n    inner(k, 1);\n};\nouter();\n";
+        for preset in [Preset::CoreDefaults, Preset::CarrilA] {
+            let (o, a, b) = ab(cva, preset);
+            assert_eq!(a.stdout, "[Arguments] { '0': 7, '1': 1 }\n");
+            assert_ne!(b.stdout, a.stdout, "oxc ya no tiene el bug de collapse_vars_arguments: buscar otro");
+            assert_eq!(sloppy_only(&r, (Minifier::Oxc, preset), &o, &a, &b), Ok(Sloppy::SiRenombrando), "{preset:?}");
+        }
+        // Miente: `var arguments` inofensivo y el bug de 9460 (IIFE con rest y
+        // default con efecto) en otra sentencia. Renombrado y en estricto, el bug sigue.
+        let (o, a, b) = ab("function rec(v) { console.log(v); }\nfunction g() { var arguments = 1; return arguments; }\nconsole.log(g());\n(function (...[value = rec(\"rest\")]) {})();\nconsole.log(\"fin\");\n", Preset::CoreDefaults);
+        assert_eq!(a.stdout, "1\nrest\nfin\n");
+        assert_ne!(b.stdout, a.stdout, "oxc ya no tiene el bug de 9460: buscar otro");
+        assert_eq!(sloppy_only(&r, (Minifier::Oxc, Preset::CoreDefaults), &o, &a, &b), Ok(Sloppy::No));
+        // Miente (como c4 10-rt-sloppy-miente): el bug esta en la rama que el
+        // estricto apaga. Con `arguments` renombrado sigue siendo inconcluso.
+        let (o, a, b) = ab("function rec(v) { console.log(v); }\nfunction g() { var arguments = 1; return arguments; }\ng();\nfunction f() { return this; }\nif (f() === undefined) {\n  console.log(\"estricto\");\n} else {\n  (function (...[value = rec(\"rest\")]) {})();\n}\nconsole.log(\"fin\");\n", Preset::CoreDefaults);
+        assert_eq!(a.stdout, "rest\nfin\n");
+        assert_ne!(b.stdout, a.stdout);
+        let s = sloppy_only(&r, (Minifier::Oxc, Preset::CoreDefaults), &o, &a, &b);
+        assert!(s.as_ref().is_err_and(|n| n.contains("otro camino")), "{s:?}");
+    }
+
+    /// R2-H12: "no es estricto-valido" solo ante un SyntaxError; un RangeError
+    /// de compilacion (anidamiento extremo) tiene su propia nota.
+    #[test]
+    fn rechazo_estricto_distingue_range_error() {
+        use super::rechazo_estricto;
+        use crate::runner;
+        if !crate::test_util::requiere_node() {
+            return;
+        }
+        let preload = runner::Preload::write_tagged("r2h12").unwrap();
+        let r = runner::Runner::new(&preload, crate::test_util::id_runner(), std::time::Duration::from_secs(20));
+        let sintaxis = "\"use strict\";\nvar arguments = 1;\n";
+        assert!(!r.node_accepts(sintaxis));
+        assert_eq!(rechazo_estricto(&r, sintaxis), "no es estricto-valido: confirmar en el carril B");
+        // R2-H03 (anidado-arrays): 20000 `[` que V8 no puede compilar.
+        let hondo = format!("\"use strict\";\nvar x = {}0{};\n", "[".repeat(20000), "]".repeat(20000));
+        assert!(!r.node_accepts(&hondo));
+        let n = rechazo_estricto(&r, &hondo);
+        assert!(n.contains("RangeError") && !n.contains("no es estricto-valido"), "{n}");
     }
 
     /// b1-b (R2-H02): M16 solo es concluyente si la corrida honda termina y B

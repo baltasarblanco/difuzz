@@ -379,11 +379,13 @@ analisis_de_difuzz_fallo:
         let dir = self.case_dir("lint", case);
         self.index(&dir, "lint", "EscriturasSobreLiterales", crate::known::fnv1a(&[minified]));
         let meta = format!(
-            "case: {}\nkind: EscriturasSobreLiterales\nconfig: {}\nen original: {}\nen minificado: {}\ntriage: {triage}\n\nsospechoso, no veredicto: buscar en minified.cjs una asignacion cuyo destino es [...] o {{...}}\n",
+            // R2-H08: la extension del carril (en B el archivo es minified.mjs).
+            "case: {}\nkind: EscriturasSobreLiterales\nconfig: {}\nen original: {}\nen minificado: {}\ntriage: {triage}\n\nsospechoso, no veredicto: buscar en minified.{} una asignacion cuyo destino es [...] o {{...}}\n",
             case.display(),
             self.config_name,
             counts.0,
             counts.1,
+            self.ext,
         );
         write_all(
             &dir,
@@ -635,6 +637,24 @@ mod tests {
         drop(r);
         let _ = Reporter::new(&d, "celda".into(), "//preload");
         assert_eq!(std::fs::read_to_string(d.join("descartes.tsv")).unwrap().lines().count(), 1);
+        std::fs::remove_dir_all(&d).unwrap();
+    }
+
+    /// R2-H08: el meta de lint/ nombra el archivo que se guardo (.mjs en carril B).
+    #[test]
+    fn lint_nombra_la_extension_del_carril() {
+        use super::Reporter;
+        use crate::minify::SourceKind;
+        let d = std::env::temp_dir().join(format!("difuzz-test-lint-ext-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        for (kind, ext, otra) in [(SourceKind::Module, "mjs", "cjs"), (SourceKind::Script, "cjs", "mjs")] {
+            let r = Reporter::new(&d, "celda".into(), "//preload").with_kind(kind);
+            r.lint(std::path::Path::new("c/input.js"), "o", "m", (0, 1), "-");
+            let meta = std::fs::read_to_string(d.join("lint/c/meta.txt")).unwrap();
+            assert!(meta.contains(&format!("buscar en minified.{ext} ")), "{meta}");
+            assert!(!meta.contains(&format!("minified.{otra}")), "{meta}");
+            assert!(d.join(format!("lint/c/minified.{ext}")).is_file());
+        }
         std::fs::remove_dir_all(&d).unwrap();
     }
 

@@ -77,6 +77,18 @@ impl Known {
         None
     }
 
+    /// R2-H07: como `classify`, pero si algun flag de `causantes` (los que un
+    /// re-chequeo confirmo: clasificar::Traza) esta en `flags` y en la tabla,
+    /// la razon es la de ese y no la del primer flag de la tabla. Antes, con
+    /// `stack` confirmado y `coercion` sin re-chequeo, oxc decia "Coercion".
+    pub fn classify_causa(&self, rel: &Path, flags: &[&str], causantes: &[&str]) -> Option<String> {
+        let confirmados: Vec<&str> = flags.iter().copied().filter(|f| causantes.contains(f)).collect();
+        if let Some((_, why)) = self.reasons.iter().find(|(f, _)| confirmados.contains(f)) {
+            return Some(format!("sensor, asuncion: {why}"));
+        }
+        self.classify(rel, flags)
+    }
+
     /// `Err(anterior)` si el caso ya tenia otro sintoma registrado. El anterior
     /// no se pisa: el caso sigue saliendo en `div/` hasta que alguien lo mire y
     /// borre su linea de known-sintomas.tsv.
@@ -240,6 +252,32 @@ mod tests {
         for f in ["tdz", "proxy", "redefine_global", "fn_tostring", "with", "profundidad"] {
             assert!(id.classify(Path::new("x/input.js"), &[f]).is_none(), "{f}");
         }
+    }
+
+    /// R2-H07: con `stack` confirmado por un re-chequeo y `coercion` sin
+    /// re-chequeo (moment en oxc), la razon es la de `stack`; sin causantes,
+    /// la de siempre (primer flag de la tabla).
+    #[test]
+    fn la_razon_es_la_del_flag_causante() {
+        use crate::backend::Minifier;
+        let dir = std::env::temp_dir().join(format!("difuzz-known-causa-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let k = Known::load(&dir, &dir, 0, Minifier::Oxc);
+        std::fs::remove_dir_all(&dir).unwrap();
+        let p = Path::new("x/input.js");
+        let flags = ["coercion", "stack"];
+        let antes = k.classify(p, &flags).unwrap();
+        assert!(antes.contains("Coercion Methods Are Pure"), "{antes}");
+        assert_eq!(k.classify_causa(p, &flags, &[]), Some(antes.clone()));
+        let causa = k.classify_causa(p, &flags, &["fn_tostring", "stack"]).unwrap();
+        assert!(causa.contains("Error.prototype.stack"), "{causa}");
+        // Un causante que no esta en los flags del caso no cuenta.
+        assert_eq!(k.classify_causa(p, &["coercion"], &["stack"]), Some(antes.clone()));
+        // Uno confirmado gana aunque este despues en la tabla (tdz antes que profundidad).
+        let prof = k.classify_causa(p, &["tdz", "profundidad"], &["profundidad"]).unwrap();
+        assert!(prof.contains("limite de pila"), "{prof}");
+        // Sin flags de la tabla, igual que classify.
+        assert_eq!(k.classify_causa(p, &["contenido_irrelevante"], &["stack"]), None);
     }
 
     #[test]

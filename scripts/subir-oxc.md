@@ -104,11 +104,14 @@ Por celda, cada caso cuyo estado cambia. Estado = destinos del caso (`div:<kind>
 - **Asunciones de oxc** (`crates/oxc_minifier/docs/ASSUMPTIONS.md`): si cambian, cambian las tablas
   de `backend/oxc.rs`. El archivo NO viaja en el crate publicado; con `RED=1` el script compara su
   blob entre los tags `crates_v<vieja>` y `crates_v<nueva>` (gh) y avisa si cambio.
-- **Etiquetas de descarte que dependen del parser de oxc**: `backend/oxc.rs`, funcion `parses_as`,
-  usa solo el parser. Desde 0.153.0 (PR #27220, "reject module syntax in script") el parser rechaza
-  `import`/`export` en script; en 0.152.0 lo hacia la semantica. Por eso, en carril B, 5 casos con
-  sintaxis de modulo pasan de `parse_script` (0.152.0) a `parse_otro` (0.153.0). No cambia ningun
-  hallazgo, pero muestra que las causas de descarte no son estables entre versiones.
+- **Etiquetas de descarte que dependen del parser de oxc**: `backend/oxc.rs`, funcion `parses_as`.
+  En el ejercicio de bajada (0.153.0 -> 0.152.0, b4-c) usaba solo el parser. Desde 0.153.0 (PR
+  #27220, "reject module syntax in script") el parser rechaza `import`/`export` en script; en 0.152.0
+  lo hacia la semantica. Por eso, en carril B, 5 casos con sintaxis de modulo pasaban de
+  `parse_script` (0.152.0) a `parse_otro` (0.153.0). Desde R1-H06 (bloque 6) `parses_as` corre
+  tambien la semantica (`with_check_syntax_error`, como `prepare`), asi que ese movimiento en
+  particular no deberia repetirse (INFERENCIA, no medido con 0.152.0). No cambia ningun hallazgo, pero
+  muestra que las causas de descarte pueden cambiar entre versiones.
 - **El panic y el assert conocidos** (`string-index-utf16`, `issue_973/this_binding_collapse_vars`)
   llevan en `meta.txt` la ruta del registry con la version (`oxc_codegen-<v>/src/str.rs:712:52`):
   siempre aparecen como "mismo destino con otro contenido". Lo que importa es si cambia `archivo:linea`.
