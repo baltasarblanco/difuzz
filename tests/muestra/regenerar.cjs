@@ -1,12 +1,15 @@
 // 9e: regenera (o verifica) la muestra fija del corpus de SWC en tests/muestra/.
 //
 // uso:
-//   node tests/muestra/regenerar.cjs [<repo swc>] [--escribir]
+//   node tests/muestra/regenerar.cjs <corpus> [--escribir]
+//   DIFUZZ_CORPUS=<corpus> node tests/muestra/regenerar.cjs [--escribir]
+// <corpus> es <clon de swc>/crates/swc_ecma_minifier/tests, como el CORPUS de
+// scripts/; sin argumento se usa DIFUZZ_CORPUS, y sin ninguno sale con 2.
 // Sin --escribir solo VERIFICA: recalcula la seleccion y la compara contra
 // LISTA.tsv y contra cada archivo copiado (sale con 1 si algo difiere).
 // Con --escribir borra tests/muestra/casos/ y la vuelve a armar.
-// <repo swc> por defecto: ~/swc-main. El commit de origen sale de
-// `git -C <repo swc> rev-parse HEAD` y queda en la primera linea de LISTA.tsv.
+// El commit de origen sale de `git -C <corpus> rev-parse HEAD` y queda en la
+// primera linea de LISTA.tsv.
 //
 // Criterio (v1, determinista, sin azar):
 // - Casos: cada `input.js` bajo crates/swc_ecma_minifier/tests (sin seguir
@@ -39,8 +42,16 @@ const FIJOS = ['terser/compress/export/issue_2126', 'terser/compress/export/redi
 
 const args = process.argv.slice(2);
 const escribir = args.includes('--escribir');
-const repo = args.find((a) => !a.startsWith('--')) || path.join(process.env.HOME, 'swc-main');
-const raiz = path.join(repo, 'crates/swc_ecma_minifier/tests');
+const SUBDIR = 'crates/swc_ecma_minifier/tests';
+function errorDeUso(msj) {
+  console.error(`${msj}\nuso: node tests/muestra/regenerar.cjs <corpus> [--escribir], o DIFUZZ_CORPUS=<corpus>; <corpus> = <clon de swc>/${SUBDIR}`);
+  process.exit(2);
+}
+const raiz = args.find((a) => !a.startsWith('--')) || process.env.DIFUZZ_CORPUS || '';
+if (!raiz) errorDeUso('falta el corpus de SWC');
+if (!fs.existsSync(raiz) || !fs.statSync(raiz).isDirectory()) errorDeUso(`el corpus no es un directorio: ${raiz}`);
+// Antes el argumento era la raiz del repo de swc: avisar en lugar de no encontrar casos.
+if (fs.existsSync(path.join(raiz, SUBDIR))) errorDeUso(`${raiz} parece la raiz del repo de swc: el corpus es ${path.join(raiz, SUBDIR)}`);
 const aqui = __dirname;
 const casosDir = path.join(aqui, 'casos');
 const listaPath = path.join(aqui, 'LISTA.tsv');
@@ -89,7 +100,7 @@ function seleccionar() {
   return { elegidos, total: todos.length };
 }
 
-const commit = execFileSync('git', ['-C', repo, 'rev-parse', 'HEAD'], { encoding: 'utf8' }).trim();
+const commit = execFileSync('git', ['-C', raiz, 'rev-parse', 'HEAD'], { encoding: 'utf8' }).trim();
 const { elegidos, total } = seleccionar();
 const cabecera = `# swc ${commit} crates/swc_ecma_minifier/tests; criterio v1 (regenerar.cjs); ${elegidos.length} de ${total} casos\n`;
 const lista =

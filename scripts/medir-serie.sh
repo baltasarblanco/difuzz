@@ -27,7 +27,8 @@
 # Escribe en dir_salida: bin-<c>, build-<c>.log, run-<c>.log, stats-<c>.txt, out-<c>/.
 set -u
 case ${1:-} in -h|--help) rg '^#( |$)' -N "$0" | rg -v '^#!'; exit 0;; esac
-RANGO=${1:?uso: medir-serie.sh RANGO [dir_salida]}
+[ -n "${1:-}" ] || { echo "falta RANGO: uso: medir-serie.sh RANGO [dir_salida] (ver --help)" >&2; exit 2; }
+RANGO=$1
 OUT=${2:-out-serie}
 REPO=${REPO:-$(dirname "$0")/..}
 CORPUS=${CORPUS:-${DIFUZZ_CORPUS:-}}

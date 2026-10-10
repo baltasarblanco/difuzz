@@ -1,5 +1,5 @@
-//! difuzz F1: esqueleto que camina (+ confianza: descartes, excepciones,
-//! sensor de asunciones, canales, lint).
+//! difuzz: fuzzer diferencial de minifiers de JavaScript (original y minificado
+//! bajo node; descartes, excepciones, sensor de asunciones, canales, lint).
 //!
 //! GEN (corpus) → MIN (minify, backend swc|oxc) → EXEC (runner) → CMP (oracle).
 //! Mutaciones opcionales (--mutaciones), sin reduccion. Feo a proposito: el
@@ -160,6 +160,28 @@ fn pide_ayuda(args: &[String]) -> bool {
         }
     }
     false
+}
+
+/// Las opciones con valor repetidas (`--jobs 2 --jobs 4`): gana la ultima, como
+/// antes, pero main lo avisa por stderr. Una entrada por opcion repetida, con el
+/// valor que gana, en el orden de su primera aparicion. Recorre como `pide_ayuda`.
+fn opciones_repetidas(args: &[String]) -> Vec<(String, String)> {
+    let mut vistas: Vec<(&str, usize, &str)> = Vec::new();
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        if !OPCIONES_CON_VALOR.contains(&a.as_str()) {
+            continue;
+        }
+        let Some(v) = it.next() else { break };
+        match vistas.iter_mut().find(|(o, ..)| *o == a) {
+            Some(e) => {
+                e.1 += 1;
+                e.2 = v;
+            }
+            None => vistas.push((a, 1, v)),
+        }
+    }
+    vistas.into_iter().filter(|(_, n, _)| *n > 1).map(|(o, _, v)| (o.to_string(), v.to_string())).collect()
 }
 
 struct Cli {
@@ -632,6 +654,7 @@ fn main() {
         println!("{USAGE}");
         return;
     }
+    let repetidas = opciones_repetidas(&args);
     let cli = match Cli::parse(args) {
         Ok(c) => c,
         Err(e) => {
@@ -639,6 +662,10 @@ fn main() {
             std::process::exit(SALIDA_USO);
         }
     };
+    // Antes ganaba la ultima en silencio; sigue ganando, con aviso.
+    for (o, v) in repetidas {
+        eprintln!("aviso: {o} repetida, gana la ultima: {o} {v}");
+    }
     // `--cruce DIR`: solo lee los indices, no corre nada. Sin index-*.tsv: exit 1.
     if let Some(dir) = &cli.cruce {
         match indice::cruce(dir) {
@@ -814,7 +841,7 @@ fn main() {
     }
 
     eprintln!(
-        "difuzz F1 · {} casos · config {} · {jobs} workers · timeout {:?} · observador {} · backlog conocido {} · salida en {} · cache {}",
+        "difuzz · {} casos · config {} · {jobs} workers · timeout {:?} · observador {} · backlog conocido {} · salida en {} · cache {}",
         files.len(),
         cell,
         cli.timeout,
@@ -2567,6 +2594,26 @@ mod tests {
         assert_eq!(Cli::parse(v(&["--out", "-h"])).err().as_deref(), Some("falta <corpus_dir>"));
         assert_eq!(Cli::parse(v(&["c", "--out", "-h"])).unwrap().out, std::path::PathBuf::from("-h"));
         assert!(Cli::parse(v(&["c", "--minifier", "-h"])).err().is_some_and(|e| e.starts_with("--minifier invalido: -h")));
+    }
+
+    /// Opciones con valor repetidas: Cli::parse se queda con la ultima (como antes)
+    /// y opciones_repetidas las nombra, con el valor que gana, para el aviso de main.
+    #[test]
+    fn opciones_repetidas_avisan_y_gana_la_ultima() {
+        use super::{opciones_repetidas, Cli};
+        let v = |a: &[&str]| a.iter().map(|s| s.to_string()).collect::<Vec<String>>();
+        let a = v(&["c", "--jobs", "2", "--minifier", "oxc", "--jobs", "4", "--minifier", "swc", "--jobs", "3"]);
+        let esperado = vec![("--jobs".to_string(), "3".to_string()), ("--minifier".to_string(), "swc".to_string())];
+        assert_eq!(opciones_repetidas(&a), esperado);
+        let cli = Cli::parse(a).unwrap();
+        assert_eq!(cli.jobs, 3);
+        assert_eq!(cli.minifier.name(), "swc");
+        // Sin aviso: una sola vez cada una, flags sin valor repetidos, y el valor de
+        // una opcion que parece opcion (`--out --jobs` es el directorio --jobs).
+        for a in [&["c", "--jobs", "2", "--out", "x"][..], &["c", "--no-cache", "--no-cache"], &["c", "--jobs", "2", "--out", "--jobs"], &[]] {
+            assert!(opciones_repetidas(&v(a)).is_empty(), "{a:?}");
+        }
+        assert_eq!(Cli::parse(v(&["c", "--jobs", "2", "--out", "--jobs"])).unwrap().out, std::path::PathBuf::from("--jobs"));
     }
 
     /// OPCIONES_CON_VALOR al dia con Cli::parse: de cada opcion que nombra el USAGE

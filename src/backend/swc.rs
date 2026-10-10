@@ -249,8 +249,9 @@ fn prepare_inner(src: &str, cfg: &Swc) -> Outcome {
     };
 
     // R1-H21: `optimize` no es la identidad aunque `compress` y `mangle` vengan en
-    // `None`. La auditoria A1 del revisor 1 (07-oct, `trabajo-07oct/revision-1/out/
-    // a1-swc-b.tsv`, MEDIDO por el) paso los 3119 fixtures con los dos en `None`:
+    // `None`. La auditoria A1 de una revision del 07-oct (MEDIDO por el revisor;
+    // hoy la repite `a1_mismo_printer` en tests/muestra/auditoria.rs sobre la
+    // muestra fija) paso los 3119 fixtures con los dos en `None`:
     // en carril B, 3051 de 3053 salen iguales al original y 2 no, porque igual
     // reescribe los `export {...}`: `terser/compress/export/issue_2126` fusiona
     // `export{bar as qux};export{dog}` en `export{bar as qux,dog}` y

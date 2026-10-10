@@ -146,7 +146,7 @@
 14-tdz-positivo	oxc-b-carril_a	known
 # t-principio (09-oct): flags que iban a known/ SIN re-chequeo concluyente. Los adversariales (aNN) llevan el
 # Issue A de ENVIAR.md al lado de algo que prende el flag; con el binario de la fase R iban a known/ en las 4
-# celdas (MEDIDO, trabajo-09oct/tarde/t-principio/out-ataque-antes). Ahora el re-chequeo da NoExplica: div/.
+# celdas (MEDIDO por t-principio, 09-oct). Ahora el re-chequeo da NoExplica: div/.
 # coercion (estatico): re-chequeo nuevo, las definiciones de valueOf/toString/[Symbol.toPrimitive] renombradas.
 15-a01-coercion-getter	oxc-a-core_defaults	div:Stdout
 15-a01-coercion-getter	oxc-a-carril_a	div:Stdout

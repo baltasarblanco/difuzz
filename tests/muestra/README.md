@@ -49,9 +49,12 @@ y si traen `config.json`; su primera linea dice el commit.
 ## Regenerar y verificar
 
 ```sh
-node tests/muestra/regenerar.cjs ~/swc-main              # verifica: sale 1 si algo difiere
-node tests/muestra/regenerar.cjs ~/swc-main --escribir   # borra casos/ y la rearma
+node tests/muestra/regenerar.cjs CORPUS              # verifica: sale 1 si algo difiere
+node tests/muestra/regenerar.cjs CORPUS --escribir   # borra casos/ y la rearma
 ```
+
+`CORPUS` es `<clon de swc>/crates/swc_ecma_minifier/tests`, como en `scripts/`. Sin
+argumento se usa `DIFUZZ_CORPUS`; sin ninguno de los dos sale con 2.
 
 Con otro commit de SWC la seleccion puede cambiar (otros archivos, otros
 hashes de contenido): la verificacion lo dice en la primera linea.
