@@ -143,6 +143,59 @@ Opciones principales (la lista completa, con defaults, está en `difuzz --help`)
 | `--indice DIR` | anotar cada hallazgo en `DIR/index-<celda>.tsv` | |
 | `--en-proceso` | minificar en el proceso de difuzz, sin hijo | |
 | `--mem-hijo MiB` | presupuesto de memoria de los hijos de cada worker | MemTotal/2 / workers |
+| `--sandbox` | node con su modelo de permisos (ver [Sandbox](#sandbox)) | apagado |
+| `--sandbox-red` | `--sandbox` más namespaces de Linux: sin red (ver [Sandbox](#sandbox)) | apagado |
+
+## Sandbox
+
+Por defecto node corre **sin sandbox**: el programa del corpus puede leer y escribir lo que
+pueda el usuario que corre difuzz, lanzar procesos y usar la red. Con un corpus que no es de
+confianza (paquetes de npm, código real) eso es un riesgo.
+
+- **`--sandbox`**: cada ejecución de node (original, minificado, confirmaciones, re-chequeos,
+  `--invocar`, envoltorio de módulos, stubs) corre con el modelo de permisos de node 24:
+  `--permission`, `--allow-fs-read` solo para el preload, el programa (y el envoltorio de
+  módulos) y el directorio de trabajo del caso, `--allow-fs-write` solo para ese directorio y
+  el canal de control de difuzz, y `--allow-inspector` cuando corre el sensor de violaciones.
+  Sin `--allow-child-process`, `--allow-worker`, `--allow-addons` ni `--allow-wasi`: no hay
+  procesos hijos, workers, addons nativos ni WASI (tampoco `process.binding`).
+- **`--sandbox-red`** (solo Linux, sin root, con *user namespaces*): `--sandbox` más un
+  namespace de usuario (el mismo uid y gid adentro), uno de red (solo un loopback propio: un
+  programa que se conecta a sí mismo por 127.0.0.1 anda; lo de afuera da `ENETUNREACH`) y uno
+  de montajes, con `/run` tapado por un tmpfs y cada socket unix del sistema que esté fuera de
+  `/run` (de `/proc/net/unix`, al lanzar cada node) tapado con `/dev/null`. Si no se puede
+  armar, difuzz sale con 1 antes de empezar.
+
+**Simetría.** Original y minificado corren siempre con el mismo sandbox. Si el **original**
+toca el sandbox (un permiso negado, atrapado o no; con `--sandbox-red`, además, un error de
+red), el caso no se compara: va a `descartes.tsv` con causa **`sandbox`**, nunca a `div/` ni
+a `known/` por eso. En cualquier pasada (cruda, observada, de bloques, `--invocar`, envoltorio
+de módulos); en las variantes de `--mutaciones` cuenta en `original=`. Si solo el
+**minificado** toca el sandbox (el minifier cambió qué archivo abre), sí se compara: es un
+cambio de comportamiento. La celda lleva `+sandbox` o `+sandbox_red`, la caché de A no se
+comparte con las corridas sin sandbox y al terminar se imprime (y queda en `CORRIDA.txt`) la
+línea `sandbox: modo=... descartados=N`.
+
+Cómo se reconoce que el original tocó el sandbox: el preload anota `ERR_ACCESS_DENIED` (y
+`ERR_DLOPEN_DISABLED`) en su canal cuando ve el error (no atrapado, en `--invocar` o, con el
+sensor de violaciones, atrapado por el programa), y difuzz busca esos textos en la salida.
+
+**Límites** (lo que el sandbox no frena):
+
+- El modelo de permisos de node **no es una barrera contra código hostil**: **no frena la
+  red** ni `connect` a un **socket unix** (medido con node 24.14.1): con `--sandbox`
+  solo, un programa puede llegar a D-Bus, a systemd-resolved (DNS) o a cualquier servicio con
+  socket. Para eso está `--sandbox-red`.
+- Con `--sandbox-red` quedan alcanzables los sockets unix creados después de lanzar ese node
+  y los que tengan espacios en la ruta; el resto del disco sigue a la vista del sistema
+  operativo (lo frena el modelo de permisos de node, no el namespace).
+- Un permiso negado que el programa atrapa en silencio (sin imprimirlo) sin el sensor de
+  violaciones (swc) o en un callback no se reconoce: A y B ven lo mismo y se comparan.
+- Un programa que imprime por su cuenta uno de los textos de la marca se descarta de más.
+- `--allow-inspector` le deja al programa usar `node:inspector` (con `--sandbox` solo,
+  `inspector.open()` escucha en un puerto local).
+- Los comandos `repro_original:`/`repro_minificado:` de `meta.txt` no llevan las flags del
+  sandbox.
 
 ## Celdas
 

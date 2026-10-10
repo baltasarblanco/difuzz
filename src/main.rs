@@ -28,6 +28,8 @@ mod oracle;
 mod oraculo_tests;
 mod recheck;
 mod runner;
+#[cfg(test)]
+mod sandbox_tests;
 mod stubs;
 mod subproceso;
 #[cfg(test)]
@@ -43,7 +45,7 @@ use runner::Status;
 const USAGE: &str = "\
 uso: difuzz <corpus_dir> [--out DIR] [--minifier M] [--config C] [--forma F] [--carril K] [--timeout-ms N] [--limit N] [--jobs N] [--no-observe]
              [--invocar] [--mutaciones N] [--mutaciones-extra N] [--stubs] [--cache DIR | --no-cache] [--indice DIR] [--en-proceso]
-             [--mem-hijo MiB]
+             [--mem-hijo MiB] [--sandbox | --sandbox-red]
        difuzz --cruce DIR
        difuzz --emitir ARCHIVO [--minifier M] [--config C] [--forma F] [--carril K]
        difuzz --help
@@ -67,6 +69,14 @@ uso: difuzz <corpus_dir> [--out DIR] [--minifier M] [--config C] [--forma F] [--
                  numeradas despues de las clasicas         (default: 0)
   --stubs        M30: un import/require que no resuelve pasa a un modulo stub inerte
                  (igual en A y B) en vez de descartar el caso como enlace (default: off)
+  --sandbox      node corre con su modelo de permisos (--permission de node 24): lee solo el
+                 preload, el programa y su directorio de trabajo, escribe solo en ese directorio,
+                 sin procesos hijos, workers, addons ni WASI. A y B igual; si el original toca
+                 un permiso negado, el caso va a descartes.tsv con causa sandbox (default: off).
+                 NO frena la red ni los sockets unix: no es una barrera contra codigo hostil
+  --sandbox-red  --sandbox mas namespaces de Linux sin root (usuario, red, montajes): sin red
+                 (solo un loopback propio), /run tapado y los sockets unix del sistema tapados.
+                 Solo Linux con user namespaces; si no se puede armar, sale con 1 (default: off)
   --cache DIR    cache de la ejecucion del original, compartible entre celdas (default: <out>/cache-a)
   --no-cache     no leer ni escribir la cache
                  (cache_a_hits no es determinista: con la cache en frio depende de --jobs y del
@@ -173,6 +183,8 @@ struct Cli {
     mutaciones_extra: usize,
     /// M30: stubs para los specifiers que no resuelven (stubs.rs).
     stubs: bool,
+    /// n-sandbox: `--sandbox` / `--sandbox-red` (runner::Sandbox). Por defecto apagado.
+    sandbox: runner::Sandbox,
     kind: minify::SourceKind,
     /// M24: `--cruce DIR`: solo imprimir la tabla de cruce, sin correr nada.
     cruce: Option<PathBuf>,
@@ -205,6 +217,12 @@ impl Cli {
         if self.stubs {
             cell.push_str("+stubs");
         }
+        // n-sandbox: cambia lo que se compara (lo que toca el sandbox va a descartes).
+        match self.sandbox {
+            runner::Sandbox::Apagado => {}
+            runner::Sandbox::Permisos => cell.push_str("+sandbox"),
+            runner::Sandbox::PermisosYRed => cell.push_str("+sandbox_red"),
+        }
         cell
     }
 }
@@ -228,6 +246,7 @@ impl Cli {
         let mut mutaciones = 0;
         let mut mutaciones_extra = 0;
         let mut stubs = false;
+        let mut sandbox = runner::Sandbox::Apagado;
         let mut cruce = None;
         let mut subproceso = true;
         let mut emitir = None;
@@ -293,6 +312,9 @@ impl Cli {
                     mutaciones_extra = v.parse().map_err(|_| format!("--mutaciones-extra invalido: {v}"))?;
                 }
                 "--stubs" => stubs = true,
+                // n-sandbox: --sandbox-red incluye --sandbox (en cualquier orden).
+                "--sandbox" => sandbox = sandbox.max(runner::Sandbox::Permisos),
+                "--sandbox-red" => sandbox = runner::Sandbox::PermisosYRed,
                 "--config" => {
                     let v = it.next().ok_or("--config necesita un valor")?;
                     preset = minify::Preset::parse(&v)
@@ -354,6 +376,7 @@ impl Cli {
             mutaciones,
             mutaciones_extra,
             stubs,
+            sandbox,
             kind,
             cruce,
             subproceso,
@@ -454,6 +477,9 @@ struct Stats {
     fallos_analisis: usize,
     /// A6: de esos, los descartados con causa `analisis` (el epilogo de un mudo).
     descartes_analisis: usize,
+    /// n-sandbox: casos descartados porque el original toco el sandbox (causa `sandbox`).
+    /// En una linea aparte (solo con `--sandbox`): no cambia la de `total=`.
+    a_sandbox: usize,
     /// R1-H13: casos (pasada cruda) cuyo analisis con el parser de SWC necesito
     /// errores recuperados u otro carril, sin perder ningun texto.
     analisis_recuperado: usize,
@@ -513,6 +539,7 @@ impl Stats {
         self.solo_asserts_sin_div += o.solo_asserts_sin_div;
         self.fallos_analisis += o.fallos_analisis;
         self.descartes_analisis += o.descartes_analisis;
+        self.a_sandbox += o.a_sandbox;
         self.analisis_recuperado += o.analisis_recuperado;
         self.analisis_perdido += o.analisis_perdido;
         self.lint_sin_analisis += o.lint_sin_analisis;
@@ -687,6 +714,11 @@ fn main() {
         Some(n) => files.into_iter().take(n).collect(),
         None => files,
     };
+    // n-sandbox: antes de tocar la salida, que el sandbox pedido se pueda armar.
+    if let Err(e) = runner::probar_sandbox(cli.sandbox) {
+        eprintln!("{e}");
+        std::process::exit(SALIDA_ERROR);
+    }
 
     let preload = match runner::Preload::write() {
         Ok(p) => p,
@@ -743,6 +775,12 @@ fn main() {
     // (flags `*_atrapada`, `viol`): no puede compartir cache con una celda que lo usa.
     if !cli.minifier.politica().usa_sensor() {
         cache_parts.push("sin sensor");
+    }
+    // n-sandbox: con el sandbox, A no es la misma ejecucion (lo que niega, falla).
+    match cli.sandbox {
+        runner::Sandbox::Apagado => {}
+        runner::Sandbox::Permisos => cache_parts.push("sandbox v1"),
+        runner::Sandbox::PermisosYRed => cache_parts.push("sandbox red v1"),
     }
     let cache = cache::CacheA::new(cli.cache.clone(), &cache_parts);
     // M27 (a): si --out no se puede escribir, no hay hallazgos que guardar.
@@ -905,11 +943,17 @@ fn main() {
     if stats.sensor_repetidos > 0 {
         println!("sensor (I3): comparados_sin_sensor={}", stats.sensor_repetidos);
     }
+    // n-sandbox: en una linea aparte, solo con --sandbox (no cambia la de `total=`).
+    let linea_sandbox = cli.sandbox.activo().then(|| format!("sandbox: modo={} descartados={}", cli.sandbox.nombre(), stats.a_sandbox));
+    if let Some(l) = &linea_sandbox {
+        println!("{l}");
+    }
     // M27 (a): una escritura perdida del reporter es un hallazgo perdido.
     let lost = oracle::write_errors() - errors_before;
     // R2-H05: solo una corrida entera (todos los casos contados: un worker
     // muerto pierde los suyos) y sin escrituras perdidas es `completa`.
     let mut notas = vec![format!("procesados: {} de {total}", stats.total), format!("stats: {}", stats.line())];
+    notas.extend(linea_sandbox);
     if lost > 0 {
         notas.push(format!("escrituras_perdidas: {lost}"));
     }
@@ -1068,6 +1112,9 @@ fn process_case(
         stats.runner_a += 1;
         ctx.reporter.discard(rel, "runner", a.elapsed);
         eprintln!("runner: {e}");
+        return;
+    }
+    if descarte_sandbox(ctx, runner, stats, rel, &a) {
         return;
     }
 
@@ -1247,6 +1294,9 @@ fn observe_epilogue(
         }
     };
     let (a, a_cached) = ctx.cache.run(runner, &original, &mut stats.cache_hits);
+    if descarte_sandbox(ctx, runner, stats, rel, &a) {
+        return;
+    }
     if !a.ok_with_output() {
         stats.observed_not_ok += 1;
         ctx.reporter.discard(rel, "observado_sin_salida", a.elapsed);
@@ -1335,6 +1385,9 @@ fn pasada_bloques(
         minify::Outcome::ParseError { .. } | minify::Outcome::CodegenError => return Ok(None),
     };
     let (a, a_cached) = ctx.cache.run(runner, &original, &mut stats.cache_hits);
+    if descarte_sandbox(ctx, runner, stats, rel, &a) {
+        return Ok(Some(true));
+    }
     if !a.ok_with_output() {
         stats.bloques_sin_salida += 1;
         return Ok(None);
@@ -1423,6 +1476,9 @@ fn invoke_pass(
         minify::Outcome::ParseError { .. } | minify::Outcome::CodegenError => return false,
     };
     let (a, a_cached) = ctx.cache.run(runner, &original, &mut stats.cache_hits);
+    if descarte_sandbox(ctx, runner, stats, rel, &a) {
+        return true;
+    }
     if !a.ok_with_output() {
         stats.invocar_retry += 1;
         return false;
@@ -1454,6 +1510,9 @@ fn observe_module(
         obs = runner.observing().with_invocar(false);
         (a, a_cached) = ctx.cache.run(&obs, original, &mut stats.cache_hits);
     }
+    if descarte_sandbox(ctx, runner, stats, rel, &a) {
+        return true;
+    }
     // Sin exports el envoltorio no imprime nada. M12: el llamador sigue con el
     // epilogo (antes el caso quedaba en mudos_sin_bindings: 585 en B contra 84 en A).
     if a.ok_silent() {
@@ -1483,6 +1542,20 @@ fn runner_de_celda(preload: &runner::Preload, worker: usize, cli: &Cli) -> runne
         .with_invocar(cli.invocar)
         .with_stubs(cli.stubs)
         .with_sensor(cli.minifier.politica().usa_sensor())
+        .with_sandbox(cli.sandbox)
+}
+
+/// n-sandbox: si esta ejecucion del original toco el sandbox (un permiso negado, atrapado
+/// o no), el caso no se compara: va a descartes con causa `sandbox`, nunca a div/ ni a
+/// known/ por eso. Vale para cualquier pasada (cruda, observada, de bloques, `--invocar`,
+/// envoltorio de modulos). Sin `--sandbox`, `Runner::toco_sandbox` es siempre false.
+fn descarte_sandbox(ctx: &Ctx, runner: &runner::Runner, stats: &mut Stats, rel: &Path, a: &runner::Exec) -> bool {
+    if !runner.toco_sandbox(a) {
+        return false;
+    }
+    stats.a_sandbox += 1;
+    ctx.reporter.discard(rel, "sandbox", a.elapsed);
+    true
 }
 
 /// La config de minificacion de un worker y la de nombres preservados. Solo
@@ -1904,6 +1977,12 @@ fn process_mutants(
             m.runner += 1;
             m.runner_a += 1;
             eprintln!("runner: {e}");
+            continue;
+        }
+        // n-sandbox: el original de la variante toco el sandbox: no se compara (cuenta en
+        // `original=` de las mutaciones, como las demas variantes cuyo original no sirve).
+        if runner.toco_sandbox(&a) {
+            m.original += 1;
             continue;
         }
         if v.tdz_filter && a.flags.iter().any(|f| f == "tdz") {

@@ -43,6 +43,39 @@ pub const LINK_EXIT: i32 = 71;
 pub const SENSOR_CAIDO: &str = "sensor_caido";
 pub const SENSOR_TOPE: &str = "sensor_tope";
 
+/// n-sandbox: linea del canal de control cuando la ejecucion toco el sandbox (un permiso
+/// denegado: la escribe el preload, `notarSandbox`, o `run_file` si la salida lo muestra).
+pub const SANDBOX: &str = "sandbox";
+
+/// n-sandbox (`--sandbox`, `--sandbox-red`): con que encierro corre node. A, B,
+/// confirmaciones, re-chequeos y `--invocar` pasan todos por `run_file` con el mismo.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default)]
+pub enum Sandbox {
+    /// Node sin restricciones (lo de siempre).
+    #[default]
+    Apagado,
+    /// Modelo de permisos de node 24 (`--permission`, ver `permisos_node`).
+    Permisos,
+    /// Permisos mas espacios de nombres de Linux sin root (usuario, red y montajes, ver
+    /// `Aislar`): sin red (solo un loopback propio), /run tapado y los sockets unix del
+    /// sistema tapados con /dev/null. Solo Linux.
+    PermisosYRed,
+}
+
+impl Sandbox {
+    pub fn activo(self) -> bool {
+        self != Sandbox::Apagado
+    }
+
+    pub fn nombre(self) -> &'static str {
+        match self {
+            Sandbox::Apagado => "apagado",
+            Sandbox::Permisos => "permisos",
+            Sandbox::PermisosYRed => "permisos+red",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Status {
     Exited(i32),
@@ -92,6 +125,13 @@ impl Exec {
     /// apago a mitad). `None`: entera con el sensor, o sin el por politica.
     pub fn sensor_degradado(&self) -> Option<&'static str> {
         [SENSOR_CAIDO, SENSOR_TOPE].into_iter().find(|s| self.ctl.lines().any(|l| l == *s))
+    }
+
+    /// n-sandbox: esta ejecucion toco el sandbox (un permiso denegado, atrapado o no). El
+    /// preload solo la escribe con `--permission` y `run_file` solo mira la salida con el
+    /// sandbox prendido; main pregunta por `Runner::toco_sandbox`, que exige el sandbox.
+    pub fn toco_sandbox(&self) -> bool {
+        self.ctl.lines().any(|l| l == SANDBOX)
     }
 
     /// M21: mensaje y stack del throw no atrapado (linea `exc` del canal, con
@@ -297,6 +337,8 @@ pub struct Runner {
     /// solo corre si la politica del backend lo usa (`Politica::usa_sensor`).
     /// `false`: toda ejecucion lleva DIFUZZ_SENSOR=0. Por defecto `true`.
     sensor: bool,
+    /// n-sandbox: el encierro de node (`--sandbox`). Por defecto apagado.
+    sandbox: Sandbox,
     /// Copia que comparte los archivos del runner original (`observing`,
     /// `sin_sensor`): al soltarse no borra nada.
     prestado: bool,
@@ -320,8 +362,21 @@ impl Runner {
             cwd: dir.join(format!("difuzz-{pid}-w{worker}-cwd")),
             stubs: None,
             sensor: true,
+            sandbox: Sandbox::Apagado,
             prestado: false,
         }
+    }
+
+    /// n-sandbox: todas las ejecuciones de este runner (y de sus copias) con `s`.
+    pub fn with_sandbox(mut self, s: Sandbox) -> Runner {
+        self.sandbox = s;
+        self
+    }
+
+    /// n-sandbox: `e` (corrida por este runner) toco el sandbox. Sin sandbox, false siempre:
+    /// ni una linea `sandbox` que un programa escriba a mano en el canal cambia nada.
+    pub fn toco_sandbox(&self, e: &Exec) -> bool {
+        self.sandbox.activo() && e.toco_sandbox()
     }
 
     /// Decision del usuario (09-oct): con `false`, node corre siempre sin el
@@ -358,6 +413,7 @@ impl Runner {
             cwd: self.cwd.clone(),
             stubs: self.stubs.clone(),
             sensor: self.sensor,
+            sandbox: self.sandbox,
             prestado: true,
         }
     }
@@ -709,12 +765,20 @@ fn run_file(r: &Runner, script: &Path, start: Instant, timeout: Duration, opts: 
     cmd.env("TMPDIR", &tmpdir).env("HOME", &r.cwd);
     // --no-warnings: los avisos de node (p. ej. "Invalid asm.js") traen el PID y
     // no son salida del programa.
-    cmd.arg("--no-warnings")
-        .args(opts.node_args)
-        .arg("--require")
-        .arg(preload)
-        .arg(script)
-        .env("TZ", "UTC");
+    cmd.arg("--no-warnings").args(opts.node_args);
+    // n-sandbox: A y B (y todo lo demas) con las mismas flags; el sensor necesita el inspector.
+    if r.sandbox.activo() {
+        cmd.args(permisos_node(r, !opts.sin_sensor));
+    }
+    if r.sandbox == Sandbox::PermisosYRed {
+        let aislar = Aislar::armar();
+        // SAFETY: `aplicar` corre entre fork y exec y solo hace llamadas al sistema sobre
+        // memoria armada antes (no reserva, no toma locks).
+        unsafe {
+            cmd.pre_exec(move || aislar.aplicar());
+        }
+    }
+    cmd.arg("--require").arg(preload).arg(script).env("TZ", "UTC");
     if salted {
         cmd.env("DIFUZZ_SALT", "1");
     }
@@ -819,14 +883,226 @@ fn run_file(r: &Runner, script: &Path, start: Instant, timeout: Duration, opts: 
     let stdout = take(&out_buf);
     let stderr = take(&err_buf);
 
-    let ctl = std::fs::read(&r.ctl).map(|b| decode_lossless(&b)).unwrap_or_default();
+    let mut ctl = std::fs::read(&r.ctl).map(|b| decode_lossless(&b)).unwrap_or_default();
+    let (stdout, stderr) = (decode_lossless(&stdout), decode_lossless(&stderr));
+    // n-sandbox: lo que el preload no ve (un permiso denegado que el programa atrapo e
+    // imprimio, el mensaje del throw en la linea `exc`) se reconoce en la salida.
+    if r.sandbox.activo() && [&stdout, &stderr, &ctl].iter().any(|s| marca_sandbox(s, r.sandbox)) {
+        ctl.push_str(SANDBOX);
+        ctl.push('\n');
+    }
     Exec {
         status,
-        stdout: decode_lossless(&stdout),
-        stderr: decode_lossless(&stderr),
+        stdout,
+        stderr,
         flags: ctl_flags(&ctl),
         elapsed: start.elapsed(),
         ctl,
+    }
+}
+
+/// n-sandbox: textos que solo aparecen si el sandbox nego algo (MEDIDO, node 24.14.1):
+/// el codigo y el mensaje de ERR_ACCESS_DENIED y el de un addon nativo; con la red
+/// cortada, los errores de conexion y de DNS (afuera da ENETUNREACH, MEDIDO; un nombre que
+/// no esta en /etc/hosts no resuelve y un servicio del localhost de la maquina no esta en
+/// el loopback propio). Sobre-aproximado: un programa que imprime uno de estos textos por
+/// su cuenta (o un ECONNREFUSED/ENOTFOUND que sin el sandbox tambien habria dado) tambien
+/// cuenta: el caso se descarta, nunca se reporta de mas.
+fn marca_sandbox(s: &str, modo: Sandbox) -> bool {
+    const PERMISOS: &[&str] = &["ERR_ACCESS_DENIED", "Access to this API has been restricted", "ERR_DLOPEN_DISABLED"];
+    const RED: &[&str] = &["ENETUNREACH", "EHOSTUNREACH", "EAI_AGAIN", "ENOTFOUND", "ECONNREFUSED"];
+    PERMISOS.iter().any(|m| s.contains(m)) || (modo == Sandbox::PermisosYRed && RED.iter().any(|m| s.contains(m)))
+}
+
+/// n-sandbox: las flags del modelo de permisos (`node --help`, v24.14.1: `--permission`,
+/// `--allow-fs-read`, `--allow-fs-write`, `--allow-inspector`; ademas existen
+/// `--allow-child-process`, `--allow-worker`, `--allow-addons` y `--allow-wasi`, que no se
+/// pasan: sin ellas no hay procesos hijos, workers, addons ni WASI). Lectura: el preload, el
+/// programa, el envoltorio de modulos (que lo importa), el manifiesto de stubs y el
+/// directorio de trabajo del caso; escritura: el directorio de trabajo y el canal de
+/// control (el preload lo abre al arrancar). Node no necesito leer nada mas para arrancar,
+/// cargar un `.cjs`/`.mjs` ni resolver un modulo que no existe (MEDIDO: MODULE_NOT_FOUND,
+/// no ERR_ACCESS_DENIED). `--allow-inspector` solo con el sensor de violaciones (sin el,
+/// el sensor no se prende: MEDIDO, sin lineas `viol`).
+fn permisos_node(r: &Runner, sensor: bool) -> Vec<std::ffi::OsString> {
+    let flag = |f: &str, p: &Path| {
+        let mut s = std::ffi::OsString::from(f);
+        s.push(p);
+        s
+    };
+    let mut v = vec![std::ffi::OsString::from("--permission")];
+    for p in [&r.preload, &r.script, &r.wrapper, &r.cwd] {
+        v.push(flag("--allow-fs-read=", p));
+    }
+    if let Some(s) = &r.stubs {
+        v.push(flag("--allow-fs-read=", s));
+    }
+    v.push(flag("--allow-fs-write=", &r.cwd));
+    v.push(flag("--allow-fs-write=", &r.ctl));
+    if sensor {
+        v.push("--allow-inspector".into());
+    }
+    v
+}
+
+/// n-sandbox (`--sandbox-red`): lo que el hijo necesita para aislarse, armado en el padre
+/// (entre fork y exec no se puede reservar memoria). Sin root, con user namespaces
+/// (MEDIDO en esta maquina: `unshare --user --map-current-user --net` anda).
+///
+/// Por que no alcanza con la red: el modelo de permisos de node 24 no frena `connect` a
+/// un socket unix (MEDIDO: un node con `--permission` leyo de un socket fuera de lo
+/// permitido, tambien dentro de un namespace de red), y por los sockets de /run se llega
+/// al DNS de systemd-resolved (MEDIDO: `getent hosts _gateway` resolvio dentro del
+/// namespace de red), a D-Bus y a otros servicios. Por eso, ademas de la red: /run tapado
+/// con un tmpfs y cada socket unix del sistema fuera de /run tapado con /dev/null.
+struct Aislar {
+    uid_map: Vec<u8>,
+    gid_map: Vec<u8>,
+    tapar: Vec<std::ffi::CString>,
+}
+
+impl Aislar {
+    fn armar() -> Aislar {
+        // SAFETY: getuid y getgid no fallan ni tocan memoria.
+        let (uid, gid) = unsafe { (libc::getuid(), libc::getgid()) };
+        Aislar {
+            uid_map: format!("{uid} {uid} 1").into_bytes(),
+            gid_map: format!("{gid} {gid} 1").into_bytes(),
+            tapar: sockets_del_sistema(),
+        }
+    }
+
+    /// En el hijo, entre fork y exec: namespaces de usuario (el mismo uid y gid adentro),
+    /// montajes y red; montajes privados; tmpfs en /run; /dev/null sobre cada socket; y el
+    /// loopback del namespace prendido (un programa que se conecta a si mismo por 127.0.0.1
+    /// anda igual que sin el sandbox; lo de afuera da ENETUNREACH). Al hacer exec con un
+    /// uid que no es 0, node pierde las capacidades del namespace: no puede desmontar nada
+    /// (y sin `--allow-child-process` ni addons tampoco tiene con que).
+    fn aplicar(&self) -> std::io::Result<()> {
+        let err = std::io::Error::last_os_error;
+        let nulo = std::ptr::null::<libc::c_char>();
+        // SAFETY: llamadas al sistema con punteros a datos vivos (self, literales).
+        unsafe {
+            if libc::unshare(libc::CLONE_NEWUSER | libc::CLONE_NEWNS | libc::CLONE_NEWNET) != 0 {
+                return Err(err());
+            }
+            escribir(c"/proc/self/setgroups", b"deny")?;
+            escribir(c"/proc/self/uid_map", &self.uid_map)?;
+            escribir(c"/proc/self/gid_map", &self.gid_map)?;
+            if libc::mount(nulo, c"/".as_ptr(), nulo, libc::MS_REC | libc::MS_PRIVATE, std::ptr::null()) != 0 {
+                return Err(err());
+            }
+            let flags = libc::MS_NOSUID | libc::MS_NODEV | libc::MS_NOEXEC;
+            if libc::mount(c"tmpfs".as_ptr(), c"/run".as_ptr(), c"tmpfs".as_ptr(), flags, std::ptr::null()) != 0 {
+                return Err(err());
+            }
+            for s in &self.tapar {
+                if libc::mount(c"/dev/null".as_ptr(), s.as_ptr(), nulo, libc::MS_BIND, std::ptr::null()) != 0 {
+                    // Un socket que desaparecio entre la lista y el fork ya no hace falta taparlo.
+                    let e = err();
+                    if e.raw_os_error() != Some(libc::ENOENT) {
+                        return Err(e);
+                    }
+                }
+            }
+            prender_loopback()
+        }
+    }
+}
+
+/// n-sandbox: escribe `datos` en `ruta` (los mapas de uid/gid). Solo llamadas al sistema.
+unsafe fn escribir(ruta: &std::ffi::CStr, datos: &[u8]) -> std::io::Result<()> {
+    let fd = libc::open(ruta.as_ptr(), libc::O_WRONLY | libc::O_CLOEXEC);
+    if fd < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    let n = libc::write(fd, datos.as_ptr().cast(), datos.len());
+    let e = std::io::Error::last_os_error();
+    libc::close(fd);
+    if usize::try_from(n).ok() != Some(datos.len()) {
+        return Err(e);
+    }
+    Ok(())
+}
+
+/// n-sandbox: `lo` arriba en el namespace de red nuevo (nace abajo: MEDIDO con `ip link`).
+unsafe fn prender_loopback() -> std::io::Result<()> {
+    let fd = libc::socket(libc::AF_INET, libc::SOCK_DGRAM | libc::SOCK_CLOEXEC, 0);
+    if fd < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    let mut ifr: libc::ifreq = std::mem::zeroed();
+    ifr.ifr_name[0] = b'l' as libc::c_char;
+    ifr.ifr_name[1] = b'o' as libc::c_char;
+    let mut r = libc::ioctl(fd, libc::SIOCGIFFLAGS, &mut ifr as *mut libc::ifreq);
+    if r == 0 {
+        ifr.ifr_ifru.ifru_flags |= libc::IFF_UP as libc::c_short;
+        r = libc::ioctl(fd, libc::SIOCSIFFLAGS, &ifr as *const libc::ifreq);
+    }
+    let e = std::io::Error::last_os_error();
+    libc::close(fd);
+    if r != 0 {
+        return Err(e);
+    }
+    Ok(())
+}
+
+/// n-sandbox: los sockets unix con ruta que hay ahora en el sistema (`/proc/net/unix`,
+/// del namespace de red de difuzz), fuera de /run (que se tapa entero). Se arma en cada
+/// ejecucion: un socket nuevo (otro programa que arranco despues) tambien se tapa. Limite:
+/// una ruta con espacios no se lee entera y queda sin tapar.
+fn sockets_del_sistema() -> Vec<std::ffi::CString> {
+    use std::os::unix::fs::FileTypeExt;
+    let Ok(texto) = std::fs::read_to_string("/proc/net/unix") else {
+        return Vec::new();
+    };
+    let mut v: Vec<std::ffi::CString> = texto
+        .lines()
+        .skip(1)
+        .filter_map(|l| l.split_whitespace().nth(7))
+        .filter(|p| p.starts_with('/') && *p != "/run" && !p.starts_with("/run/"))
+        .filter(|p| std::fs::symlink_metadata(p).is_ok_and(|m| m.file_type().is_socket()))
+        .filter_map(|p| std::ffi::CString::new(p).ok())
+        .collect();
+    v.sort();
+    v.dedup();
+    v
+}
+
+/// n-sandbox: antes de la corrida, que node arranque con el encierro pedido (node con
+/// `--permission` y, con la red, los namespaces y nada mas que `lo`). Si no, la corrida no
+/// empieza: un sandbox que no se puede armar no se reemplaza en silencio por ninguno.
+pub fn probar_sandbox(s: Sandbox) -> Result<(), String> {
+    if !s.activo() {
+        return Ok(());
+    }
+    let js = "const i = Object.keys(require('os').networkInterfaces());\
+              process.exitCode = typeof process.permission !== 'object' ? 3 : (process.argv[1] === 'red' && i.some((n) => n !== 'lo')) ? 4 : 0;";
+    let mut cmd = Command::new(node_path());
+    cmd.env_clear()
+        .arg("--permission")
+        .arg("-e")
+        .arg(js)
+        .arg(if s == Sandbox::PermisosYRed { "red" } else { "permisos" })
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped());
+    if s == Sandbox::PermisosYRed {
+        let aislar = Aislar::armar();
+        // SAFETY: como en run_file.
+        unsafe {
+            cmd.pre_exec(move || aislar.aplicar());
+        }
+    }
+    match cmd.output() {
+        Ok(o) if o.status.success() => Ok(()),
+        Ok(o) => Err(format!(
+            "node con --sandbox ({}) no arranco: {} {}",
+            s.nombre(),
+            o.status,
+            String::from_utf8_lossy(&o.stderr).trim()
+        )),
+        Err(e) => Err(format!("node con --sandbox ({}) no arranco: {e}", s.nombre())),
     }
 }
 

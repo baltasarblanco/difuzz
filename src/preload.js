@@ -166,6 +166,23 @@
     ctl('dz');
     write(s);
   };
+  // n-sandbox (`--sandbox`): un permiso que el modelo de permisos de node nego (ERR_ACCESS_DENIED;
+  // ERR_DLOPEN_DISABLED, el addon nativo) va al canal como `sandbox`: si le paso al original,
+  // runner::Exec::toco_sandbox lo ve y el caso va a descartes. Solo con --permission
+  // (`process.permission` no existe sin el, MEDIDO node 24): sin el flag no se lee nada mas.
+  // Sin getters ni trampas del programa: el descriptor propio (node pone `code` como dato, MEDIDO)
+  // y nunca sobre un Proxy. Las funciones se toman ahora, antes de que corra el programa.
+  const conPermisos = typeof process.permission === 'object' && process.permission !== null;
+  const descriptorPropio = Object.getOwnPropertyDescriptor;
+  const esProxy = require('util').types.isProxy;
+  const notarSandbox = (e) => {
+    if (!conPermisos) return;
+    try {
+      if (e === null || (typeof e !== 'object' && typeof e !== 'function') || esProxy(e)) return;
+      const d = descriptorPropio(e, 'code');
+      if (d && (d.value === 'ERR_ACCESS_DENIED' || d.value === 'ERR_DLOPEN_DISABLED')) ctl('sandbox');
+    } catch {}
+  };
 
   // --- Sensor de asunciones ---------------------------------------------------
   const flags = new Set();
@@ -477,6 +494,7 @@
       if (e instanceof ReferenceError && / before initialization/.test(e.message)) flags.add('tdz');
     } catch {}
     extendsFlag(e);
+    notarSandbox(e);
     const t = thrownType(e);
     ctl(`throw ${t}`);
     // M21: mensaje y stack por el canal (no se comparan; van a a.exc/b.exc del hallazgo).
@@ -809,6 +827,7 @@
       }
       // I2: como en onThrow, la TDZ no atrapada se ubica para el re-chequeo.
       if (k === 'tdz') registrarViolacion('tdz', posDeThrow(e), null, true);
+      notarSandbox(e);
       return `${name}() throws ${thrownType(e)}`;
     }
     let isPromise = false;
@@ -1084,6 +1103,9 @@
         const desc = typeof d.description === 'string' ? d.description : '';
         const f = (p.callFrames || [])[0];
         const url = (f && urls.get(f.location.scriptId)) || '';
+        // n-sandbox: un permiso denegado que el programa atrapa (lo lanza node desde adentro:
+        // el marco de arriba no es file:, por eso va antes del filtro de url).
+        if (conPermisos && (p.reason === 'exception' || p.reason === 'promiseRejection') && /^Error: Access to this API has been restricted/.test(desc)) ctl('sandbox');
         if ((p.reason === 'exception' || p.reason === 'promiseRejection') && url && url !== PRELOAD_URL) {
           for (const [k, re] of DESC) {
             if (re.test(desc)) {
