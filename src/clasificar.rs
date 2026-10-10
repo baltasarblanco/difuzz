@@ -187,7 +187,8 @@ pub fn clasificar<'a>(
     let deep = runner.run_with_args(original, &[runner::DEEP_STACK]);
     // b1-b (R2-H02): solo un M16 concluyente pone el flag (depth_recheck).
     let par = ("profundidad_irrelevante", "profundidad_inconcluso");
-    match depth_recheck(a, b, &deep, || runner.run_with_args(minified, &[runner::DEEP_STACK])) {
+    let a_otra_vez = || runner.run(original);
+    match depth_recheck(a, b, &deep, a_otra_vez, || runner.run_with_args(minified, &[runner::DEEP_STACK])) {
         None => traza.paso("profundidad", "no aplica (A con mas pila da lo mismo, o la corrida honda fallo)"),
         Some(recheck::Recheck::Explica) => {
             traza.recheck("profundidad", &recheck::Recheck::Explica, par);
@@ -495,10 +496,17 @@ fn apply_recheck(
 /// Paso 7 (revision-tint B1, r09: el bug en el catch del RangeError, que con mas pila no
 /// corre): rige `recheck::veredicto_neutralizado`, sin `localizada`: B tiene que dar lo
 /// mismo que A con mas pila.
+/// n-ruido (t-real: Timeout de node con `expiry` de reloj real): que A con mas pila de
+/// otra salida no prueba que A dependa de la pila si A tal cual tampoco se repite. Antes
+/// de atribuir a la pila se corre A otra vez sin cambiar nada (`a_otra_vez`, solo si la
+/// corrida honda difiere): si difiere de A, la causa no es la pila y el re-chequeo es
+/// Inconcluso (no clasifica; el destino lo deciden los demas). Una cuenta de pila
+/// determinista no cambia de camino.
 fn depth_recheck(
     a: &runner::Exec,
     b: &runner::Exec,
     deep: &runner::Exec,
+    a_otra_vez: impl FnOnce() -> runner::Exec,
     deep_b: impl FnOnce() -> runner::Exec,
 ) -> Option<recheck::Recheck> {
     if matches!(deep.status, Status::Failed(_)) || same_exec(deep, a) {
@@ -510,6 +518,12 @@ fn depth_recheck(
             runner::DEEP_STACK,
             deep.status
         )));
+    }
+    let otra = a_otra_vez();
+    if !matches!(otra.status, Status::Failed(_)) && !same_exec(&otra, a) {
+        return Some(recheck::Recheck::Inconcluso(
+            "A tal cual, sin cambiar la pila, tampoco da lo mismo: la salida no es determinista (reloj real u otra fuente) y la diferencia con mas pila no se puede atribuir a la pila".into(),
+        ));
     }
     Some(recheck::veredicto_neutralizado(a, b, deep, &deep_b(), None))
 }
@@ -849,34 +863,44 @@ mod tests {
         let ok = |s: &str| ex(Status::Exited(0), s);
         // t-principio: B con mas pila (`deep_b`) solo se corre si A depende de la pila.
         let nunca = || -> Exec { panic!("no hacia falta correr B con mas pila") };
+        // n-ruido: A tal cual otra vez solo se corre si la corrida honda difiere de A y termino.
+        let nunca_a = || -> Exec { panic!("no hacia falta correr A otra vez") };
         // A no depende de la pila: no hay flag.
-        assert_eq!(depth_recheck(&ok("1\nx\n"), &ok("2\nx\n"), &ok("1\nx\n"), nunca), None);
+        assert_eq!(depth_recheck(&ok("1\nx\n"), &ok("2\nx\n"), &ok("1\nx\n"), nunca_a, nunca), None);
         // Solo cambia la linea que depende de la pila y con mas pila A y B dan lo mismo. Paso 7
         // (revision-tint B1): antes concluyente por `localizada`; ahora inconcluso (div/),
         // porque con la misma forma pasaba r09 (el bug en el catch del RangeError, que con mas
         // pila no corre). Gana el principio; no hay un positivo asi en el golden, la aceptacion
         // ni los known/ del corpus de SWC en oxc (MEDIDO).
-        let r = depth_recheck(&ok("1200\nx\n"), &ok("1500\nx\n"), &ok("2400\nx\n"), || ok("2400\nx\n"));
+        let r = depth_recheck(&ok("1200\nx\n"), &ok("1500\nx\n"), &ok("2400\nx\n"), || ok("1200\nx\n"), || ok("2400\nx\n"));
         assert!(matches!(r, Some(Recheck::Inconcluso(_))), "{r:?}");
-        let r = depth_recheck(&ok("-2\n"), &ok("NaN\n"), &ok("none\n"), || ok("none\n"));
+        let r = depth_recheck(&ok("-2\n"), &ok("NaN\n"), &ok("none\n"), || ok("-2\n"), || ok("none\n"));
         assert!(matches!(r, Some(Recheck::Inconcluso(_))), "{r:?}");
         // t-principio: una cuenta de marcos sin tope (A y B con mas pila tampoco dan lo
         // mismo) ya no es concluyente.
-        assert_eq!(depth_recheck(&ok("1200\nx\n"), &ok("1500\nx\n"), &ok("2400\nx\n"), || ok("3000\nx\n")), Some(Recheck::NoExplica));
+        assert_eq!(depth_recheck(&ok("1200\nx\n"), &ok("1500\nx\n"), &ok("2400\nx\n"), || ok("1200\nx\n"), || ok("3000\nx\n")), Some(Recheck::NoExplica));
         // B da lo mismo que A con mas pila (A se quedo sin pila, B no).
-        assert_eq!(depth_recheck(&ok("corto\n"), &ok("largo\n"), &ok("largo\n"), || ok("largo\n")), Some(Recheck::Explica));
+        assert_eq!(depth_recheck(&ok("corto\n"), &ok("largo\n"), &ok("largo\n"), || ok("corto\n"), || ok("largo\n")), Some(Recheck::Explica));
         // 07-profundidad-miente: ademas de la linea de la pila, B pierde otra (y con mas pila tambien).
-        let r = depth_recheck(&ok("playo 3\n[ '__proto__' ]\n"), &ok("playo 5\n[]\n"), &ok("hondo 1\n[ '__proto__' ]\n"), || ok("hondo 1\n[]\n"));
+        let r = depth_recheck(&ok("playo 3\n[ '__proto__' ]\n"), &ok("playo 5\n[]\n"), &ok("hondo 1\n[ '__proto__' ]\n"), || ok("playo 3\n[ '__proto__' ]\n"), || ok("hondo 1\n[]\n"));
         assert_eq!(r, Some(Recheck::NoExplica));
         // t-principio (a07-profundidad-linea): el bug en la misma linea que la cuenta de pila.
         // Antes `localizada` lo aceptaba (Explica, known/).
-        let r = depth_recheck(&ok("9000 PASS\n"), &ok("9500 FAIL\n"), &ok("18000 PASS\n"), || ok("18000 FAIL\n"));
+        let r = depth_recheck(&ok("9000 PASS\n"), &ok("9500 FAIL\n"), &ok("18000 PASS\n"), || ok("9000 PASS\n"), || ok("18000 FAIL\n"));
         assert_eq!(r, Some(Recheck::NoExplica));
         // R2-H02: la corrida honda en Timeout no es evidencia de profundidad.
-        let r = depth_recheck(&ok("1\n"), &ok("2\n"), &ex(Status::Timeout, ""), nunca);
+        let r = depth_recheck(&ok("1\n"), &ok("2\n"), &ex(Status::Timeout, ""), nunca_a, nunca);
         assert!(matches!(r, Some(Recheck::Inconcluso(ref n)) if n.contains("Timeout")), "{r:?}");
         // Un Failed del fuzzer sigue sin opinar.
-        assert_eq!(depth_recheck(&ok("1\n"), &ok("2\n"), &ex(Status::Failed("x".into()), ""), nunca), None);
+        assert_eq!(depth_recheck(&ok("1\n"), &ok("2\n"), &ex(Status::Failed("x".into()), ""), nunca_a, nunca), None);
+        // n-ruido (t-real, Timeout con `expiry` de reloj real): A con mas pila da otra salida,
+        // pero A tal cual tambien. Antes: B con mas pila coincidia por azar con A con mas pila
+        // y la pila "explicaba" (known/). Ahora inconcluso, sin correr B con mas pila.
+        let r = depth_recheck(&ok("expiry 45\n"), &ok("expiry 46\n"), &ok("expiry 47\n"), || ok("expiry 44\n"), nunca);
+        assert!(matches!(r, Some(Recheck::Inconcluso(ref n)) if n.contains("no es determinista")), "{r:?}");
+        // Si A tal cual falla por el fuzzer, sigue el camino de siempre.
+        let r = depth_recheck(&ok("corto\n"), &ok("largo\n"), &ok("largo\n"), || ex(Status::Failed("x".into()), ""), || ok("largo\n"));
+        assert_eq!(r, Some(Recheck::Explica));
     }
 
     /// b4-a (R1-H04 / C3), de punta a punta con oxc: una TDZ atrapada que oxc borra
@@ -987,8 +1011,12 @@ mod tests {
             ("tostring-neg", format!("function f() {{ return 1; }}\nconsole.log(String(f).length);\n{bug}"), false, "  contenido: NoExplica -> contenido_irrelevante (con el contenido fijo"),
             // n-principio (n-ruido r03): un marco con otro nombre ya no es "contenido"; el mangling
             // de core_defaults (`at falla` -> `at e`) pasa a div/. El positivo es solo de posicion.
+            // n-int: con n-ruido un `e.stack` impreso que solo cambia de posicion ya no diverge
+            // (`compare` normaliza las posiciones); el positivo es un valor que sale de la columna
+            // del marco, que `compare` no puede normalizar.
             ("stack-mangling", "function falla() {\n  var nada = null;\n  return nada.x;\n}\ntry { falla(); } catch (e) { console.log(e.stack); }\n".into(), false, "  contenido: Inconcluso"),
-            ("stack-pos", "var nada = null;\n\ntry {   nada.x; } catch (e) { console.log(e.stack); }\n".into(), true, "  contenido: Explica"),
+            // (oxc saca el bloque y el `new`: la columna pasa de 18 a 7; MEDIDO con el binario de n-int)
+            ("stack-pos", "{ let errorObject = new Error(\"e\"); var s = errorObject.stack; }\nvar l = s.split(\"\\n\");\nconsole.log(l[1].endsWith(\":1:18)\"), l.length);\n".into(), true, "  contenido: Explica"),
             ("stack-nombre", "var ok = delete (0 / 0);\nfunction pasa() { return new Error(\"x\").stack; }\nfunction falla() { return new Error(\"x\").stack; }\nconsole.log((ok ? pasa : falla)());\n".into(), false, "  contenido: Inconcluso"),
             ("stack-neg", format!("try {{ null.x; }} catch (e) {{ console.log(e.stack.split(\"\\n\").length); }}\n{bug}"), false, "  contenido: NoExplica"),
             ("profundidad-neg", "let n = 0;\nfunction r() { n++; r(); }\ntry { r(); } catch (e) {}\nlet result = \"FAIL\";\nconst o = { ...{ get prop() { result = \"PASS\"; } } };\nconsole.log(n, result);\nconsole.log(o);\n".into(), false, "  profundidad: NoExplica"),

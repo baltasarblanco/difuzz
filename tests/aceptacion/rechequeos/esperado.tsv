@@ -185,13 +185,12 @@
 17-a04-stack-getter	oxc-a-carril_a	div:Stdout
 17-a04-stack-getter	oxc-b-core_defaults	div:Stdout
 17-a04-stack-getter	oxc-b-carril_a	div:Stdout
-# n-principio: en core_defaults el minificado renombra el marco (`at falla` -> `at e`); un marco con otro
-# nombre ya no se acepta como contenido (puede ser otra funcion: n-ruido r03), asi que pasa a div/. En carril_a
-# (keep_fnames) solo cambian las posiciones: known/.
+# 17-stack-positivo: en core_defaults el minificado renombra el marco (`at falla` -> `at e`); un marco
+# con otro nombre ya no se acepta como contenido (puede ser otra funcion: n-ruido r03), asi que pasa a
+# div/ (n-principio). En carril_a (keep_fnames) A y B solo difieren en columnas y `compare` no ve las
+# posiciones de los marcos (n-ruido): igual. MEDIDO con el binario integrado (n-int, 09-oct).
 17-stack-positivo	oxc-a-core_defaults	div:Stdout
-17-stack-positivo	oxc-a-carril_a	known
 17-stack-positivo	oxc-b-core_defaults	div:Stdout
-17-stack-positivo	oxc-b-carril_a	known
 # profundidad (M16): el bug en la MISMA linea que la cuenta de pila pasaba `localizada`. Ahora B tambien corre
 # con mas pila y rige `veredicto`. Costo (decision abierta): una cuenta de marcos sin tope (18-profundidad-cuenta)
 # ya no es concluyente y va a div/ (antes known/, MEDIDO).

@@ -1176,6 +1176,23 @@ mod tests {
         assert!(a.stdout.starts_with("4242 4241 [ 0, 1000000 ] 3000000n 1\n"), "{}", a.stdout);
     }
 
+    /// n-ruido (t-real): los timers de node salen opacos (su estado trae el reloj real
+    /// del event loop: `_idleStart`, `expiry`); una clase del programa llamada Timeout no.
+    #[test]
+    fn timers_de_node_opacos() {
+        use super::{Preload, Runner, Status};
+        use std::time::Duration;
+        if !crate::test_util::requiere_node() {
+            return;
+        }
+        let preload = Preload::write_tagged("timers").unwrap();
+        let r = Runner::new(&preload, crate::test_util::id_runner(), Duration::from_secs(20));
+        let js = "const t = setTimeout(() => {}, 5), v = setInterval(() => {}, 7), i = setImmediate(() => {});\nv.resultado = \"PASS\";\nclass Timeout { constructor() { this.x = 1; } }\n__difuzzObserve([\"t\", t], [\"v\", v], [\"i\", i], [\"o\", { t, d: { i } }], [\"c\", new Timeout()]);\nclearTimeout(t); clearInterval(v); clearImmediate(i);\n";
+        let a = r.run(js);
+        assert_eq!(a.status, Status::Exited(0), "{}", a.stderr);
+        assert_eq!(a.stdout, "t = [Timeout]\nv = [Timeout]{\"resultado\": \"PASS\"}\ni = [Immediate]\no = {\"t\": [Timeout], \"d\": {\"i\": [Immediate]}}\nc = inst{\"x\": 1}\n");
+    }
+
     /// M21: el mensaje y el stack del throw llegan por el canal, sin prender el
     /// flag `stack` (lo lee el preload, no el programa).
     #[test]

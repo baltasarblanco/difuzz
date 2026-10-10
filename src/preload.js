@@ -255,6 +255,28 @@
   };
   // (Definido antes de `ser`, que lo usa para los Error: M6.)
 
+  // n-ruido (t-real): los handles de timers de node (`Timeout` de setTimeout/setInterval,
+  // `Immediate` de setImmediate) guardan estado del reloj real del event loop
+  // (`_idleStart`, `expiry` de su TimersList): serializados campo por campo, A y B dan
+  // numeros distintos sin que el programa cambie. Se imprimen opacos. Los prototipos se
+  // toman aca de un timer propio (creado y cancelado antes de que corra el programa): un
+  // objeto del programa no puede compartirlos, y una clase propia llamada Timeout (cuyo
+  // nombre el minifier puede cambiar) no los usa. Lo que el programa le agrego al handle
+  // (claves string que el de referencia no tiene: `t.resultado = x`) si se imprime: si no,
+  // un bug guardado ahi quedaria oculto.
+  const OPACOS = new Map();
+  const opacar = (h, nombre) => OPACOS.set(Object.getPrototypeOf(h), [nombre, new Set(Reflect.ownKeys(h))]);
+  try {
+    const t = setTimeout(() => {}, 0);
+    opacar(t, '[Timeout]');
+    clearTimeout(t);
+  } catch {}
+  try {
+    const i = setImmediate(() => {});
+    opacar(i, '[Immediate]');
+    clearImmediate(i);
+  } catch {}
+
   // Serializador determinista. Nunca invoca getters (lee descriptores) y nunca imprime
   // codigo fuente ni nombres de funciones: esos cambian legitimamente al minificar.
   const ser = (v, depth, ancestors) => {
@@ -274,6 +296,18 @@
     try {
       if (v instanceof RealDate) return `Date(${RealDate.prototype.getTime.call(v)})`;
       if (v instanceof RegExp) return String(v);
+      const opaco = OPACOS.get(Object.getPrototypeOf(v));
+      if (opaco) {
+        const [nombre, propias] = opaco;
+        const extra = Reflect.ownKeys(v).filter((k) => typeof k === 'string' && !propias.has(k));
+        if (!extra.length) return nombre;
+        const out = extra.slice(0, MAX_ITEMS).map((k) => {
+          const d = Object.getOwnPropertyDescriptor(v, k);
+          return `${JSON.stringify(k)}: ${d && 'value' in d ? ser(d.value, depth + 1, ancestors) : '[accessor]'}`;
+        });
+        if (extra.length > MAX_ITEMS) out.push(`...${extra.length}`);
+        return `${nombre}{${out.join(', ')}}`;
+      }
       // M6: ni name ni message (traen nombres locales que el minifier renombra,
       // y una subclase propia tambien cambia de nombre): solo el tipo, como un throw.
       if (v instanceof Error) return `Error(${thrownType(v)})`;

@@ -197,14 +197,41 @@ fn tabla() -> Vec<Fila> {
         // flag de la tabla (antes: "Coercion Methods Are Pure").
         // t-principio: antes el "bug" de Rompe (41 -> 42) iba en la misma linea que el largo
         // del stack y el paso contenido lo aceptaba; ahora A' y B' con el contenido fijo lo
-        // ven (NoExplica). El minificado solo corre una columna: cambia el contenido del stack.
+        // ven (NoExplica).
+        // n-ruido (t-real): un stack que solo cambia de columna al minificar no diverge.
         Fila {
-            caso: "known-causa",
+            caso: "stack-columna",
             programa: "var o = { valueOf() { return 1; } };\nconsole.log(new Error('e').stack);\n",
             back: Back::Rompe("console.log(new", "console.log( new"),
             args: &[],
+            destino: Destino::Ninguno,
+            meta: &[],
+        },
+        // n-ruido: antes el minificado solo corria una columna; ahora `compare` no ve las
+        // posiciones de los marcos (eso es `Ninguno`, igual).
+        // n-int: el programa de n-ruido (el minificado cambia `function h` por `function k`)
+        // va a div/ con `cabeza_marco` de n-principio: un marco con otro nombre puede ser
+        // otra funcion (`stack-nombre-marco`, abajo). El positivo es un valor que sale de la
+        // columna del marco (el minificado la corre): `compare` no lo puede normalizar, y con
+        // el contenido fijo A' y B' dan lo mismo que B. La cuenta de lineas es para que la
+        // sal (un marco de mas) cambie la salida de A.
+        Fila {
+            caso: "known-causa",
+            programa: "var o = { valueOf() { return 1; } };\nvar s = new Error('e').stack;\nvar l = s.split('\\n');\nconsole.log(l[1].endsWith(':1:35)'), l.length);\n",
+            back: Back::Rompe("s=new", "s= new"),
+            args: &[],
             destino: Destino::Known,
             meta: &["\nknown: sensor, asuncion: difuzz: el contenido de Error.prototype.stack cambia al minificar (oxc no lo documenta)\n", TRAZA_CAUSA],
+        },
+        // Sin el `valueOf`: aca (sin `Medido`) `coercion` no se re-chequea y lo mandaria a
+        // known/ por "Coercion Methods Are Pure" (MEDIDO en n-int).
+        Fila {
+            caso: "stack-nombre-marco",
+            programa: "var f = function h() { return new Error('e').stack; };\nconsole.log(f());\n",
+            back: Back::Rompe("function h(", "function k("),
+            args: &[],
+            destino: Destino::Div,
+            meta: &["kind: Stdout\n", "\nknown: no\n", "\nclasificacion:\n  contenido: Inconcluso -> contenido_inconcluso: con la asuncion neutralizada la divergencia desaparece, pero el minificado no se comporta como el original neutralizado (B != A'): el codigo neutralizado puede tener el bug\n  profundidad: no aplica (A con mas pila da lo mismo, o la corrida honda fallo)\n  asunciones: ninguna (ni flag de la tabla, ni ruta, ni backlog)\n  decision: div/\n"],
         },
         // b1-b (R1-H03): con el mismo flag, un minificado que node no acepta no es asuncion.
         Fila {

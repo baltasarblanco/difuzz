@@ -45,7 +45,11 @@ pub fn compare(a: &Exec, b: &Exec) -> Verdict {
         // Error del fuzzer, no del programa: no es divergencia. main lo cuenta.
         Status::Failed(_) => return Verdict::Same,
     }
-    let (na, nb) = (normalize_names(&a.stdout), normalize_names(&b.stdout));
+    // n-ruido: sin las posiciones de los marcos de stack (normalize_stack_positions).
+    // Solo aca: los re-chequeos que miran lineas (recheck::localizada*) ven el marco
+    // entero, con su posicion, para reconocerlo como marco.
+    let n = |s: &str| normalize_stack_positions(&normalize_names(s));
+    let (na, nb) = (n(&a.stdout), n(&b.stdout));
     if na == nb {
         Verdict::Same
     } else {
@@ -108,6 +112,73 @@ pub fn normalize_names(s: &str) -> String {
         rest = &after[close + 1..];
     }
     out.push_str(rest);
+    out
+}
+
+/// n-ruido (t-real: ~12 casos en known/ solo por columnas): en un marco de stack
+/// (`at f (archivo:L:C)`, `at archivo:L:C`) cambia cada `archivo:L:C` por `<pos>`:
+/// archivo, linea y columna cambian legitimamente al minificar. Conserva el resto del
+/// marco (nombre de la funcion, `new`, `async`, `[as x]`, `<anonymous>` sin posicion,
+/// `native`) y la cantidad y el orden de los marcos: un bug que se ve en el stack fuera
+/// de las posiciones sigue divergiendo (los nombres tienen su propio re-chequeo).
+///
+/// Un marco empieza en `at ` precedido por uno o mas espacios y, antes de ellos, el
+/// comienzo de la linea o un `\n` escapado (un stack guardado en un string sale en
+/// JSON, en una sola linea). Termina en el fin de la linea, en otro `\n` escapado o en
+/// una comilla. Solo se toca un `:L:C` seguido del fin del marco, `)` o `,`. Limite: un
+/// programa que imprime a proposito una linea con esa forma (`  at 10:12:30`) pierde
+/// la posicion en la comparacion.
+pub fn normalize_stack_positions(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for line in s.split_inclusive('\n') {
+        let (mut copied, mut i) = (0, 0);
+        while let Some(k) = line[i..].find("at ") {
+            let p = i + k;
+            let antes = &line[..p];
+            let sin = antes.trim_end_matches(' ');
+            if sin.len() == antes.len() || !(sin.is_empty() || sin.ends_with("\\n")) {
+                i = p + 3;
+                continue;
+            }
+            let cuerpo = p + 3;
+            let fin = [line[cuerpo..].find("\\n"), line[cuerpo..].find('"'), line[cuerpo..].find('\n')]
+                .into_iter()
+                .flatten()
+                .min()
+                .map_or(line.len(), |j| cuerpo + j);
+            out.push_str(&line[copied..cuerpo]);
+            out.push_str(&sin_posiciones(&line[cuerpo..fin]));
+            (copied, i) = (fin, fin);
+        }
+        out.push_str(&line[copied..]);
+    }
+    out
+}
+
+/// El cuerpo de un marco con cada `archivo:L:C` cambiado por `<pos>` (el archivo va
+/// desde el ultimo espacio o `(` anterior).
+fn sin_posiciones(f: &str) -> String {
+    let b = f.as_bytes();
+    let digitos = |k: usize| b[k..].iter().take_while(|c| c.is_ascii_digit()).count();
+    let (mut out, mut copied, mut i) = (String::with_capacity(f.len()), 0, 0);
+    while i < b.len() {
+        if b[i] == b':' {
+            let n1 = digitos(i + 1);
+            if n1 > 0 && b.get(i + 1 + n1) == Some(&b':') {
+                let k = i + 2 + n1;
+                let j = k + digitos(k);
+                if j > k && (j == b.len() || matches!(b[j], b')' | b',')) {
+                    let start = f[copied..i].rfind([' ', '(']).map_or(copied, |s| copied + s + 1);
+                    out.push_str(&f[copied..start]);
+                    out.push_str("<pos>");
+                    (copied, i) = (j, j);
+                    continue;
+                }
+            }
+        }
+        i += 1;
+    }
+    out.push_str(&f[copied..]);
     out
 }
 
@@ -573,6 +644,34 @@ mod tests {
         assert_ne!(n("[Function \n1\n]"), n("[Function \n2\n]"));
         assert_ne!(n("[class [1] 2]"), n("[class [3] 4]"));
         assert_eq!(n("[Function: f]\n[class A]"), "[Function]\n[class]");
+    }
+
+    /// n-ruido (t-real): las posiciones de los marcos se borran; el nombre, la cantidad y
+    /// el orden de los marcos no.
+    #[test]
+    fn stack_sin_posiciones() {
+        // Como en `compare`.
+        let n = |s: &str| super::normalize_stack_positions(&n(s));
+        let a ="TypeError: x\n    at cli (/tmp/difuzz-1-tmp/difuzz-1-w0.cjs:2:1016)\n    at /tmp/difuzz-1-tmp/difuzz-1-w0.cjs:2:929\n    at new A (node:internal/x:12:3)\n    at async Promise.all (index 0)\n";
+        let b = "TypeError: x\n    at cli (/tmp/difuzz-1-tmp/difuzz-1-w0.cjs:2:658)\n    at /tmp/difuzz-1-tmp/difuzz-1-w0.cjs:2:835\n    at new A (node:internal/x:12:3)\n    at async Promise.all (index 0)\n";
+        assert_eq!(n(a), n(b));
+        assert_eq!(n(a), "TypeError: x\n    at cli (<pos>)\n    at <pos>\n    at new A (<pos>)\n    at async Promise.all (index 0)\n");
+        // Carril B (file://) y eval.
+        assert_eq!(n("    at f (file:///tmp/d-w0.mjs:1:407)"), "    at f (<pos>)");
+        assert_eq!(n("    at eval (eval at g (/a.js:1:2), <anonymous>:1:5)"), "    at eval (eval at g (<pos>), <pos>)");
+        // Un stack guardado en un string sale en JSON, en una linea.
+        let j = |c: u32| format!("x = \"Error: e\\n    at serializeError (/tmp/w2.cjs:1:{c})\\n    at /tmp/w2.cjs:1:{}\"", c + 9);
+        assert_eq!(n(&j(218)), n(&j(75)));
+        assert_eq!(n(&j(218)), "x = \"Error: e\\n    at serializeError (<pos>)\\n    at <pos>\"");
+        // Lo que no es posicion sigue: otro nombre, otro marco, otro orden, otra cabecera.
+        assert_ne!(n("    at cli (/a.js:1:2)"), n("    at s (/a.js:1:2)"));
+        assert_ne!(n("E\n    at f (/a.js:1:2)\n"), n("E\n    at f (/a.js:1:2)\n    at g (/a.js:3:4)\n"));
+        assert_ne!(n("    at f (/a:1:2)\n    at g (/a:3:4)\n"), n("    at g (/a:1:2)\n    at f (/a:3:4)\n"));
+        assert_ne!(n("TypeError: x\n    at f (/a.js:1:2)"), n("RangeError: x\n    at f (/a.js:1:2)"));
+        // Solo marcos: texto con "at" en medio de la linea, o sin `:L:C` al final, no se toca.
+        assert_eq!(n("look at /a.js:1:2"), "look at /a.js:1:2");
+        assert_eq!(n("    at x:1:2b"), "    at x:1:2b");
+        assert_eq!(n("    at 10:20"), "    at 10:20");
     }
 
     #[test]
