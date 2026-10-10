@@ -348,6 +348,11 @@ pub fn sin_extends(src: &str, kind: SourceKind) -> Result<Option<String>, String
     correr("extends", kind, &[src]).map(|v| v.and_then(|mut v| v.pop()))
 }
 
+/// t-principio: `recheck::neutralize_coercion`.
+pub fn sin_coercion(src: &str, kind: SourceKind) -> Result<Option<String>, String> {
+    correr("coercion", kind, &[src]).map(|v| v.and_then(|mut v| v.pop()))
+}
+
 /// b4-a: `recheck::neutralize_violaciones` (`spec`: una violacion por linea).
 pub fn sin_violaciones(src: &str, kind: SourceKind, spec: &str) -> Result<Option<String>, String> {
     correr("violaciones", kind, &[src, spec]).map(|v| v.and_then(|mut v| v.pop()))
@@ -402,6 +407,7 @@ fn ejecutar(op: &str, kind: SourceKind, p: &[&str]) -> Option<Vec<String>> {
         ("with", [src]) => crate::recheck::neutralize_with(src, kind).map(|s| vec![s]),
         ("arguments", [src]) => crate::recheck::rename_arguments(src).map(|s| vec![s]),
         ("extends", [src]) => crate::backend::swc::neutralize_extends(src, kind).map(|s| vec![s]),
+        ("coercion", [src]) => crate::recheck::neutralize_coercion(src, kind).map(|s| vec![s]),
         ("violaciones", [src, spec]) => crate::recheck::neutralize_violaciones(src, kind, spec).map(|s| vec![s]),
         ("checks", [src, o, m, minifier]) => {
             let minifier = Minifier::parse(minifier)?;

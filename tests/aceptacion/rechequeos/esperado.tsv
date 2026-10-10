@@ -144,3 +144,59 @@
 14-tdz-positivo	oxc-a-carril_a	known
 14-tdz-positivo	oxc-b-core_defaults	known
 14-tdz-positivo	oxc-b-carril_a	known
+# t-principio (09-oct): flags que iban a known/ SIN re-chequeo concluyente. Los adversariales (aNN) llevan el
+# Issue A de ENVIAR.md al lado de algo que prende el flag; con el binario de la fase R iban a known/ en las 4
+# celdas (MEDIDO, trabajo-09oct/tarde/t-principio/out-ataque-antes). Ahora el re-chequeo da NoExplica: div/.
+# coercion (estatico): re-chequeo nuevo, las definiciones de valueOf/toString/[Symbol.toPrimitive] renombradas.
+15-a01-coercion-getter	oxc-a-core_defaults	div:Stdout
+15-a01-coercion-getter	oxc-a-carril_a	div:Stdout
+15-a01-coercion-getter	oxc-b-core_defaults	div:Stdout
+15-a01-coercion-getter	oxc-b-carril_a	div:Stdout
+15-a08-coercion-uso-getter	oxc-a-core_defaults	div:Stdout
+15-a08-coercion-uso-getter	oxc-a-carril_a	div:Stdout
+15-a08-coercion-uso-getter	oxc-b-core_defaults	div:Stdout
+15-a08-coercion-uso-getter	oxc-b-carril_a	div:Stdout
+# Positivo (terser comparing/keep_comparisons): oxc borra las comparaciones que llaman a valueOf.
+15-coercion-positivo	oxc-a-core_defaults	known
+15-coercion-positivo	oxc-a-carril_a	known
+15-coercion-positivo	oxc-b-core_defaults	known
+15-coercion-positivo	oxc-b-carril_a	known
+# builtins (runtime): re-chequeo nuevo, lo pisado fijado a su valor original (DIFUZZ_BUILTINS_FIJOS).
+16-a02-builtins-getter	oxc-a-core_defaults	div:Stdout
+16-a02-builtins-getter	oxc-a-carril_a	div:Stdout
+16-a02-builtins-getter	oxc-b-core_defaults	div:Stdout
+16-a02-builtins-getter	oxc-b-carril_a	div:Stdout
+# Positivo: oxc pliega "abc".toUpperCase() aunque el programa la piso.
+16-builtins-positivo	oxc-a-core_defaults	known
+16-builtins-positivo	oxc-a-carril_a	known
+16-builtins-positivo	oxc-b-core_defaults	known
+16-builtins-positivo	oxc-b-carril_a	known
+# fn_tostring y stack: el paso `contenido` exigia solo que A dependiera del contenido; ahora ademas A' y B' con
+# el contenido fijo (DIFUZZ_SALT=fijo) y `veredicto`.
+17-a03-tostring-getter	oxc-a-core_defaults	div:Stdout
+17-a03-tostring-getter	oxc-a-carril_a	div:Stdout
+17-a03-tostring-getter	oxc-b-core_defaults	div:Stdout
+17-a03-tostring-getter	oxc-b-carril_a	div:Stdout
+17-tostring-positivo	oxc-a-core_defaults	known
+17-tostring-positivo	oxc-a-carril_a	known
+17-tostring-positivo	oxc-b-core_defaults	known
+17-tostring-positivo	oxc-b-carril_a	known
+17-a04-stack-getter	oxc-a-core_defaults	div:Stdout
+17-a04-stack-getter	oxc-a-carril_a	div:Stdout
+17-a04-stack-getter	oxc-b-core_defaults	div:Stdout
+17-a04-stack-getter	oxc-b-carril_a	div:Stdout
+17-stack-positivo	oxc-a-core_defaults	known
+17-stack-positivo	oxc-a-carril_a	known
+17-stack-positivo	oxc-b-core_defaults	known
+17-stack-positivo	oxc-b-carril_a	known
+# profundidad (M16): el bug en la MISMA linea que la cuenta de pila pasaba `localizada`. Ahora B tambien corre
+# con mas pila y rige `veredicto`. Costo (decision abierta): una cuenta de marcos sin tope (18-profundidad-cuenta)
+# ya no es concluyente y va a div/ (antes known/, MEDIDO).
+18-a07-profundidad-linea-getter	oxc-a-core_defaults	div:Stdout
+18-a07-profundidad-linea-getter	oxc-a-carril_a	div:Stdout
+18-a07-profundidad-linea-getter	oxc-b-core_defaults	div:Stdout
+18-a07-profundidad-linea-getter	oxc-b-carril_a	div:Stdout
+18-profundidad-cuenta	oxc-a-core_defaults	div:Stdout
+18-profundidad-cuenta	oxc-a-carril_a	div:Stdout
+18-profundidad-cuenta	oxc-b-core_defaults	div:Stdout
+18-profundidad-cuenta	oxc-b-carril_a	div:Stdout

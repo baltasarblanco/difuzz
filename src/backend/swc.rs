@@ -38,7 +38,10 @@ pub const POLITICA: Politica = Politica {
         prefijo: "terser/compress/",
         razon: "backlog de SWC (tests/TODO.txt o tests/postponed.txt)",
     }),
-    rechequeos: &[],
+    // t-principio: los dos re-chequeos nuevos que no dependen del sensor (simetricos
+    // con oxc). `proxy`, `tdz`, `callee`, `redefine_global`, el backlog y la ruta de
+    // 2719 siguen yendo a known/ sin re-chequeo (swc es archivo).
+    rechequeos: &[super::Rechequeo::Builtins, super::Rechequeo::Coercion],
     solo_sloppy: None,
     chequeos_propios: true,
     // Los de oxc (M13) no son asunciones de SWC: no se calculan.

@@ -6,10 +6,12 @@
 //!
 //! Los pasos, en el orden de siempre (cada uno puede correr node o el
 //! minifier: el orden de esas ejecuciones no cambia):
-//! 1. contenido de toString/.stack (A con los contenidos cambiados),
-//! 2. profundidad (M16, A con mas pila),
+//! 1. contenido de toString/.stack (A con los contenidos cambiados; t-principio:
+//!    y A'/B' con el contenido fijo),
+//! 2. profundidad (M16, A con mas pila; t-principio: y B con mas pila),
 //! 3. nombres (core_defaults: minificar preservando nombres),
-//! 4. re-chequeos de flags estaticos (`extends`, `global_conocido`, `with`),
+//! 4. re-chequeos de la politica (`extends`, `global_conocido`, `with`,
+//!    violaciones; t-principio: `builtins`, `coercion`),
 //! 5. tabla de asunciones conocidas, rutas y backlog (known.rs),
 //! 6. solo sloppy (M17: el original en estricto),
 //! 7. minificado invalido (b1-b, R1-H03: nunca es asuncion),
@@ -136,6 +138,8 @@ pub fn clasificar<'a>(
     // AGENTS.md habla de depender del *contenido* de toString y .stack, no
     // de llamarlos (`f++` llama a toString y da NaN igual). A se corre de
     // nuevo con esos contenidos cambiados: si la salida no cambia, no dependen.
+    // b1-b: notas de los re-chequeos inconclusos (van a meta.txt).
+    let mut notes: Vec<String> = Vec::new();
     if flags.iter().any(|f| CONTENT_FLAGS.contains(f)) {
         let salted = runner.run_salted(original);
         if salted.status == a.status && salted.stdout == a.stdout {
@@ -143,7 +147,29 @@ pub fn clasificar<'a>(
             flags.push("contenido_irrelevante");
             traza.paso("contenido", "NoExplica -> contenido_irrelevante (A con toString/.stack cambiados da lo mismo)");
         } else {
-            traza.paso("contenido", "Explica (A con toString/.stack cambiados da otra salida)");
+            // t-principio: que A dependa del contenido no dice que la divergencia venga
+            // de ahi (a03/a04: un bug ajeno al lado iba a known/). A' y B' con el
+            // contenido fijo, y `veredicto`.
+            match recheck::contenido_matters(runner, original, minified, a, b) {
+                recheck::Recheck::Explica => {
+                    traza.paso("contenido", "Explica (A depende del contenido y con el contenido fijo la divergencia desaparece)")
+                }
+                r => {
+                    let t = match &r {
+                        recheck::Recheck::Inconcluso(n) => format!("Inconcluso -> contenido_inconcluso: {n}"),
+                        _ => "NoExplica -> contenido_irrelevante (con el contenido fijo la divergencia sigue)".into(),
+                    };
+                    traza.paso("contenido", t);
+                    flags.retain(|f| !CONTENT_FLAGS.contains(f));
+                    match r {
+                        recheck::Recheck::Inconcluso(n) => {
+                            notes.push(format!("re-chequeo de contenido (toString/.stack) inconcluso: {n}"));
+                            flags.push("contenido_inconcluso");
+                        }
+                        _ => flags.push("contenido_irrelevante"),
+                    }
+                }
+            }
         }
     }
     // M16: la salida puede depender del limite de pila de V8 y no del
@@ -153,16 +179,15 @@ pub fn clasificar<'a>(
     // motor. DESVIO de la propuesta: se prueba ante toda divergencia
     // confirmada, no solo si la salida dice "RangeError" (corpus-invocar/37
     // lo atrapa y no lo imprime). Cuesta una ejecucion por divergencia.
-    // b1-b: notas de los re-chequeos inconclusos (van a meta.txt).
-    let mut notes: Vec<String> = Vec::new();
     // R1-H13/H14: la nota de la pasada (analisis con SWC, pasada de bloques).
+    // t-principio: primera, como antes (las notas del contenido van despues).
     if let Some(n) = nota_pasada {
-        notes.push(n.to_string());
+        notes.insert(0, n.to_string());
     }
     let deep = runner.run_with_args(original, &[runner::DEEP_STACK]);
     // b1-b (R2-H02): solo un M16 concluyente pone el flag (depth_recheck).
     let par = ("profundidad_irrelevante", "profundidad_inconcluso");
-    match depth_recheck(a, b, &deep) {
+    match depth_recheck(a, b, &deep, || runner.run_with_args(minified, &[runner::DEEP_STACK])) {
         None => traza.paso("profundidad", "no aplica (A con mas pila da lo mismo, o la corrida honda fallo)"),
         Some(recheck::Recheck::Explica) => {
             traza.recheck("profundidad", &recheck::Recheck::Explica, par);
@@ -238,6 +263,16 @@ pub fn clasificar<'a>(
                 let mut sin_nota = Vec::new();
                 apply_recheck(&mut flags, &mut sin_nota, f, par, r1);
             }
+        }
+        // t-principio: `builtins` y `coercion` iban a known/ sin re-chequeo (a01, a02,
+        // a08: un bug ajeno al lado).
+        if flags.contains(&"builtins") && rc.rechequea(Rechequeo::Builtins) {
+            let r = recheck::builtins_matter(runner, original, minified, a, b);
+            rechequear(&mut flags, &mut notes, &mut traza, "builtins", ("builtins_irrelevante", "builtins_inconcluso"), r);
+        }
+        if flags.contains(&"coercion") && rc.rechequea(Rechequeo::Coercion) {
+            let r = recheck::coercion_matters(runner, (rc.minifier, rc.preset, rc.kind), original, a, b);
+            rechequear(&mut flags, &mut notes, &mut traza, "coercion", ("coercion_irrelevante", "coercion_inconcluso"), r);
         }
     }
     // R2-H07: la razon es la del flag que un re-chequeo confirmo, si hay; si
@@ -428,7 +463,18 @@ fn apply_recheck(
 /// tres salidas tienen las mismas lineas y cada linea en que B difiere de A es
 /// una que cambia con la pila. Antes un Timeout de la corrida honda (o un bug en
 /// otra linea) alcanzaba para mandar a known/.
-fn depth_recheck(a: &runner::Exec, b: &runner::Exec, deep: &runner::Exec) -> Option<recheck::Recheck> {
+/// t-principio (a07-profundidad-linea): un bug ajeno en la MISMA linea que la cuenta
+/// de pila pasaba `localizada` (la linea cambia con mas pila) y el caso iba a known/.
+/// Ahora rige `recheck::veredicto` con A' = A con mas pila y B' = B con mas pila
+/// (`deep_b`, solo se corre si A depende de la pila): la divergencia tiene que
+/// desaparecer con mas pila. Una salida que cuenta marcos sin tope (A' != B' por el
+/// tamano de los marcos) ya no es concluyente: NoExplica, div/.
+fn depth_recheck(
+    a: &runner::Exec,
+    b: &runner::Exec,
+    deep: &runner::Exec,
+    deep_b: impl FnOnce() -> runner::Exec,
+) -> Option<recheck::Recheck> {
     if matches!(deep.status, Status::Failed(_)) || same_exec(deep, a) {
         return None;
     }
@@ -439,13 +485,7 @@ fn depth_recheck(a: &runner::Exec, b: &runner::Exec, deep: &runner::Exec) -> Opt
             deep.status
         )));
     }
-    if same_exec(deep, b) || recheck::localizada(a, b, deep) {
-        Some(recheck::Recheck::Explica)
-    } else {
-        Some(recheck::Recheck::Inconcluso(
-            "el original depende de la pila, pero B difiere de A en lineas que no cambian con mas pila".into(),
-        ))
-    }
+    Some(recheck::veredicto(a, b, deep, &deep_b()))
 }
 
 /// M17: oxc no soporta sloppy (D1 del CLAUDE.md). Ante una divergencia de oxc
@@ -725,20 +765,29 @@ mod tests {
             ctl: String::new(),
         };
         let ok = |s: &str| ex(Status::Exited(0), s);
+        // t-principio: B con mas pila (`deep_b`) solo se corre si A depende de la pila.
+        let nunca = || -> Exec { panic!("no hacia falta correr B con mas pila") };
         // A no depende de la pila: no hay flag.
-        assert_eq!(depth_recheck(&ok("1\nx\n"), &ok("2\nx\n"), &ok("1\nx\n")), None);
-        // Solo cambia la linea que depende de la pila: concluyente.
-        assert_eq!(depth_recheck(&ok("1200\nx\n"), &ok("1500\nx\n"), &ok("2400\nx\n")), Some(Recheck::Explica));
+        assert_eq!(depth_recheck(&ok("1\nx\n"), &ok("2\nx\n"), &ok("1\nx\n"), nunca), None);
+        // Solo cambia la linea que depende de la pila y con mas pila A y B dan lo mismo: concluyente.
+        assert_eq!(depth_recheck(&ok("1200\nx\n"), &ok("1500\nx\n"), &ok("2400\nx\n"), || ok("2400\nx\n")), Some(Recheck::Explica));
+        // t-principio: una cuenta de marcos sin tope (A y B con mas pila tampoco dan lo
+        // mismo) ya no es concluyente.
+        assert_eq!(depth_recheck(&ok("1200\nx\n"), &ok("1500\nx\n"), &ok("2400\nx\n"), || ok("3000\nx\n")), Some(Recheck::NoExplica));
         // B da lo mismo que A con mas pila (A se quedo sin pila, B no).
-        assert_eq!(depth_recheck(&ok("corto\n"), &ok("largo\n"), &ok("largo\n")), Some(Recheck::Explica));
-        // 07-profundidad-miente: ademas de la linea de la pila, B pierde otra.
-        let r = depth_recheck(&ok("playo 3\n[ '__proto__' ]\n"), &ok("playo 5\n[]\n"), &ok("hondo 1\n[ '__proto__' ]\n"));
-        assert!(matches!(r, Some(Recheck::Inconcluso(_))), "{r:?}");
+        assert_eq!(depth_recheck(&ok("corto\n"), &ok("largo\n"), &ok("largo\n"), || ok("largo\n")), Some(Recheck::Explica));
+        // 07-profundidad-miente: ademas de la linea de la pila, B pierde otra (y con mas pila tambien).
+        let r = depth_recheck(&ok("playo 3\n[ '__proto__' ]\n"), &ok("playo 5\n[]\n"), &ok("hondo 1\n[ '__proto__' ]\n"), || ok("hondo 1\n[]\n"));
+        assert_eq!(r, Some(Recheck::NoExplica));
+        // t-principio (a07-profundidad-linea): el bug en la misma linea que la cuenta de pila.
+        // Antes `localizada` lo aceptaba (Explica, known/).
+        let r = depth_recheck(&ok("9000 PASS\n"), &ok("9500 FAIL\n"), &ok("18000 PASS\n"), || ok("18000 FAIL\n"));
+        assert_eq!(r, Some(Recheck::NoExplica));
         // R2-H02: la corrida honda en Timeout no es evidencia de profundidad.
-        let r = depth_recheck(&ok("1\n"), &ok("2\n"), &ex(Status::Timeout, ""));
+        let r = depth_recheck(&ok("1\n"), &ok("2\n"), &ex(Status::Timeout, ""), nunca);
         assert!(matches!(r, Some(Recheck::Inconcluso(ref n)) if n.contains("Timeout")), "{r:?}");
         // Un Failed del fuzzer sigue sin opinar.
-        assert_eq!(depth_recheck(&ok("1\n"), &ok("2\n"), &ex(Status::Failed("x".into()), "")), None);
+        assert_eq!(depth_recheck(&ok("1\n"), &ok("2\n"), &ex(Status::Failed("x".into()), ""), nunca), None);
     }
 
     /// b4-a (R1-H04 / C3), de punta a punta con oxc: una TDZ atrapada que oxc borra
@@ -792,6 +841,59 @@ mod tests {
         assert!(meta.contains("\nknown: sensor, asuncion: oxc: No TDZ Violation\n") && meta.contains("  violaciones: Explica (quedan tdz)\n"), "{meta}");
         let meta = std::fs::read_to_string(d.join("div/neg-nc/meta.txt")).unwrap();
         assert!(meta.contains("tdz_irrelevante") && meta.contains("  violaciones: NoExplica"), "{meta}");
+        std::fs::remove_dir_all(&d).unwrap();
+    }
+
+    /// t-principio: "un bug real nunca termina en known/; solo un re-chequeo
+    /// concluyente manda ahi". `coercion`, `builtins`, `fn_tostring`/`stack` (paso
+    /// contenido) y `profundidad` (bug en la misma linea) iban a known/ con el Issue A
+    /// de ENVIAR.md al lado (MEDIDO con el binario de la fase R). Por flag: el
+    /// positivo legitimo sigue en known/ y el adversarial va a div/ con el paso en la traza.
+    #[test]
+    fn flags_sin_rechequeo_de_punta_a_punta() {
+        use super::Medido;
+        use crate::{backend::Minifier, cache, compare_and_report, known, minify, oracle, runner, triage, Ctx, Stats};
+        use std::path::Path;
+        if !crate::test_util::requiere_node() {
+            return;
+        }
+        let d = std::env::temp_dir().join(format!("difuzz-test-principio-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        let reporter = oracle::Reporter::new(&d, "test".into(), runner::PRELOAD);
+        let known = known::Known::load(&d, &d, 0, Minifier::Oxc);
+        let cache = cache::CacheA::new(None, &[]);
+        let triage = triage::Triage::load(&d);
+        let (preset, kind) = (minify::Preset::CoreDefaults, minify::SourceKind::Script);
+        let medido = Some(Medido { minifier: Minifier::Oxc, preset, kind });
+        let ctx = Ctx { reporter: &reporter, known: &known, cache: &cache, triage: &triage, medido };
+        let preload = runner::Preload::write_tagged("principio").unwrap();
+        let r = runner::Runner::new(&preload, crate::test_util::id_runner(), std::time::Duration::from_secs(20));
+        let cfg = preset.build(Minifier::Oxc, kind);
+        // Issue A de ENVIAR.md: el spread con getter se mueve (oxc imprime "FAIL").
+        let bug = "let result = \"FAIL\";\nconst o = { ...{ get prop() { result = \"PASS\"; } } };\nconsole.log(result);\nconsole.log(o);\n";
+        let casos: [(&str, String, bool, &str); 9] = [
+            // (caso, fuente, va a known/, linea de la traza)
+            ("coercion-pos", "var o1 = { valueOf: function () { f1(); } };\nvar o2 = { valueOf: function () { f2(); } };\nvar r1 = o1 <= o2;\n".into(), true, "  coercion: Explica"),
+            ("coercion-neg", format!("class P {{ toString() {{ return \"p\"; }} }}\n{bug}"), false, "  coercion: NoExplica -> coercion_irrelevante"),
+            ("builtins-pos", "String.prototype.toUpperCase = function () { return \"pisado\"; };\nconsole.log(\"abc\".toUpperCase());\n".into(), true, "  builtins: Explica"),
+            ("builtins-neg", format!("Array.prototype.ultimo = function () {{ return 1; }};\n{bug}"), false, "  builtins: NoExplica -> builtins_irrelevante"),
+            ("tostring-pos", "function suma(primero, segundo) { return primero + segundo; }\nconsole.log(String(suma));\n".into(), true, "  contenido: Explica"),
+            ("tostring-neg", format!("function f() {{ return 1; }}\nconsole.log(String(f).length);\n{bug}"), false, "  contenido: NoExplica -> contenido_irrelevante (con el contenido fijo"),
+            ("stack-pos", "function falla() {\n  var nada = null;\n  return nada.x;\n}\ntry { falla(); } catch (e) { console.log(e.stack); }\n".into(), true, "  contenido: Explica"),
+            ("stack-neg", format!("try {{ null.x; }} catch (e) {{ console.log(e.stack.split(\"\\n\").length); }}\n{bug}"), false, "  contenido: NoExplica"),
+            ("profundidad-neg", "let n = 0;\nfunction r() { n++; r(); }\ntry { r(); } catch (e) {}\nlet result = \"FAIL\";\nconst o = { ...{ get prop() { result = \"PASS\"; } } };\nconsole.log(n, result);\nconsole.log(o);\n".into(), false, "  profundidad: NoExplica"),
+        ];
+        for (rel, src, a_known, paso) in &casos {
+            // Con los flags estaticos (`coercion` es uno), como en produccion.
+            let minify::Outcome::Ok { original, minified, static_flags, .. } = minify::prepare(src, &cfg) else { panic!("no minifica: {rel}") };
+            let mut st = Stats::default();
+            let p = format!("{rel}/input.js");
+            assert!(compare_and_report(&ctx, &r, &mut st, Path::new(&p), &original, &minified, r.run(&original), false, false, &static_flags, None), "{rel}: no diverge");
+            assert_eq!((st.known, st.divergences), if *a_known { (1, 0) } else { (0, 1) }, "{rel}");
+            let meta = std::fs::read_to_string(d.join(format!("{}/{rel}/meta.txt", if *a_known { "known" } else { "div" }))).unwrap();
+            assert!(meta.contains(paso), "{rel}: {meta}");
+        }
         std::fs::remove_dir_all(&d).unwrap();
     }
 }

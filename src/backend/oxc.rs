@@ -36,7 +36,15 @@ pub const POLITICA: Politica = Politica {
     razones: FLAG_REASONS_OXC,
     rutas: &[],
     backlog: None,
-    rechequeos: &[Rechequeo::Extends, Rechequeo::GlobalConocido, Rechequeo::With, Rechequeo::Violaciones],
+    // t-principio: `builtins` y `coercion` tambien (antes iban a known/ sin re-chequeo).
+    rechequeos: &[
+        Rechequeo::Extends,
+        Rechequeo::GlobalConocido,
+        Rechequeo::With,
+        Rechequeo::Violaciones,
+        Rechequeo::Builtins,
+        Rechequeo::Coercion,
+    ],
     solo_sloppy: Some("oxc: solo sloppy (no soportado); con \"use strict\" la divergencia desaparece"),
     chequeos_propios: false,
     // M13: `with`, `global_conocido` y `extends` (los re-chequea `rechequeos`).

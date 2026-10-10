@@ -135,7 +135,7 @@ const TRAZA_BUILTINS: &str = "\nclasificacion:\n  profundidad: no aplica (A con 
 /// dependiendo de que V8 formatea `.stack` al pausar (riesgo documentado de b4-a).
 const TRAZA_TDZ_ATRAPADA: &str = "\nclasificacion:\n  contenido: NoExplica -> contenido_irrelevante (A con toString/.stack cambiados da lo mismo)\n  profundidad: no aplica (A con mas pila da lo mismo, o la corrida honda fallo)\n  nombres: no aplica (la salida no puede mostrar nombres)\n  violaciones: Explica (quedan tdz_atrapada)\n  asunciones: sensor, asuncion: oxc: No TDZ Violation (atrapada)\n  minificado_invalido: no (node --check acepta el minificado)\n  sintoma: el de known-sintomas.tsv (o primero registrado)\n  decision: known/ (sensor, asuncion: oxc: No TDZ Violation (atrapada))\n";
 
-const TRAZA_CAUSA: &str = "\nclasificacion:\n  contenido: Explica (A con toString/.stack cambiados da otra salida)\n  profundidad: no aplica (A con mas pila da lo mismo, o la corrida honda fallo)\n  asunciones: sensor, asuncion: difuzz: el contenido de Error.prototype.stack cambia al minificar (oxc no lo documenta)\n  minificado_invalido: no (node --check acepta el minificado)\n  sintoma: el de known-sintomas.tsv (o primero registrado)\n  decision: known/ (sensor, asuncion: difuzz: el contenido de Error.prototype.stack cambia al minificar (oxc no lo documenta))\n";
+const TRAZA_CAUSA: &str = "\nclasificacion:\n  contenido: Explica (A depende del contenido y con el contenido fijo la divergencia desaparece)\n  profundidad: no aplica (A con mas pila da lo mismo, o la corrida honda fallo)\n  asunciones: sensor, asuncion: difuzz: el contenido de Error.prototype.stack cambia al minificar (oxc no lo documenta)\n  minificado_invalido: no (node --check acepta el minificado)\n  sintoma: el de known-sintomas.tsv (o primero registrado)\n  decision: known/ (sensor, asuncion: difuzz: el contenido de Error.prototype.stack cambia al minificar (oxc no lo documenta))\n";
 
 const TRAZA_INVALIDO: &str = "\nclasificacion:\n  profundidad: no aplica (A con mas pila da lo mismo, o la corrida honda fallo)\n  asunciones: sensor, asuncion: oxc: Coercion Methods Are Pure\n  minificado_invalido: si (node --check rechaza el minificado y acepta el original): sin flags, ninguna\n  decision: div/\n";
 
@@ -195,10 +195,13 @@ fn tabla() -> Vec<Fila> {
         // R2-H07 (b6-usuario): `coercion` (estatico, sin re-chequeo) y `stack`, que el
         // re-chequeo de contenido confirma: la razon es la de `stack`, no la del primer
         // flag de la tabla (antes: "Coercion Methods Are Pure").
+        // t-principio: antes el "bug" de Rompe (41 -> 42) iba en la misma linea que el largo
+        // del stack y el paso contenido lo aceptaba; ahora A' y B' con el contenido fijo lo
+        // ven (NoExplica). El minificado solo corre una columna: cambia el contenido del stack.
         Fila {
             caso: "known-causa",
-            programa: "var o = { valueOf() { return 1; } };\nconsole.log(new Error('e').stack.split('\\n').length, 41);\n",
-            back: Back::Rompe("41", "42"),
+            programa: "var o = { valueOf() { return 1; } };\nconsole.log(new Error('e').stack);\n",
+            back: Back::Rompe("console.log(new", "console.log( new"),
             args: &[],
             destino: Destino::Known,
             meta: &["\nknown: sensor, asuncion: difuzz: el contenido de Error.prototype.stack cambia al minificar (oxc no lo documenta)\n", TRAZA_CAUSA],

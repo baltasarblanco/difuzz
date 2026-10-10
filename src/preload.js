@@ -172,6 +172,9 @@
   // Corrida "salada" (runner::run_salted): mismo programa, otro contenido de
   // toString y .stack. Se borra del entorno para que el programa no la vea.
   const SALT = process.env.DIFUZZ_SALT === '1';
+  // t-principio: contenido FIJO (re-chequeo de contenido, recheck::contenido_matters): el mismo
+  // toString y el mismo .stack para cualquier codigo, asi A' y B' no dependen del texto.
+  const FIJO = process.env.DIFUZZ_SALT === 'fijo';
   delete process.env.DIFUZZ_SALT;
 
   // Node usa primordials internos: console.log(f) no pasa por aca, solo el programa.
@@ -181,6 +184,7 @@
       toString() {
         flags.add('fn_tostring');
         const s = realToString.call(this);
+        if (FIJO) return 'function () { [native code] }';
         return SALT ? `${s}/*dz*/` : s;
       },
     }.toString,
@@ -209,6 +213,9 @@
     try {
       if (frames.length && err !== null && (typeof err === 'object' || typeof err === 'function')) marcos.set(err, frames);
     } catch {}
+    // t-principio: con contenido fijo, la cabecera y una linea constante por marco (sin
+    // posiciones ni nombres): A' conserva las lineas de A y `localizada` puede compararlas.
+    if (FIJO) return head + frames.map(() => '\n    at dz').join('');
     return head + frames.map((f) => `\n    at ${f}`).join('') + (SALT ? '\n    at dz' : '');
   };
 
@@ -537,6 +544,79 @@
     for (const k of GLOBAL_NAMES) shots.push([globalThis, k, describe(globalThis, k)]);
     return shots;
   };
+  // t-principio: re-chequeo de `builtins` (recheck::builtins_matter). Cada propiedad pisada se
+  // nombra `<objeto> <clave>`: objeto `o<i>`/`p<i>` (WATCHED[i] o su prototype) o `g` (globalThis);
+  // clave con encodeURIComponent, o `@@<nombre>` si es un Symbol bien conocido. `-`: no se puede
+  // nombrar (Symbol propio).
+  const objetoDe = (id) => {
+    if (id === 'g') return globalThis;
+    const o = WATCHED[Number(id.slice(1))];
+    if (!o) return null;
+    return id[0] === 'p' ? o.prototype : id[0] === 'o' ? o : null;
+  };
+  const claveDe = (k) => {
+    if (typeof k === 'string') return encodeURIComponent(k);
+    for (const n of Reflect.ownKeys(Symbol)) {
+      if (typeof n === 'string' && Symbol[n] === k) return `@@${n}`;
+    }
+    return null;
+  };
+  const leerClave = (s) => (s.startsWith('@@') ? Symbol[s.slice(2)] : decodeURIComponent(s));
+  // DIFUZZ_BUILTINS_FIJOS=<objeto> <clave>,...: antes de la foto, cada una queda como accessor no
+  // configurable con el valor original; las escrituras del programa no hacen nada (en estricto
+  // tampoco lanzan: hay setter). Redefinirla o borrarla si lanza: el camino cambia y el re-chequeo
+  // lo ve. Lo que no se puede fijar sale como `builtin_no_fijado` (inconcluso).
+  {
+    const fijos = process.env.DIFUZZ_BUILTINS_FIJOS;
+    delete process.env.DIFUZZ_BUILTINS_FIJOS;
+    if (fijos) {
+      for (const spec of fijos.split(',')) {
+        try {
+          const [id, ks] = spec.split(' ');
+          const o = objetoDe(id);
+          const k = leerClave(ks);
+          if (!o || k === undefined) throw new Error('sin objeto');
+          const d = Object.getOwnPropertyDescriptor(o, k);
+          if (d && !('value' in d)) {
+            Object.defineProperty(o, k, { get: d.get, set: d.set, enumerable: d.enumerable, configurable: false });
+          } else {
+            const v = d ? d.value : undefined;
+            Object.defineProperty(o, k, { get: () => v, set: () => {}, enumerable: d ? d.enumerable : false, configurable: false });
+          }
+        } catch {
+          ctl(`builtin_no_fijado ${spec}`);
+        }
+      }
+    }
+  }
+  // Lo pisado respecto de la foto: claves cambiadas, borradas o nuevas.
+  const pisados = (antes) => {
+    const out = [];
+    const nombre = (o, k) => {
+      let id = o === globalThis ? 'g' : null;
+      WATCHED.forEach((w, i) => {
+        if (id === null && w === o) id = `o${i}`;
+        else if (id === null && w.prototype === o) id = `p${i}`;
+      });
+      const c = claveDe(k);
+      out.push(id && c ? `${id} ${c}` : '-');
+    };
+    const vistas = new Map();
+    for (const [o, k, shot] of antes) {
+      if (k === null) continue;
+      if (!vistas.has(o)) vistas.set(o, new Set());
+      vistas.get(o).add(k);
+      const now = describe(o, k);
+      const cambio = (now === null) !== (shot === null) ||
+        (now && (now[0] !== shot[0] || now[1] !== shot[1] || now[2] !== shot[2]) && !(Number.isNaN(now[0]) && Number.isNaN(shot[0])));
+      if (cambio) nombre(o, k);
+    }
+    for (const [o, ks] of vistas) {
+      if (o === globalThis) continue;
+      for (const k of Reflect.ownKeys(o)) if (!ks.has(k)) nombre(o, k);
+    }
+    return out;
+  };
   const before = photo();
   const builtinsChanged = () => {
     for (const [o, k, shot] of before) {
@@ -560,6 +640,17 @@
       if (builtinsChanged()) flags.add('builtins');
     } catch {
       flags.add('builtins');
+    }
+    // t-principio: que se piso, para el re-chequeo de `builtins` (`builtin <objeto> <clave>`).
+    if (flags.has('builtins')) {
+      let ps;
+      try {
+        ps = pisados(before);
+      } catch {
+        ps = [];
+      }
+      if (!ps.length) ps = ['-'];
+      for (const p of new Set(ps)) ctl(`builtin ${p}`);
     }
     // b4-a: una violacion atrapada (o la de Symbol) es un flag por clase y una linea `viol`.
     const FLAG_VIOL = { tdz: 'tdz_atrapada', symbol: 'coercion_symbol', extends: 'extends_atrapado' };

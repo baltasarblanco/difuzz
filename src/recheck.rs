@@ -184,6 +184,178 @@ pub fn with_matters(
     veredicto(a, b, &a2, &b2)
 }
 
+/// t-principio: `fn_tostring` y `stack` (paso `contenido` de clasificar). Si A con
+/// otro contenido de toString/.stack da otra salida, A depende del contenido, pero
+/// eso no dice que la divergencia venga de ahi (un bug ajeno al lado iba a known/).
+/// Se corren el original y el minificado con el contenido FIJO (preload,
+/// DIFUZZ_SALT=fijo: el mismo texto para cualquier funcion y solo la cabecera del
+/// stack), y rige `veredicto`. Sin re-minificar: 2 node.
+pub fn contenido_matters(r: &runner::Runner, original: &str, minified: &str, a: &runner::Exec, b: &runner::Exec) -> Recheck {
+    let env = [("DIFUZZ_SALT", "fijo")];
+    let a2 = r.run_with_env(original, &env);
+    if !a2.completed() {
+        return Recheck::Inconcluso(format!("el original con contenido fijo no termino ({:?})", a2.status));
+    }
+    let b2 = r.run_with_env(minified, &env);
+    veredicto(a, b, &a2, &b2)
+}
+
+/// t-principio: lo que el preload vio pisado en `a` (lineas `builtin <objeto>
+/// <clave>` del canal), sin repetir.
+pub fn builtins_pisados(a: &runner::Exec) -> Vec<&str> {
+    let mut v: Vec<&str> = Vec::new();
+    for s in a.ctl.lines().filter_map(|l| l.strip_prefix("builtin ")) {
+        if !v.contains(&s) {
+            v.push(s);
+        }
+    }
+    v
+}
+
+/// t-principio: `builtins` (oxc: "No Monkey-Patching Built-ins"; antes iba a known/
+/// sin re-chequeo). Como `global_conocido`, en runtime: el original y el minificado
+/// corren con cada propiedad que A piso fijada a su valor original (preload,
+/// DIFUZZ_BUILTINS_FIJOS: las escrituras no hacen nada). Si la divergencia sigue,
+/// el pisado no la explica. Rige `veredicto`. Sin re-minificar: 2 node.
+pub fn builtins_matter(r: &runner::Runner, original: &str, minified: &str, a: &runner::Exec, b: &runner::Exec) -> Recheck {
+    let v = builtins_pisados(a);
+    if v.is_empty() {
+        return Recheck::Inconcluso("el preload no dejo ninguna linea `builtin`".into());
+    }
+    if v.contains(&"-") {
+        return Recheck::Inconcluso("hay un built-in pisado que no se puede nombrar (Symbol propio)".into());
+    }
+    let spec = v.join(",");
+    let env = [("DIFUZZ_BUILTINS_FIJOS", spec.as_str())];
+    let a2 = r.run_with_env(original, &env);
+    if let Some(l) = a2.ctl.lines().find(|l| l.starts_with("builtin_no_fijado ")) {
+        return Recheck::Inconcluso(format!("no pude fijar un built-in pisado ({l})"));
+    }
+    if !a2.completed() {
+        return Recheck::Inconcluso(format!("el original con los built-ins fijos no termino ({:?})", a2.status));
+    }
+    let b2 = r.run_with_env(minified, &env);
+    veredicto(a, b, &a2, &b2)
+}
+
+/// t-principio: `coercion` (estatico; oxc: "Coercion Methods Are Pure"; antes iba a
+/// known/ sin re-chequeo). Se renombran las definiciones de helpers de coercion
+/// (`neutralize_coercion`): la coercion usa la de Object.prototype, que es pura. Se
+/// minifica igual y rige `veredicto`. 1 minify + 2 node.
+pub fn coercion_matters(
+    r: &runner::Runner,
+    recheck: (backend::Minifier, minify::Preset, SourceKind),
+    original: &str,
+    a: &runner::Exec,
+    b: &runner::Exec,
+) -> Recheck {
+    let (minifier, preset, kind) = recheck;
+    let neutral = match crate::analisis::sin_coercion(original, kind) {
+        Ok(n) => n,
+        Err(e) => {
+            crate::analisis::registrar("re-chequeo de coercion", &e);
+            return Recheck::Inconcluso(format!("fallo el analisis de difuzz: {}", e.lines().next().unwrap_or_default()));
+        }
+    };
+    let Some(neutral) = neutral else {
+        return Recheck::Inconcluso("no pude neutralizar los helpers de coercion (no parsea con SWC o no los encuentro)".into());
+    };
+    let cfg = preset.build(minifier, kind);
+    let minify::Outcome::Ok { original: o2, minified: m2, .. } = minify::prepare(&neutral, &cfg) else {
+        return Recheck::Inconcluso("no pude minificar la variante sin helpers de coercion".into());
+    };
+    let a2 = r.run(&o2);
+    if !a2.completed() {
+        return Recheck::Inconcluso(format!("la variante sin helpers de coercion no termino ({:?})", a2.status));
+    }
+    let b2 = r.run(&m2);
+    veredicto(a, b, &a2, &b2)
+}
+
+/// t-principio: el prefijo de los helpers de coercion renombrados.
+pub const COERCION_RENOMBRADA: &str = "__dz_";
+
+/// t-principio: el programa con cada DEFINICION de helper de coercion que ve
+/// `checks` (`valueOf`/`toString` o `[Symbol.toPrimitive]` como clave de un
+/// literal de objeto o de un miembro de clase, o asignados a una propiedad)
+/// renombrada a `__dz_<nombre>`. Las lecturas (`o.valueOf()`) y los patrones de
+/// desestructuracion no se tocan. `None` si no parsea, si no hay nada que
+/// renombrar o si el prefijo ya aparece en el fuente.
+pub fn neutralize_coercion(src: &str, kind: SourceKind) -> Option<String> {
+    use swc_ecma_ast::{AssignExpr, AssignTarget, ClassMember, IdentName, MemberProp, Prop, PropName, SimpleAssignTarget};
+    if src.contains(COERCION_RENOMBRADA) {
+        return None;
+    }
+    fn nuevo(n: &str) -> IdentName {
+        IdentName { span: DUMMY_SP, sym: format!("{COERCION_RENOMBRADA}{n}").into() }
+    }
+    fn clave(k: &mut PropName) -> bool {
+        match k {
+            PropName::Ident(i) if crate::checks::is_coercion_name(i.sym.as_str()) => {
+                *i = nuevo(i.sym.as_str());
+                true
+            }
+            PropName::Computed(c) if crate::checks::is_symbol_to_primitive(&c.expr) => {
+                *k = PropName::Ident(nuevo("toPrimitive"));
+                true
+            }
+            _ => false,
+        }
+    }
+    struct N(bool);
+    impl VisitMut for N {
+        fn visit_mut_prop(&mut self, p: &mut Prop) {
+            p.visit_mut_children_with(self);
+            let k = match p {
+                Prop::KeyValue(x) => &mut x.key,
+                Prop::Method(x) => &mut x.key,
+                Prop::Getter(x) => &mut x.key,
+                Prop::Setter(x) => &mut x.key,
+                _ => return,
+            };
+            self.0 |= clave(k);
+        }
+        fn visit_mut_class_member(&mut self, m: &mut ClassMember) {
+            m.visit_mut_children_with(self);
+            let k = match m {
+                ClassMember::Method(x) => &mut x.key,
+                ClassMember::ClassProp(x) => &mut x.key,
+                _ => return,
+            };
+            self.0 |= clave(k);
+        }
+        fn visit_mut_assign_expr(&mut self, n: &mut AssignExpr) {
+            n.visit_mut_children_with(self);
+            if let AssignTarget::Simple(SimpleAssignTarget::Member(m)) = &mut n.left {
+                let nombre = match &m.prop {
+                    MemberProp::Ident(i) if crate::checks::is_coercion_name(i.sym.as_str()) => Some(i.sym.to_string()),
+                    MemberProp::Computed(c) if crate::checks::is_symbol_to_primitive(&c.expr) => Some("toPrimitive".into()),
+                    _ => None,
+                };
+                if let Some(nombre) = nombre {
+                    m.prop = MemberProp::Ident(nuevo(&nombre));
+                    self.0 = true;
+                }
+            }
+        }
+    }
+    catch_unwind(AssertUnwindSafe(|| {
+        GLOBALS.set(&Globals::new(), || {
+            let cm: Lrc<SourceMap> = Default::default();
+            let fm = cm.new_source_file(FileName::Anon.into(), src.to_string());
+            let mut program = backend::swc::parse_program(&fm, kind)?;
+            let mut n = N(false);
+            program.visit_mut_with(&mut n);
+            if !n.0 {
+                return None;
+            }
+            emit(cm, &program.apply(fixer(None)))
+        })
+    }))
+    .ok()
+    .flatten()
+}
+
 /// b4-a: los flags del sensor de violaciones (preload.js) que re-chequea
 /// `violaciones_matter`, cada uno con la clase de su linea `viol`.
 /// I2 (revision-b456): `tdz` (la no atrapada) tambien: antes iba a known/ sin
@@ -622,6 +794,31 @@ mod tests {
         let out = neutralize_with("var o = {a: 1};\nwith (o) { console.log(a); }\n", SourceKind::Script).unwrap();
         assert!(out.contains("{\n    o;\n    {\n        console.log(a);\n    }\n}"), "{out}");
         assert!(neutralize_with("console.log(1);\n", SourceKind::Script).is_none());
+    }
+
+    /// t-principio: se renombran las definiciones de helpers de coercion (literal,
+    /// clase, asignacion; `[Symbol.toPrimitive]` incluido); las lecturas y los
+    /// patrones de desestructuracion no.
+    #[test]
+    fn neutraliza_coercion() {
+        use super::neutralize_coercion;
+        let src = "var o = { valueOf() { return 1; }, toString: f, [Symbol.toPrimitive]: g, x: 1 };\nclass C { toString() {} }\nC.prototype.valueOf = h;\no[Symbol.toPrimitive] = k;\nvar { toString: t } = o;\nconsole.log(o.valueOf());\n";
+        let out = neutralize_coercion(src, SourceKind::Script).unwrap();
+        for n in ["__dz_valueOf ()","__dz_toString: f", "__dz_toPrimitive: g", "class C {\n    __dz_toString()", "C.prototype.__dz_valueOf = h", "o.__dz_toPrimitive = k"] {
+            assert!(out.contains(n), "{n}: {out}");
+        }
+        // Lecturas y patrones quedan.
+        assert!(out.contains("toString: t") && out.contains("o.valueOf()"), "{out}");
+        assert!(neutralize_coercion("var { toString } = o;\nconsole.log(1);\n", SourceKind::Script).is_none());
+        assert!(neutralize_coercion("var __dz_x = { valueOf() {} };\n", SourceKind::Script).is_none());
+    }
+
+    /// t-principio: las lineas `builtin` del canal, sin repetir.
+    #[test]
+    fn lee_builtins_pisados() {
+        let mut e = ex(Status::Exited(0), "");
+        e.ctl = "dz\nbuiltin p1 join\nbuiltin p1 join\nbuiltin o14 max\nflags builtins\n".into();
+        assert_eq!(super::builtins_pisados(&e), ["p1 join", "o14 max"]);
     }
 
     /// R2-H10: el binding `arguments` y lo que lo ve se renombran; el

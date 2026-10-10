@@ -98,6 +98,12 @@ pub enum Rechequeo {
     /// (`recheck::violaciones_matter`). Re-chequea los flags de
     /// `recheck::FLAGS_VIOLACION`.
     Violaciones,
+    /// t-principio: `builtins` (runtime): A y B con lo que A piso fijado a su valor
+    /// original (`recheck::builtins_matter`).
+    Builtins,
+    /// t-principio: `coercion` (estatico): las definiciones de valueOf/toString/
+    /// `Symbol.toPrimitive` renombradas (`recheck::coercion_matters`).
+    Coercion,
 }
 
 /// Tercer eje de la celda: que minifier se mide.

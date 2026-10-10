@@ -225,11 +225,11 @@ impl StaticFlags {
     }
 }
 
-fn is_coercion_name(name: &str) -> bool {
+pub(crate) fn is_coercion_name(name: &str) -> bool {
     matches!(name, "valueOf" | "toString")
 }
 
-fn is_symbol_to_primitive(e: &Expr) -> bool {
+pub(crate) fn is_symbol_to_primitive(e: &Expr) -> bool {
     matches!(e, Expr::Member(m)
         if matches!(&*m.obj, Expr::Ident(i) if i.sym.as_str() == "Symbol")
             && m.prop.is_ident_with("toPrimitive"))

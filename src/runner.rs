@@ -440,6 +440,13 @@ impl Runner {
         self.run_inner(js, Opts { globals: Some(globals), ..Opts::default() })
     }
 
+    /// t-principio: igual que `run`, con variables de entorno extra para el preload
+    /// (re-chequeos de contenido fijo, DIFUZZ_SALT=fijo, y de built-ins,
+    /// DIFUZZ_BUILTINS_FIJOS).
+    pub fn run_with_env(&self, js: &str, env: &[(&str, &str)]) -> Exec {
+        self.run_inner(js, Opts { env, ..Opts::default() })
+    }
+
     /// El timeout de este runner (`--timeout-ms`).
     pub fn timeout(&self) -> Duration {
         self.timeout
@@ -543,6 +550,8 @@ struct Opts<'a> {
     globals: Option<&'a str>,
     /// b4-a: sin el sensor de violaciones del preload (DIFUZZ_SENSOR=0).
     sin_sensor: bool,
+    /// t-principio: variables de entorno extra (`run_with_env`).
+    env: &'a [(&'a str, &'a str)],
 }
 
 fn run_file(r: &Runner, script: &Path, start: Instant, timeout: Duration, opts: Opts) -> Exec {
@@ -583,6 +592,9 @@ fn run_file(r: &Runner, script: &Path, start: Instant, timeout: Duration, opts: 
     }
     if opts.sin_sensor {
         cmd.env("DIFUZZ_SENSOR", "0");
+    }
+    for (k, v) in opts.env {
+        cmd.env(k, v);
     }
     // M2: grupo de procesos propio (pgid = pid de node). Al terminar, por timeout
     // o normalmente, se mata el grupo entero: un hijo que hereda el stdout ya no
