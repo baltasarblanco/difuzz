@@ -158,7 +158,10 @@ confianza (paquetes de npm, código real) eso es un riesgo.
   módulos) y el directorio de trabajo del caso, `--allow-fs-write` solo para ese directorio y
   el canal de control de difuzz, y `--allow-inspector` cuando corre el sensor de violaciones.
   Sin `--allow-child-process`, `--allow-worker`, `--allow-addons` ni `--allow-wasi`: no hay
-  procesos hijos, workers, addons nativos ni WASI (tampoco `process.binding`).
+  procesos hijos, workers, addons nativos ni WASI (tampoco `process.binding`). Como el modelo de
+  permisos no cubre las señales, un filtro seccomp (sin root; solo Linux x86_64 y aarch64) deja
+  que node se mande señales solo a sí mismo (su pid, 0 o su grupo de procesos): `process.kill` a
+  cualquier otro proceso da `EPERM` (`pidfd_send_signal`, siempre).
 - **`--sandbox-red`** (solo Linux, sin root, con *user namespaces*): `--sandbox` más un
   namespace de usuario (el mismo uid y gid adentro), uno de red (solo un loopback propio: un
   programa que se conecta a sí mismo por 127.0.0.1 anda; lo de afuera da `ENETUNREACH`) y uno
@@ -166,19 +169,23 @@ confianza (paquetes de npm, código real) eso es un riesgo.
   `/run` (de `/proc/net/unix`, al lanzar cada node) tapado con `/dev/null`. Si no se puede
   armar, difuzz sale con 1 antes de empezar.
 
-**Simetría.** Original y minificado corren siempre con el mismo sandbox. Si el **original**
-toca el sandbox (un permiso negado, atrapado o no; con `--sandbox-red`, además, un error de
-red), el caso no se compara: va a `descartes.tsv` con causa **`sandbox`**, nunca a `div/` ni
-a `known/` por eso. En cualquier pasada (cruda, observada, de bloques, `--invocar`, envoltorio
-de módulos); en las variantes de `--mutaciones` cuenta en `original=`. Si solo el
-**minificado** toca el sandbox (el minifier cambió qué archivo abre), sí se compara: es un
-cambio de comportamiento. La celda lleva `+sandbox` o `+sandbox_red`, la caché de A no se
-comparte con las corridas sin sandbox y al terminar se imprime (y queda en `CORRIDA.txt`) la
-línea `sandbox: modo=... descartados=N`.
+**Simetría.** Original y minificado corren siempre con el mismo sandbox. Si el **original y el
+minificado** tocan el sandbox (un permiso negado, atrapado o no; una señal negada; con
+`--sandbox-red`, además, un error de red), el caso no se compara: va a `descartes.tsv` con causa
+**`sandbox`**, nunca a `div/` ni a `known/` por eso. En cualquier pasada (cruda, observada, de
+bloques, `--invocar`, envoltorio de módulos); en las variantes de `--mutaciones` cuenta en
+`original=`. Si lo toca **uno solo**, sí se compara: es un cambio de comportamiento. Puede ser el
+minificado (el minifier cambió qué archivo abre) o el original (con el bug, el minificado no llega
+a abrirlo): en ese caso el minificado corre una vez de más para saberlo, y el hallazgo lleva la nota
+`sandbox: solo el original toco el sandbox` en `meta.txt`. La celda lleva `+sandbox` o
+`+sandbox_red`, la caché de A no se comparte con las corridas sin sandbox y al terminar se imprime
+(y queda en `CORRIDA.txt`) la línea `sandbox: modo=... descartados=N solo_original=M` (`M`:
+pasadas en que solo el original tocó el sandbox y se compararon).
 
-Cómo se reconoce que el original tocó el sandbox: el preload anota `ERR_ACCESS_DENIED` (y
-`ERR_DLOPEN_DISABLED`) en su canal cuando ve el error (no atrapado, en `--invocar` o, con el
-sensor de violaciones, atrapado por el programa), y difuzz busca esos textos en la salida.
+Cómo se reconoce que una ejecución tocó el sandbox: el preload anota `ERR_ACCESS_DENIED`,
+`ERR_DLOPEN_DISABLED` y el `EPERM` de `kill` en su canal cuando ve el error (no atrapado, en
+`--invocar` o, con el sensor de violaciones, atrapado por el programa), y difuzz busca esos textos
+(y `kill EPERM`) en la salida.
 
 **Límites** (lo que el sandbox no frena):
 
@@ -328,10 +335,16 @@ Principios:
   `redefine_global`, el backlog y la asunción por ruta (`issue_2719`) clasifican directo, sin
   re-chequeo.
 
-  **Límites conocidos** (lo que no se prueba): el re-chequeo compara salidas, no caminos. Un
-  programa armado para que la salida con el bug coincida justo con la del original neutralizado
-  (o que imprima a propósito una línea con forma de marco de V8 en la rama del contenido fijo)
-  termina en `known/` (los dos casos se midieron así con oxc 0.153.0). Un bug que está en el
+  **Límites conocidos** (lo que no se prueba): el re-chequeo compara salidas, no caminos. Si la
+  salida de B con el bug coincide con la del original neutralizado (B == A'), la divergencia se
+  explica y va a `known/` aunque B haya ejecutado el bug. No hace falta un programa armado: alcanza
+  el patrón más común, una variable con su valor por defecto (`""`, `false`, `0`) que solo cambia
+  en la rama de la violación. En A' esa rama no corre y queda el valor por defecto; si el bug deja
+  ese mismo valor en B, B == A' (medido con oxc 0.153.0 en la revisión de la noche 2: 11 programas
+  de tdz, symbol, global_conocido, with, solo_sloppy, builtins, coercion y profundidad, 72 filas de
+  `known/` en 8 celdas; el mismo programa con `let s = "dz"` va a `div/`). Un programa que imprime a
+  propósito una línea con forma de marco de V8 en la rama del contenido fijo también termina en
+  `known/`. Un bug que está en el
   programa pero que B no ejecuta (oxc borró la sentencia que lanza y con eso el `catch` que lo
   tenía) no deja rastro en la salida: la divergencia es entera de la asunción y va a `known/`.
   Lo que se pierde por exigir B == A' (van a `div/`): los positivos en que B no da ni lo de A

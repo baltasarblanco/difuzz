@@ -502,6 +502,9 @@ struct Stats {
     /// n-sandbox: casos descartados porque el original toco el sandbox (causa `sandbox`).
     /// En una linea aparte (solo con `--sandbox`): no cambia la de `total=`.
     a_sandbox: usize,
+    /// 2c: pasadas en que el original toco el sandbox y el minificado no (se comparan). En
+    /// la misma linea aparte que `a_sandbox`.
+    solo_a_sandbox: usize,
     /// R1-H13: casos (pasada cruda) cuyo analisis con el parser de SWC necesito
     /// errores recuperados u otro carril, sin perder ningun texto.
     analisis_recuperado: usize,
@@ -562,6 +565,7 @@ impl Stats {
         self.fallos_analisis += o.fallos_analisis;
         self.descartes_analisis += o.descartes_analisis;
         self.a_sandbox += o.a_sandbox;
+        self.solo_a_sandbox += o.solo_a_sandbox;
         self.analisis_recuperado += o.analisis_recuperado;
         self.analisis_perdido += o.analisis_perdido;
         self.lint_sin_analisis += o.lint_sin_analisis;
@@ -971,7 +975,7 @@ fn main() {
         println!("sensor (I3): comparados_sin_sensor={}", stats.sensor_repetidos);
     }
     // n-sandbox: en una linea aparte, solo con --sandbox (no cambia la de `total=`).
-    let linea_sandbox = cli.sandbox.activo().then(|| format!("sandbox: modo={} descartados={}", cli.sandbox.nombre(), stats.a_sandbox));
+    let linea_sandbox = cli.sandbox.activo().then(|| format!("sandbox: modo={} descartados={} solo_original={}", cli.sandbox.nombre(), stats.a_sandbox, stats.solo_a_sandbox));
     if let Some(l) = &linea_sandbox {
         println!("{l}");
     }
@@ -1141,7 +1145,7 @@ fn process_case(
         eprintln!("runner: {e}");
         return;
     }
-    if descarte_sandbox(ctx, runner, stats, rel, &a) {
+    if descarte_sandbox(ctx, runner, stats, rel, &a, &minified) {
         return;
     }
 
@@ -1321,7 +1325,7 @@ fn observe_epilogue(
         }
     };
     let (a, a_cached) = ctx.cache.run(runner, &original, &mut stats.cache_hits);
-    if descarte_sandbox(ctx, runner, stats, rel, &a) {
+    if descarte_sandbox(ctx, runner, stats, rel, &a, &minified) {
         return;
     }
     if !a.ok_with_output() {
@@ -1412,7 +1416,7 @@ fn pasada_bloques(
         minify::Outcome::ParseError { .. } | minify::Outcome::CodegenError => return Ok(None),
     };
     let (a, a_cached) = ctx.cache.run(runner, &original, &mut stats.cache_hits);
-    if descarte_sandbox(ctx, runner, stats, rel, &a) {
+    if descarte_sandbox(ctx, runner, stats, rel, &a, &minified) {
         return Ok(Some(true));
     }
     if !a.ok_with_output() {
@@ -1503,7 +1507,7 @@ fn invoke_pass(
         minify::Outcome::ParseError { .. } | minify::Outcome::CodegenError => return false,
     };
     let (a, a_cached) = ctx.cache.run(runner, &original, &mut stats.cache_hits);
-    if descarte_sandbox(ctx, runner, stats, rel, &a) {
+    if descarte_sandbox(ctx, runner, stats, rel, &a, &minified) {
         return true;
     }
     if !a.ok_with_output() {
@@ -1537,7 +1541,7 @@ fn observe_module(
         obs = runner.observing().with_invocar(false);
         (a, a_cached) = ctx.cache.run(&obs, original, &mut stats.cache_hits);
     }
-    if descarte_sandbox(ctx, runner, stats, rel, &a) {
+    if descarte_sandbox(ctx, &obs, stats, rel, &a, minified) {
         return true;
     }
     // Sin exports el envoltorio no imprime nada. M12: el llamador sigue con el
@@ -1573,16 +1577,60 @@ fn runner_de_celda(preload: &runner::Preload, worker: usize, cli: &Cli) -> runne
 }
 
 /// n-sandbox: si esta ejecucion del original toco el sandbox (un permiso negado, atrapado
-/// o no), el caso no se compara: va a descartes con causa `sandbox`, nunca a div/ ni a
-/// known/ por eso. Vale para cualquier pasada (cruda, observada, de bloques, `--invocar`,
-/// envoltorio de modulos). Sin `--sandbox`, `Runner::toco_sandbox` es siempre false.
-fn descarte_sandbox(ctx: &Ctx, runner: &runner::Runner, stats: &mut Stats, rel: &Path, a: &runner::Exec) -> bool {
-    if !runner.toco_sandbox(a) {
-        return false;
+/// o no) y el minificado tambien, el caso no se compara: va a descartes con causa
+/// `sandbox`, nunca a div/ ni a known/ por eso. Vale para cualquier pasada (cruda,
+/// observada, de bloques, `--invocar`, envoltorio de modulos); `runner` es el de la
+/// comparacion. Sin `--sandbox`, `Runner::toco_sandbox` es siempre false.
+fn descarte_sandbox(ctx: &Ctx, runner: &runner::Runner, stats: &mut Stats, rel: &Path, a: &runner::Exec, minified: &str) -> bool {
+    match toca_sandbox(runner, a, minified) {
+        TocaSandbox::No => false,
+        TocaSandbox::SoloA => {
+            stats.solo_a_sandbox += 1;
+            stats.nota_pasada = Some(con_nota_solo_a(stats.nota_pasada.take()));
+            false
+        }
+        TocaSandbox::AyB => {
+            stats.a_sandbox += 1;
+            ctx.reporter.discard(rel, "sandbox", a.elapsed);
+            true
+        }
     }
-    stats.a_sandbox += 1;
-    ctx.reporter.discard(rel, "sandbox", a.elapsed);
-    true
+}
+
+/// 2c (revision-n2): quien toco el sandbox en un caso cuyo original lo toco.
+enum TocaSandbox {
+    /// El original no lo toco (si solo lo toca el minificado, se compara).
+    No,
+    /// El original si y el minificado no: el bug puede ser justo lo que cambia que archivo
+    /// se abre (`revision-n2/sb3/u01-solo-a-toca`: con el bug, B no llegaba a leerlo). Se
+    /// compara, con una nota en meta.txt; es el espejo de B-solo.
+    SoloA,
+    /// Los dos: lo que se compararia es el sandbox, no el programa.
+    AyB,
+}
+
+/// 2c: si A toco el sandbox, B corre con el mismo runner de la comparacion (una ejecucion
+/// de mas solo en esos casos; `compare_and_report` lo vuelve a correr). Un B que no corrio
+/// (fallo del runner) cuenta como que lo toco: el caso se descarta como antes.
+fn toca_sandbox(runner: &runner::Runner, a: &runner::Exec, minified: &str) -> TocaSandbox {
+    if !runner.toco_sandbox(a) {
+        return TocaSandbox::No;
+    }
+    let b = runner.run(minified);
+    if matches!(b.status, Status::Failed(_)) || runner.toco_sandbox(&b) {
+        TocaSandbox::AyB
+    } else {
+        TocaSandbox::SoloA
+    }
+}
+
+/// 2c: la nota de meta.txt de un caso en que solo el original toco el sandbox.
+fn con_nota_solo_a(nota: Option<String>) -> String {
+    const SOLO_A: &str = "sandbox: solo el original toco el sandbox (el minificado no): se compara (2c)";
+    match nota {
+        Some(n) => format!("{n} | {SOLO_A}"),
+        None => SOLO_A.to_string(),
+    }
 }
 
 /// La config de minificacion de un worker y la de nombres preservados. Solo
@@ -2006,12 +2054,17 @@ fn process_mutants(
             eprintln!("runner: {e}");
             continue;
         }
-        // n-sandbox: el original de la variante toco el sandbox: no se compara (cuenta en
-        // `original=` de las mutaciones, como las demas variantes cuyo original no sirve).
-        if runner.toco_sandbox(&a) {
-            m.original += 1;
-            continue;
-        }
+        // n-sandbox: el original de la variante y su minificado tocaron el sandbox: no se
+        // compara (cuenta en `original=` de las mutaciones, como las demas variantes cuyo
+        // original no sirve). 2c: si solo lo toco el original, se compara con la nota.
+        let solo_a = match toca_sandbox(runner, &a, &minified) {
+            TocaSandbox::AyB => {
+                m.original += 1;
+                continue;
+            }
+            TocaSandbox::SoloA => true,
+            TocaSandbox::No => false,
+        };
         if v.tdz_filter && a.flags.iter().any(|f| f == "tdz") {
             m.tdz += 1;
             continue;
@@ -2025,7 +2078,8 @@ fn process_mutants(
             m.original += 1;
             continue;
         }
-        let mut s = Stats { skip_kind: base_div, nota_pasada: analisis.nota(), ..Stats::default() };
+        let nota = if solo_a { Some(con_nota_solo_a(analisis.nota())) } else { analisis.nota() };
+        let mut s = Stats { skip_kind: base_div, nota_pasada: nota, ..Stats::default() };
         compare_and_report(ctx, runner, &mut s, &rel, &original, &minified, a, false, false, &static_flags, names_cfg);
         if contar_variante(m, &s) {
             ctx.reporter.attach(&rel, &files);

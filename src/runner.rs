@@ -54,7 +54,8 @@ pub enum Sandbox {
     /// Node sin restricciones (lo de siempre).
     #[default]
     Apagado,
-    /// Modelo de permisos de node 24 (`--permission`, ver `permisos_node`).
+    /// Modelo de permisos de node 24 (`--permission`, ver `permisos_node`) y senales solo
+    /// al propio node (`encerrar_senales`).
     Permisos,
     /// Permisos mas espacios de nombres de Linux sin root (usuario, red y montajes, ver
     /// `Aislar`): sin red (solo un loopback propio), /run tapado y los sockets unix del
@@ -770,12 +771,13 @@ fn run_file(r: &Runner, script: &Path, start: Instant, timeout: Duration, opts: 
     if r.sandbox.activo() {
         cmd.args(permisos_node(r, !opts.sin_sensor));
     }
-    if r.sandbox == Sandbox::PermisosYRed {
-        let aislar = Aislar::armar();
-        // SAFETY: `aplicar` corre entre fork y exec y solo hace llamadas al sistema sobre
-        // memoria armada antes (no reserva, no toma locks).
+    if r.sandbox.activo() {
+        let aislar = (r.sandbox == Sandbox::PermisosYRed).then(Aislar::armar);
+        // SAFETY: `aplicar` y `encerrar_senales` corren entre fork y exec y solo hacen
+        // llamadas al sistema sobre memoria armada antes o en la pila (no reservan, no
+        // toman locks).
         unsafe {
-            cmd.pre_exec(move || aislar.aplicar());
+            cmd.pre_exec(move || encerrar(aislar.as_ref()));
         }
     }
     cmd.arg("--require").arg(preload).arg(script).env("TZ", "UTC");
@@ -909,7 +911,9 @@ fn run_file(r: &Runner, script: &Path, start: Instant, timeout: Duration, opts: 
 /// su cuenta (o un ECONNREFUSED/ENOTFOUND que sin el sandbox tambien habria dado) tambien
 /// cuenta: el caso se descarta, nunca se reporta de mas.
 fn marca_sandbox(s: &str, modo: Sandbox) -> bool {
-    const PERMISOS: &[&str] = &["ERR_ACCESS_DENIED", "Access to this API has been restricted", "ERR_DLOPEN_DISABLED"];
+    // `kill EPERM`: una senal a otro proceso que el filtro de `encerrar_senales` nego (MEDIDO:
+    // node imprime `Error: kill EPERM`); sin el sandbox solo la da un proceso de otro usuario.
+    const PERMISOS: &[&str] = &["ERR_ACCESS_DENIED", "Access to this API has been restricted", "ERR_DLOPEN_DISABLED", "kill EPERM"];
     const RED: &[&str] = &["ENETUNREACH", "EHOSTUNREACH", "EAI_AGAIN", "ENOTFOUND", "ECONNREFUSED"];
     PERMISOS.iter().any(|m| s.contains(m)) || (modo == Sandbox::PermisosYRed && RED.iter().any(|m| s.contains(m)))
 }
@@ -1010,6 +1014,97 @@ impl Aislar {
     }
 }
 
+/// n-sandbox: lo que corre en el hijo entre fork y exec con `--sandbox` o `--sandbox-red`:
+/// los namespaces (solo con la red) y, al final, el filtro de senales.
+fn encerrar(aislar: Option<&Aislar>) -> std::io::Result<()> {
+    if let Some(a) = aislar {
+        a.aplicar()?;
+    }
+    // SAFETY: solo llamadas al sistema con punteros a la pila.
+    unsafe { encerrar_senales() }
+}
+
+/// 2b (revision-n2): el modelo de permisos de node no cubre las senales y no hay namespace
+/// de PID: `process.kill(<pid de afuera>, ...)` llegaba a cualquier proceso del usuario
+/// (MEDIDO por el revisor con un senuelo y SIGTERM). Un filtro seccomp (sin root: con
+/// `no_new_privs`) deja mandar senales solo al propio node: `kill` a su pid, a 0 o a su
+/// grupo (`process_group(0)`: pgid = pid de node, y sin `--allow-child-process` no tiene
+/// hijos); `tgkill`, `tkill`, `rt_sigqueueinfo` y `rt_tgsigqueueinfo` a su pid (la
+/// `raise`/`pthread_kill` de glibc y V8 usan `tgkill` con el tgid propio). El resto da
+/// EPERM, y `pidfd_send_signal`, siempre. Otra arquitectura en la llamada (int 0x80, x32)
+/// mata al proceso. Se instala en el hijo, despues de fork, con un solo hilo: lo heredan
+/// todos los hilos que node cree despues del exec.
+unsafe fn encerrar_senales() -> std::io::Result<()> {
+    use libc::{sock_filter, sock_fprog, BPF_ABS, BPF_JEQ, BPF_JGE, BPF_JMP, BPF_K, BPF_LD, BPF_RET, BPF_W};
+    // linux/audit.h (MEDIDO en /usr/include/linux/audit.h): EM_* | __AUDIT_ARCH_64BIT | __AUDIT_ARCH_LE.
+    #[cfg(target_arch = "x86_64")]
+    const ARCH_PROPIA: Option<u32> = Some(62 | 0x8000_0000 | 0x4000_0000);
+    #[cfg(target_arch = "aarch64")]
+    const ARCH_PROPIA: Option<u32> = Some(183 | 0x8000_0000 | 0x4000_0000);
+    #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+    const ARCH_PROPIA: Option<u32> = None;
+    // Sin reservar memoria (entre fork y exec): ENOSYS, y `probar_sandbox` corta la corrida.
+    let Some(arch) = ARCH_PROPIA else {
+        return Err(std::io::Error::from_raw_os_error(libc::ENOSYS));
+    };
+    // Desplazamientos en `struct seccomp_data` (nr, arch, ip, args[6]); la mitad baja de
+    // args[0] (little endian en las dos arquitecturas): pid_t es de 32 bits.
+    const NR: u32 = 0;
+    const ARCH_OFF: u32 = 4;
+    const ARG0: u32 = 16;
+    // x86_64: las llamadas de x32 llevan este bit en el numero.
+    const X32: u32 = 0x4000_0000;
+    // Indices de las instrucciones a las que se salta (ver el programa abajo).
+    const KILL: usize = 12;
+    const PROPIO: usize = 16;
+    const NIEGA: usize = 18;
+    const DEJA: usize = 19;
+    const fn salto(desde: usize, hasta: usize) -> u8 {
+        (hasta - desde - 1) as u8
+    }
+    const fn ins(code: u32, jt: u8, jf: u8, k: u32) -> sock_filter {
+        sock_filter { code: code as u16, jt, jf, k }
+    }
+    const LD: u32 = BPF_LD | BPF_W | BPF_ABS;
+    const JEQ: u32 = BPF_JMP | BPF_JEQ | BPF_K;
+    const RET: u32 = BPF_RET | BPF_K;
+    let yo = libc::getpid() as u32;
+    let nr = |n: libc::c_long| n as u32;
+    let mut prog: [sock_filter; 20] = [
+        /* 0 */ ins(LD, 0, 0, ARCH_OFF),
+        /* 1 */ ins(JEQ, 1, 0, arch),
+        /* 2 */ ins(RET, 0, 0, libc::SECCOMP_RET_KILL_PROCESS),
+        /* 3 */ ins(LD, 0, 0, NR),
+        /* 4 */ ins(BPF_JMP | BPF_JGE | BPF_K, salto(4, NIEGA), 0, X32),
+        /* 5 */ ins(JEQ, salto(5, KILL), 0, nr(libc::SYS_kill)),
+        /* 6 */ ins(JEQ, salto(6, PROPIO), 0, nr(libc::SYS_tgkill)),
+        /* 7 */ ins(JEQ, salto(7, PROPIO), 0, nr(libc::SYS_tkill)),
+        /* 8 */ ins(JEQ, salto(8, PROPIO), 0, nr(libc::SYS_rt_sigqueueinfo)),
+        /* 9 */ ins(JEQ, salto(9, PROPIO), 0, nr(libc::SYS_rt_tgsigqueueinfo)),
+        /* 10 */ ins(JEQ, salto(10, NIEGA), 0, nr(libc::SYS_pidfd_send_signal)),
+        /* 11 */ ins(RET, 0, 0, libc::SECCOMP_RET_ALLOW),
+        /* 12 KILL */ ins(LD, 0, 0, ARG0),
+        /* 13 */ ins(JEQ, salto(13, DEJA), 0, yo),
+        /* 14 */ ins(JEQ, salto(14, DEJA), 0, 0),
+        /* 15 */ ins(JEQ, salto(15, DEJA), salto(15, NIEGA), yo.wrapping_neg()),
+        /* 16 PROPIO */ ins(LD, 0, 0, ARG0),
+        /* 17 */ ins(JEQ, salto(17, DEJA), salto(17, NIEGA), yo),
+        /* 18 NIEGA */ ins(RET, 0, 0, libc::SECCOMP_RET_ERRNO | libc::EPERM as u32),
+        /* 19 DEJA */ ins(RET, 0, 0, libc::SECCOMP_RET_ALLOW),
+    ];
+    let fprog = sock_fprog { len: prog.len() as libc::c_ushort, filter: prog.as_mut_ptr() };
+    // prctl es variadica y el kernel lee unsigned long: los argumentos van como c_ulong.
+    let (uno, cero): (libc::c_ulong, libc::c_ulong) = (1, 0);
+    if libc::prctl(libc::PR_SET_NO_NEW_PRIVS, uno, cero, cero, cero) != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    let modo = libc::c_ulong::from(libc::SECCOMP_MODE_FILTER);
+    if libc::prctl(libc::PR_SET_SECCOMP, modo, &fprog as *const sock_fprog) != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(())
+}
+
 /// n-sandbox: escribe `datos` en `ruta` (los mapas de uid/gid). Solo llamadas al sistema.
 unsafe fn escribir(ruta: &std::ffi::CStr, datos: &[u8]) -> std::io::Result<()> {
     let fd = libc::open(ruta.as_ptr(), libc::O_WRONLY | libc::O_CLOEXEC);
@@ -1070,14 +1165,17 @@ fn sockets_del_sistema() -> Vec<std::ffi::CString> {
 }
 
 /// n-sandbox: antes de la corrida, que node arranque con el encierro pedido (node con
-/// `--permission` y, con la red, los namespaces y nada mas que `lo`). Si no, la corrida no
+/// `--permission`, una senal a difuzz negada con EPERM y, con la red, los namespaces y nada
+/// mas que `lo`). Si no, la corrida no
 /// empieza: un sandbox que no se puede armar no se reemplaza en silencio por ninguno.
 pub fn probar_sandbox(s: Sandbox) -> Result<(), String> {
     if !s.activo() {
         return Ok(());
     }
+    // 2b: la senal 0 a difuzz (el padre: sin el filtro llega, mismo usuario) tiene que dar EPERM.
     let js = "const i = Object.keys(require('os').networkInterfaces());\
-              process.exitCode = typeof process.permission !== 'object' ? 3 : (process.argv[1] === 'red' && i.some((n) => n !== 'lo')) ? 4 : 0;";
+              let senal = 'paso'; try { process.kill(process.ppid, 0); } catch (e) { senal = e.code; }\
+              process.exitCode = typeof process.permission !== 'object' ? 3 : (process.argv[1] === 'red' && i.some((n) => n !== 'lo')) ? 4 : senal !== 'EPERM' ? 5 : 0;";
     let mut cmd = Command::new(node_path());
     cmd.env_clear()
         .arg("--permission")
@@ -1087,12 +1185,10 @@ pub fn probar_sandbox(s: Sandbox) -> Result<(), String> {
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::piped());
-    if s == Sandbox::PermisosYRed {
-        let aislar = Aislar::armar();
-        // SAFETY: como en run_file.
-        unsafe {
-            cmd.pre_exec(move || aislar.aplicar());
-        }
+    let aislar = (s == Sandbox::PermisosYRed).then(Aislar::armar);
+    // SAFETY: como en run_file.
+    unsafe {
+        cmd.pre_exec(move || encerrar(aislar.as_ref()));
     }
     match cmd.output() {
         Ok(o) if o.status.success() => Ok(()),

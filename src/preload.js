@@ -167,7 +167,7 @@
     write(s);
   };
   // n-sandbox (`--sandbox`): un permiso que el modelo de permisos de node nego (ERR_ACCESS_DENIED;
-  // ERR_DLOPEN_DISABLED, el addon nativo) va al canal como `sandbox`: si le paso al original,
+  // ERR_DLOPEN_DISABLED, el addon nativo; kill EPERM, una senal) va al canal como `sandbox`: si le paso al original,
   // runner::Exec::toco_sandbox lo ve y el caso va a descartes. Solo con --permission
   // (`process.permission` no existe sin el, MEDIDO node 24): sin el flag no se lee nada mas.
   // Sin getters ni trampas del programa: el descriptor propio (node pone `code` como dato, MEDIDO)
@@ -181,6 +181,10 @@
       if (e === null || (typeof e !== 'object' && typeof e !== 'function') || esProxy(e)) return;
       const d = descriptorPropio(e, 'code');
       if (d && (d.value === 'ERR_ACCESS_DENIED' || d.value === 'ERR_DLOPEN_DISABLED')) ctl('sandbox');
+      // 2b: una senal a otro proceso que el filtro seccomp nego (runner::encerrar_senales):
+      // `code` EPERM y `syscall` kill, los dos datos propios (MEDIDO node 24.14.1).
+      const s = descriptorPropio(e, 'syscall');
+      if (d && d.value === 'EPERM' && s && s.value === 'kill') ctl('sandbox');
     } catch {}
   };
 
@@ -1104,8 +1108,9 @@
         const f = (p.callFrames || [])[0];
         const url = (f && urls.get(f.location.scriptId)) || '';
         // n-sandbox: un permiso denegado que el programa atrapa (lo lanza node desde adentro:
-        // el marco de arriba no es file:, por eso va antes del filtro de url).
-        if (conPermisos && (p.reason === 'exception' || p.reason === 'promiseRejection') && /^Error: Access to this API has been restricted/.test(desc)) ctl('sandbox');
+        // el marco de arriba no es file:, por eso va antes del filtro de url). 2b: y una senal
+        // a otro proceso que el filtro seccomp nego (`Error: kill EPERM`, MEDIDO node 24.14.1).
+        if (conPermisos && (p.reason === 'exception' || p.reason === 'promiseRejection') && /^Error: (Access to this API has been restricted|kill EPERM)/.test(desc)) ctl('sandbox');
         if ((p.reason === 'exception' || p.reason === 'promiseRejection') && url && url !== PRELOAD_URL) {
           for (const [k, re] of DESC) {
             if (re.test(desc)) {

@@ -7,6 +7,8 @@
 //! - El caso entero (`process_case`, como e2e_tests): si el original toca el sandbox, el caso
 //!   va a descartes con causa `sandbox`, nunca a div/ ni a known/; sin el flag, el mismo
 //!   programa (con un "bug" puesto a mano) va a div/.
+//! - Las senales (2b): con el sandbox, `process.kill` a otro proceso da EPERM (y marca); a si
+//!   mismo, a 0 y a su grupo anda.
 //! - La red (`--sandbox-red`, solo Linux con user namespaces): sin salida (ENETUNREACH), el
 //!   loopback propio anda, los sockets unix del sistema quedan tapados; con `--sandbox`
 //!   solo, un socket unix de afuera se alcanza (limite documentado del modelo de node).
@@ -144,9 +146,11 @@ fn sandbox_con_sensor() {
     let _ = std::fs::remove_dir_all(&b);
 }
 
-/// Un caso entero: con `--sandbox`, el original que toca un permiso va a descartes
-/// (`sandbox`); sin el flag, el mismo programa con el "bug" va a div/. Y un minificado que
-/// toca el sandbox cuando el original no (el bug cambia la ruta) se compara: div/.
+/// Un caso entero: con `--sandbox`, el original que toca un permiso (y su minificado
+/// tambien) va a descartes (`sandbox`); sin el flag, el mismo programa con el "bug" va a
+/// div/. Y un minificado que toca el sandbox cuando el original no (el bug cambia la ruta)
+/// se compara: div/. 2c: y al reves, un original que lo toca cuando el minificado no (el
+/// bug hace que B no lea), tambien: div/, con la nota en meta.txt.
 #[test]
 fn sandbox_destino_del_caso() {
     if !crate::test_util::requiere_node() {
@@ -157,6 +161,12 @@ fn sandbox_destino_del_caso() {
     let leer = format!("var t = require('fs').readFileSync({}, 'utf8');\nconsole.log(\"bug-no\", t.length);\n", js_str(&senuelo));
     let hijo = "require('child_process').execSync('true');\nconsole.log(\"bug-no\");\n".to_string();
     let escribir = "require('fs').writeFileSync('dentro.txt', 'x');\nconsole.log(41);\n".to_string();
+    // revision-n2/sb3/u01-solo-a-toca: el original lee (negado, atrapado e impreso); con el
+    // "bug", B no entra a la rama.
+    let solo_a = format!(
+        "var m = \"bug-no\";\nif (m === \"bug-no\") {{ try {{ require('fs').readFileSync({}); }} catch (e) {{ console.log(\"negado\", e.code); }} }}\nconsole.log(m);\n",
+        js_str(&senuelo)
+    );
     // (caso, programa, (de, a) del "bug", flags, destino esperado)
     type Caso<'a> = (&'a str, String, (&'a str, String), &'a [&'a str], &'a str);
     let casos: Vec<Caso> = vec![
@@ -166,6 +176,7 @@ fn sandbox_destino_del_caso() {
         ("hijo-sin", hijo, ("bug-no", "bug-si".into()), &[], "div"),
         // El original escribe adentro; el minificado (el bug) escribe afuera: B-solo.
         ("solo-b", escribir, ("dentro.txt", b.join("fuera.txt").to_str().unwrap().to_string()), &["--sandbox"], "div"),
+        ("solo-a", solo_a, ("bug-no", "bug-si".into()), &["--sandbox"], "div"),
     ];
     let preload = Preload::write_tagged("sandbox-caso").unwrap();
     let known = crate::known::Known::load(&corpus, &out, 0, Minifier::Oxc);
@@ -199,12 +210,70 @@ fn sandbox_destino_del_caso() {
         };
         assert_eq!(donde, esperado, "{caso}: {} | {tsv}", st.line());
         assert_eq!(st.a_sandbox, usize::from(esperado == "descarte:sandbox"), "{caso}");
+        assert_eq!(st.solo_a_sandbox, usize::from(caso == "solo-a"), "{caso}");
         if esperado == "div" {
             assert!(causa.is_none(), "{caso}: div/ y ademas descarte {causa:?}");
+            let meta = std::fs::read_to_string(celda.join("div").join(caso).join("meta.txt")).unwrap();
+            assert_eq!(meta.contains("solo el original toco el sandbox"), caso == "solo-a", "{caso}: {meta}");
         }
     }
     drop(preload);
     let _ = std::fs::remove_dir_all(&b);
+}
+
+/// 2b: con `--sandbox` (y con `--sandbox-red`, si esta maquina lo arma), node no le manda
+/// senales a otro proceso: EPERM, y la ejecucion queda marcada. El senuelo (un `sleep`
+/// propio) recibe SIGTERM solo si el filtro falla; a este test (el padre de node) y a todo el
+/// usuario (`-1`) se les manda la senal 0, que no hace nada aunque llegue. `process.pid` y
+/// `process.ppid` los fija el preload (4242 y 4241, M20): no son node ni su padre, y con el
+/// sandbox tambien dan EPERM. A si mismo (el pid real, de `process.report`), a 0 y a su
+/// grupo (pgid = pid de node) anda. Sin el sandbox, lo de siempre.
+#[test]
+fn sandbox_senales() {
+    if !crate::test_util::requiere_node() {
+        return;
+    }
+    let preload = Preload::write_tagged("sandbox-senales").unwrap();
+    let t = Duration::from_secs(20);
+    let mut modos = vec![Sandbox::Permisos];
+    match crate::runner::probar_sandbox(Sandbox::PermisosYRed) {
+        Ok(()) => modos.push(Sandbox::PermisosYRed),
+        Err(e) => eprintln!("DIFUZZ_SALTEADO_SIN_USERNS: sandbox_senales con la red: {e}"),
+    }
+    let mut senuelo = std::process::Command::new("sleep").arg("60").spawn().unwrap();
+    let (pid, padre) = (senuelo.id(), std::process::id());
+    let yo = "process.report.getReport().header.processId";
+    for modo in modos {
+        let r = Runner::new(&preload, crate::test_util::id_runner(), t).with_sandbox(modo);
+        let afuera = [
+            (pid.to_string(), "'SIGTERM'"),
+            (padre.to_string(), "0"),
+            ("-1".into(), "0"),
+            ("process.pid".into(), "0"),
+            ("process.ppid".into(), "0"),
+        ];
+        for (destino, senal) in afuera {
+            let (out, toco, st) = intento(&r, &format!("process.kill({destino}, {senal})"));
+            assert_eq!((out.as_str(), toco, st), ("err EPERM", true, Status::Exited(0)), "{modo:?} {destino}");
+        }
+        // Sin atrapar: lanza y marca (el mensaje `kill EPERM` en la linea `exc`).
+        let e = r.run(&format!("process.kill({pid}, 'SIGTERM');\n"));
+        assert!(e.threw() && e.toco_sandbox(), "{modo:?}: {:?} {}", e.status, e.ctl);
+        for destino in [yo.to_string(), "0".into(), format!("-{yo}")] {
+            let (out, toco, _) = intento(&r, &format!("process.kill({destino}, 0)"));
+            assert_eq!((out.as_str(), toco), ("ok", false), "{modo:?} {destino}");
+        }
+        // Y la senal llega: un handler propio la recibe (el timer mantiene vivo el loop hasta
+        // que llega; sin el, node termina antes tambien sin el sandbox: MEDIDO).
+        let e = r.run(&format!("process.on('SIGUSR2', () => console.log('recibida'));\nprocess.kill({yo}, 'SIGUSR2');\nsetTimeout(() => {{}}, 50);\n"));
+        assert_eq!((e.stdout.trim(), e.toco_sandbox()), ("recibida", false), "{modo:?}: {}", e.stderr);
+        assert!(senuelo.try_wait().unwrap().is_none(), "{modo:?}: el senuelo recibio la senal");
+    }
+    let sin = Runner::new(&preload, crate::test_util::id_runner(), t);
+    let (out, toco, _) = intento(&sin, &format!("process.kill({pid}, 0)"));
+    assert_eq!((out.as_str(), toco), ("ok", false));
+    let _ = senuelo.kill();
+    let _ = senuelo.wait();
 }
 
 /// La celda y la cache: `--sandbox` y `--sandbox-red` cambian el nombre de la celda; sin
