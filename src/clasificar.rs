@@ -150,7 +150,7 @@ pub fn clasificar<'a>(
             // t-principio: que A dependa del contenido no dice que la divergencia venga
             // de ahi (a03/a04: un bug ajeno al lado iba a known/). A' y B' con el
             // contenido fijo, y `veredicto`.
-            match recheck::contenido_matters(runner, original, minified, a, b) {
+            match recheck::contenido_matters(runner, original, minified, a, b, &salted) {
                 recheck::Recheck::Explica => {
                     traza.paso("contenido", "Explica (A depende del contenido y con el contenido fijo la divergencia desaparece)")
                 }
@@ -479,6 +479,9 @@ fn apply_recheck(
 /// (`deep_b`, solo se corre si A depende de la pila): la divergencia tiene que
 /// desaparecer con mas pila. Una salida que cuenta marcos sin tope (A' != B' por el
 /// tamano de los marcos) ya no es concluyente: NoExplica, div/.
+/// Paso 7 (revision-tint B1, r09: el bug en el catch del RangeError, que con mas pila no
+/// corre): rige `recheck::veredicto_neutralizado`, sin `localizada`: B tiene que dar lo
+/// mismo que A con mas pila.
 fn depth_recheck(
     a: &runner::Exec,
     b: &runner::Exec,
@@ -495,7 +498,7 @@ fn depth_recheck(
             deep.status
         )));
     }
-    Some(recheck::veredicto(a, b, deep, &deep_b()))
+    Some(recheck::veredicto_neutralizado(a, b, deep, &deep_b(), None))
 }
 
 /// M17: oxc no soporta sloppy (D1 del CLAUDE.md). Ante una divergencia de oxc
@@ -790,8 +793,15 @@ mod tests {
         let nunca = || -> Exec { panic!("no hacia falta correr B con mas pila") };
         // A no depende de la pila: no hay flag.
         assert_eq!(depth_recheck(&ok("1\nx\n"), &ok("2\nx\n"), &ok("1\nx\n"), nunca), None);
-        // Solo cambia la linea que depende de la pila y con mas pila A y B dan lo mismo: concluyente.
-        assert_eq!(depth_recheck(&ok("1200\nx\n"), &ok("1500\nx\n"), &ok("2400\nx\n"), || ok("2400\nx\n")), Some(Recheck::Explica));
+        // Solo cambia la linea que depende de la pila y con mas pila A y B dan lo mismo. Paso 7
+        // (revision-tint B1): antes concluyente por `localizada`; ahora inconcluso (div/),
+        // porque con la misma forma pasaba r09 (el bug en el catch del RangeError, que con mas
+        // pila no corre). Gana el principio; no hay un positivo asi en el golden, la aceptacion
+        // ni los known/ del corpus de SWC en oxc (MEDIDO).
+        let r = depth_recheck(&ok("1200\nx\n"), &ok("1500\nx\n"), &ok("2400\nx\n"), || ok("2400\nx\n"));
+        assert!(matches!(r, Some(Recheck::Inconcluso(_))), "{r:?}");
+        let r = depth_recheck(&ok("-2\n"), &ok("NaN\n"), &ok("none\n"), || ok("none\n"));
+        assert!(matches!(r, Some(Recheck::Inconcluso(_))), "{r:?}");
         // t-principio: una cuenta de marcos sin tope (A y B con mas pila tampoco dan lo
         // mismo) ya no es concluyente.
         assert_eq!(depth_recheck(&ok("1200\nx\n"), &ok("1500\nx\n"), &ok("2400\nx\n"), || ok("3000\nx\n")), Some(Recheck::NoExplica));
@@ -893,7 +903,13 @@ mod tests {
         let cfg = preset.build(Minifier::Oxc, kind);
         // Issue A de ENVIAR.md: el spread con getter se mueve (oxc imprime "FAIL").
         let bug = "let result = \"FAIL\";\nconst o = { ...{ get prop() { result = \"PASS\"; } } };\nconsole.log(result);\nconsole.log(o);\n";
-        let casos: [(&str, String, bool, &str); 9] = [
+        let casos: [(&str, String, bool, &str); 13] = [
+            // Paso 7 (revision-tint B1, corpus-adv r05/r10/r07/r09): el bug vive adentro de lo
+            // que el re-chequeo neutraliza. Con el paso 6 iban a known/ (`localizada`).
+            ("builtins-adentro", "Array.prototype.includes = function (v) { return Math.cbrt(-8); };\nvar arr = [1];\narr.push(2);\nconsole.log(arr.includes(2));\n".into(), false, "  builtins: Inconcluso"),
+            ("coercion-adentro", "var o = { valueOf() { return Math.cbrt(-8); } };\nconsole.log(o + 1);\n".into(), false, "  coercion: Inconcluso"),
+            ("tostring-adentro", "function f() { return 1; }\nlet result = \"none\";\nvar s = String(f);\nif (s.endsWith(\"}\") && !s.includes(\"native\")) { result = Math.cbrt(-8); }\nconsole.log(result);\n".into(), false, "  contenido: Inconcluso"),
+            ("profundidad-adentro", "let n = 0;\nfunction r(k) { n++; if (k > 0) r(k - 1); }\nlet result = \"none\";\ntry { r(15000); } catch (e) { result = Math.cbrt(-8); }\nconsole.log(result);\n".into(), false, "  profundidad: Inconcluso"),
             // (caso, fuente, va a known/, linea de la traza)
             ("coercion-pos", "var o1 = { valueOf: function () { f1(); } };\nvar o2 = { valueOf: function () { f2(); } };\nvar r1 = o1 <= o2;\n".into(), true, "  coercion: Explica"),
             ("coercion-neg", format!("class P {{ toString() {{ return \"p\"; }} }}\n{bug}"), false, "  coercion: NoExplica -> coercion_irrelevante"),

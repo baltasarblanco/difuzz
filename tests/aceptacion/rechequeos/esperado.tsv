@@ -200,3 +200,91 @@
 18-profundidad-cuenta	oxc-a-carril_a	div:Stdout
 18-profundidad-cuenta	oxc-b-core_defaults	div:Stdout
 18-profundidad-cuenta	oxc-b-carril_a	div:Stdout
+# Paso 7 (revision-tint B1): el bug vive ADENTRO del codigo que el re-chequeo neutraliza (el valueOf/toString, el
+# built-in pisado, la rama que el contenido fijo apaga, el catch del RangeError): A' y B' lo saltean los dos y
+# `localizada` (o `mismo_camino`) aceptaba la linea. 19-rNN: revision-tint/corpus-adv (12 de 15 iban a known/ en
+# alguna celda con el binario del paso 6, MEDIDO; r03, r06 y r13 son controles). 20-pNN: paso 7 (p01/p02: el
+# pisado devuelve lo mismo que el original y `mismo_camino` lo aceptaba; p03/p04: rama con marca o marco
+# forjado; p05: el bug en la misma linea que el catch del RangeError). Ahora rige `veredicto_neutralizado`
+# (B == A', o para contenido `localizada_con_marca`): todos div/. En el carril B, r06 y r14 son ThrowNew
+# (`delete (0/0)` -> `delete NaN` lanza en estricto).
+19-r01-coercion-bug-en-valueof	oxc-a-core_defaults	div:Stdout
+19-r01-coercion-bug-en-valueof	oxc-a-carril_a	div:Stdout
+19-r01-coercion-bug-en-valueof	oxc-b-core_defaults	div:Stdout
+19-r01-coercion-bug-en-valueof	oxc-b-carril_a	div:Stdout
+19-r02-coercion-bug-en-tostring-clase	oxc-a-core_defaults	div:Stdout
+19-r02-coercion-bug-en-tostring-clase	oxc-a-carril_a	div:Stdout
+19-r02-coercion-bug-en-tostring-clase	oxc-b-core_defaults	div:Stdout
+19-r02-coercion-bug-en-tostring-clase	oxc-b-carril_a	div:Stdout
+19-r03-coercion-control-linea-aparte	oxc-a-core_defaults	div:Stdout
+19-r03-coercion-control-linea-aparte	oxc-a-carril_a	div:Stdout
+19-r03-coercion-control-linea-aparte	oxc-b-core_defaults	div:Stdout
+19-r03-coercion-control-linea-aparte	oxc-b-carril_a	div:Stdout
+19-r04-builtins-bug-en-override	oxc-a-core_defaults	div:Stdout
+19-r04-builtins-bug-en-override	oxc-a-carril_a	div:Stdout
+19-r04-builtins-bug-en-override	oxc-b-core_defaults	div:Stdout
+19-r04-builtins-bug-en-override	oxc-b-carril_a	div:Stdout
+19-r05-builtins-bug-en-override-cbrt	oxc-a-core_defaults	div:Stdout
+19-r05-builtins-bug-en-override-cbrt	oxc-a-carril_a	div:Stdout
+19-r05-builtins-bug-en-override-cbrt	oxc-b-core_defaults	div:Stdout
+19-r05-builtins-bug-en-override-cbrt	oxc-b-carril_a	div:Stdout
+19-r06-builtins-delete-misma-linea	oxc-a-core_defaults	div:Stdout
+19-r06-builtins-delete-misma-linea	oxc-a-carril_a	div:Stdout
+19-r06-builtins-delete-misma-linea	oxc-b-core_defaults	div:ThrowNew
+19-r06-builtins-delete-misma-linea	oxc-b-carril_a	div:ThrowNew
+19-r07-contenido-bug-en-rama	oxc-a-core_defaults	div:Stdout
+19-r07-contenido-bug-en-rama	oxc-a-carril_a	div:Stdout
+19-r07-contenido-bug-en-rama	oxc-b-core_defaults	div:Stdout
+19-r07-contenido-bug-en-rama	oxc-b-carril_a	div:Stdout
+19-r08-stack-bug-en-rama	oxc-a-core_defaults	div:Stdout
+19-r08-stack-bug-en-rama	oxc-a-carril_a	div:Stdout
+19-r08-stack-bug-en-rama	oxc-b-core_defaults	div:Stdout
+19-r08-stack-bug-en-rama	oxc-b-carril_a	div:Stdout
+19-r09-profundidad-bug-en-catch	oxc-a-core_defaults	div:Stdout
+19-r09-profundidad-bug-en-catch	oxc-a-carril_a	div:Stdout
+19-r09-profundidad-bug-en-catch	oxc-b-core_defaults	div:Stdout
+19-r09-profundidad-bug-en-catch	oxc-b-carril_a	div:Stdout
+19-r10-coercion-cbrt-en-valueof	oxc-a-core_defaults	div:Stdout
+19-r10-coercion-cbrt-en-valueof	oxc-a-carril_a	div:Stdout
+19-r10-coercion-cbrt-en-valueof	oxc-b-core_defaults	div:Stdout
+19-r10-coercion-cbrt-en-valueof	oxc-b-carril_a	div:Stdout
+19-r11-builtins-substring-pisado-usado	oxc-a-core_defaults	div:Stdout
+19-r11-builtins-substring-pisado-usado	oxc-a-carril_a	div:Stdout
+19-r11-builtins-substring-pisado-usado	oxc-b-core_defaults	div:Stdout
+19-r11-builtins-substring-pisado-usado	oxc-b-carril_a	div:Stdout
+19-r12-coercion-toprimitive-bug	oxc-a-core_defaults	div:Stdout
+19-r12-coercion-toprimitive-bug	oxc-a-carril_a	div:Stdout
+19-r12-coercion-toprimitive-bug	oxc-b-core_defaults	div:Stdout
+19-r12-coercion-toprimitive-bug	oxc-b-carril_a	div:Stdout
+19-r13-issueA-en-valueof	oxc-a-core_defaults	div:Stdout
+19-r13-issueA-en-valueof	oxc-a-carril_a	div:Stdout
+19-r13-issueA-en-valueof	oxc-b-core_defaults	div:Stdout
+19-r13-issueA-en-valueof	oxc-b-carril_a	div:Stdout
+19-r14-delete-en-valueof	oxc-a-core_defaults	div:Stdout
+19-r14-delete-en-valueof	oxc-a-carril_a	div:Stdout
+19-r14-delete-en-valueof	oxc-b-core_defaults	div:ThrowNew
+19-r14-delete-en-valueof	oxc-b-carril_a	div:ThrowNew
+19-r15-builtins-recursion	oxc-a-core_defaults	div:Stdout
+19-r15-builtins-recursion	oxc-a-carril_a	div:Stdout
+19-r15-builtins-recursion	oxc-b-core_defaults	div:Stdout
+19-r15-builtins-recursion	oxc-b-carril_a	div:Stdout
+20-p01-builtins-mismo-camino	oxc-a-core_defaults	div:Stdout
+20-p01-builtins-mismo-camino	oxc-a-carril_a	div:Stdout
+20-p01-builtins-mismo-camino	oxc-b-core_defaults	div:Stdout
+20-p01-builtins-mismo-camino	oxc-b-carril_a	div:Stdout
+20-p02-coercion-mismo-camino	oxc-a-core_defaults	div:Stdout
+20-p02-coercion-mismo-camino	oxc-a-carril_a	div:Stdout
+20-p02-coercion-mismo-camino	oxc-b-core_defaults	div:Stdout
+20-p02-coercion-mismo-camino	oxc-b-carril_a	div:Stdout
+20-p03-tostring-rama-con-marca	oxc-a-core_defaults	div:Stdout
+20-p03-tostring-rama-con-marca	oxc-a-carril_a	div:Stdout
+20-p03-tostring-rama-con-marca	oxc-b-core_defaults	div:Stdout
+20-p03-tostring-rama-con-marca	oxc-b-carril_a	div:Stdout
+20-p04-stack-marco-forjado	oxc-a-core_defaults	div:Stdout
+20-p04-stack-marco-forjado	oxc-a-carril_a	div:Stdout
+20-p04-stack-marco-forjado	oxc-b-core_defaults	div:Stdout
+20-p04-stack-marco-forjado	oxc-b-carril_a	div:Stdout
+20-p05-profundidad-catch-misma-linea	oxc-a-core_defaults	div:Stdout
+20-p05-profundidad-catch-misma-linea	oxc-a-carril_a	div:Stdout
+20-p05-profundidad-catch-misma-linea	oxc-b-core_defaults	div:Stdout
+20-p05-profundidad-catch-misma-linea	oxc-b-carril_a	div:Stdout

@@ -105,8 +105,10 @@ uso: difuzz <corpus_dir> [--out DIR] [--minifier M] [--config C] [--forma F] [--
     0    corrida entera (con o sin hallazgos; CORRIDA.txt: completa); --cruce, --emitir y --help sin error
     1    error de entrada o de entorno: corpus inexistente, que no es directorio o sin input.js; --out
          que no se puede escribir; escrituras perdidas o casos sin contar (CORRIDA.txt: incompleta);
-         el binario o el oraculo cambiaron a mitad de corrida (R1-H18; CORRIDA.txt: incompleta, con
-         binario_cambiado); --cruce sin indices; --emitir que no puede leer o minificar
+         el oraculo reescrito en el lugar a mitad de corrida (R1-H18/M3; CORRIDA.txt: incompleta, con
+         binario_cambiado; con /proc, reemplazar difuzz o el oraculo por otro archivo no corta la
+         corrida: se siguen lanzando los del arranque; sin /proc se vigilan por ruta y cualquier
+         cambio corta); --cruce sin indices; --emitir que no puede leer o minificar
     2    error de uso: opcion desconocida, valor o combinacion invalida (con este texto en stderr)
     130  interrumpida por SIGINT o SIGTERM (CORRIDA.txt: interrumpida)";
 

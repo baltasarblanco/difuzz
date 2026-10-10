@@ -240,23 +240,38 @@ cambiar de comportamiento sin que sea un bug. Cada backend declara las suyas
 
 Principios:
 
-- **Una divergencia va a `known/` solo si una asunción la explica.** La decisión sale de los
-  flags del original contra la tabla de asunciones del backend, y cada flag con re-chequeo pasa
-  antes por él: se neutraliza la violación (con otra ejecución o volviendo a minificar) y se
-  compara. Solo un resultado concluyente (`Explica`) conserva el flag; si da `NoExplica` o
+- **Una divergencia va a `known/` solo si sus flags están en la tabla de asunciones del backend
+  y el re-chequeo de esos flags (si lo tienen) da `Explica`.** El re-chequeo neutraliza la
+  violación (con otra ejecución o volviendo a minificar): A' es el original y B' el minificado así
+  neutralizados. Solo `Explica` conserva el flag; con `NoExplica` (la divergencia sigue) o
   `Inconcluso`, el flag se renombra (`extends_irrelevante`, `extends_inconcluso`, ...), ya no
-  clasifica y, si no hay otro, el caso queda en `div/` con una nota. Tienen re-chequeo:
-  - en los dos backends: el contenido de `toString`/`.stack` (A y B con el contenido fijo),
-    la profundidad de pila (A y B con más pila), los nombres (minificar preservándolos), los
-    built-ins pisados (A y B con lo pisado congelado en su valor original) y los métodos de
-    coerción (se renombran las definiciones de `valueOf`/`toString`/`[Symbol.toPrimitive]` y se
-    vuelve a minificar);
-  - en oxc además: `extends`, `with`, `global_conocido` y las violaciones que ubica el sensor
-    (TDZ, atrapada o no; coerción de `Symbol`; `extends` atrapado).
+  clasifica y, si no hay otro, el caso queda en `div/` con una nota. Qué cuenta como `Explica`:
+  - contenido de `toString`/`.stack` (A' y B' con el contenido fijo), profundidad de pila (A' y
+    B' con más pila), built-ins pisados (A' y B' con lo pisado congelado en su valor original) y
+    métodos de coerción (se renombran las definiciones de `valueOf`/`toString`/
+    `[Symbol.toPrimitive]` y se vuelve a minificar), en los dos backends: la neutralización hace
+    que el código donde vive la asunción no corra, así que B' == A' no alcanza (si el bug está
+    ahí adentro, A' y B' lo saltean los dos). Hace falta además que B dé lo mismo que A' (el
+    minificado de verdad se comporta como el original neutralizado). En el contenido también
+    vale que B difiera de A solo en líneas que muestran el contenido (en A' el texto fijo o un
+    marco fijo, y en A el contenido de verdad).
+  - `extends`, `with`, `global_conocido`, las violaciones que ubica el sensor (TDZ, atrapada o
+    no; coerción de `Symbol`; `extends` atrapado) y solo sloppy, en oxc: B' == A' y que el
+    camino se sostenga (A' da lo mismo que A, B lo mismo que A', o B difiere de A solo en líneas
+    que también cambian en A').
+  - los nombres (minificar preservándolos), en los dos: que la divergencia desaparezca.
 
   En oxc todos los flags de su tabla tienen re-chequeo. En swc, `proxy`, `tdz`, `callee`,
   `redefine_global`, el backlog y la asunción por ruta (`issue_2719`) clasifican directo, sin
   re-chequeo.
+
+  **Límites conocidos** (lo que no se prueba): el re-chequeo compara salidas, no caminos. Un
+  programa armado para que la salida con el bug coincida justo con la del original neutralizado
+  (o que imprima a propósito una línea con forma de marco de V8 en la rama del contenido fijo)
+  termina en `known/` (los dos casos se midieron así con oxc 0.153.0). Los
+  re-chequeos de la segunda lista siguen aceptando una divergencia confinada a las líneas que la
+  neutralización cambia; si el bug vive en el código que esa neutralización apaga, es el mismo
+  agujero (no medido para esos flags).
 - **Un minificado que node no acepta nunca se explica con una asunción**: ninguna permite
   producir código inválido.
 - **Una conocida que cambia de síntoma vuelve a `div/`** (se compara contra
@@ -288,8 +303,8 @@ Sin `node` en el `PATH`, los tests que lo necesitan fallan con un mensaje claro.
 
 - **Golden de detección** (`tests/golden/`): 16 casos con bugs conocidos de oxc y swc, en 8
   celdas, más `--invocar` y `--stubs`; la clase esperada de cada caso está en `esperado.tsv`.
-- **Aceptación de los re-chequeos** (`tests/aceptacion/rechequeos/`): 42 casos que combinan un
-  bug real de oxc con un flag de asunción, en las 4 celdas de oxc (168 comparaciones).
+- **Aceptación de los re-chequeos** (`tests/aceptacion/rechequeos/`): 62 casos que combinan un
+  bug real de oxc con un flag de asunción, en las 4 celdas de oxc (248 comparaciones).
 
 ```sh
 tests/golden/verificar.sh --jobs 4                    # sale con 0 y "comparaciones=N fallas=0"

@@ -87,7 +87,8 @@ pub fn veredicto(a: &runner::Exec, b: &runner::Exec, a2: &runner::Exec, b2: &run
 /// oxc reescribe `undefined` y `0/0` suponiendo que no hay scope; dentro del
 /// `with` eso da otros valores, ni los de A ni los de A'). Un bug en una linea
 /// que la asuncion no toca, o una linea de mas o de menos, no pasa.
-/// Tambien lo usa M16 (clasificar::depth_recheck), con A' = A con mas pila.
+/// Paso 7 (revision-tint B1): M16 (clasificar::depth_recheck) y los re-chequeos de
+/// `builtins`, `coercion` y contenido ya no la usan (`veredicto_neutralizado`).
 ///
 /// I1 (revision-b456, r08-readonly-getter): un throw de A' no es "una linea que la
 /// asuncion cambia" sino otro camino: corta el programa justo donde B difiere y
@@ -120,6 +121,128 @@ fn mismo_camino(a: &runner::Exec, a2: &runner::Exec) -> bool {
         lines.join("\n")
     };
     crate::same_exec(a, a2) || (a.threw() && a2.threw() && sin_tipo(a) == sin_tipo(a2))
+}
+
+/// Paso 7 (revision-tint B1): el veredicto de los re-chequeos que NEUTRALIZAN el codigo
+/// en el que vive la asuncion (`builtins`: los pisados quedan fijos y el codigo que los
+/// pisa no corre; `coercion`: los helpers renombrados no corren; contenido: toString y
+/// .stack fijos; `profundidad`: con mas pila no se llega al limite). Si el bug esta
+/// adentro de ese codigo, A' y B' lo saltean los dos: B' == A' no prueba nada, y
+/// `mismo_camino` ni `localizada` tampoco (MEDIDO: revision-tint/corpus-adv, 12 de 15 a
+/// known/ con `veredicto`). Es concluyente solo si:
+/// 1. A' y B' terminan y B' da lo mismo que A' (como en `veredicto`), y
+/// 2. B da lo mismo que A': el minificado de verdad ya se comporta como el original con
+///    la asuncion neutralizada. Si el codigo neutralizado tuviera un bug que B ejecuta,
+///    B no se comportaria como un programa que no lo ejecuta, salvo coincidencia exacta.
+///
+/// Sin `mismo_camino`: un built-in pisado que devuelve lo mismo que el original
+/// (`includes = function () { return Math.cbrt(-8) < 0; }`) da A' == A y el bug de B
+/// quedaba tapado (corpus de aceptacion, 20-p01-builtins-mismo-camino).
+/// `salada`: solo para contenido, la corrida de A con el contenido salado; habilita la
+/// variante con marca de `localizada` (`localizada_con_marca`).
+pub fn veredicto_neutralizado(
+    a: &runner::Exec,
+    b: &runner::Exec,
+    a2: &runner::Exec,
+    b2: &runner::Exec,
+    salada: Option<&runner::Exec>,
+) -> Recheck {
+    if !a2.completed() {
+        return Recheck::Inconcluso(format!("el original modificado no termino ({:?})", a2.status));
+    }
+    if matches!(b2.status, runner::Status::Timeout | runner::Status::Failed(_)) {
+        return Recheck::Inconcluso(format!("el minificado modificado no termino ({:?})", b2.status));
+    }
+    if !matches!(oracle::compare(a2, b2), oracle::Verdict::Same) {
+        return Recheck::NoExplica;
+    }
+    if matches!(oracle::compare(a2, b), oracle::Verdict::Same) {
+        return Recheck::Explica;
+    }
+    if salada.is_some_and(|s| localizada_con_marca(a, b, a2, s)) {
+        return Recheck::Explica;
+    }
+    Recheck::Inconcluso(
+        "con la asuncion neutralizada la divergencia desaparece, pero el minificado no se comporta como el original neutralizado (B != A'): el codigo neutralizado puede tener el bug".into(),
+    )
+}
+
+/// Paso 7: lo que el preload pone con DIFUZZ_SALT=fijo (preload.js, toString y
+/// prepareStackTrace) y con DIFUZZ_SALT=1 (la sal). `localizada_con_marca` los busca.
+pub const FIJO_TOSTRING: &str = "function () { [native code] }";
+pub const FIJO_MARCO: &str = "    at dz";
+pub const SAL_TOSTRING: &str = "/*dz*/";
+
+/// Paso 7 (revision-tint B1, contenido): `localizada` con marca. Ademas de lo de
+/// `localizada` (B termina, A y A' lanzan los dos o ninguno, mismas lineas, A' cambia en
+/// cada linea en que B difiere de A), cada una de esas lineas tiene que MOSTRAR contenido:
+/// - un marco fijo: A' es exactamente `FIJO_MARCO` y A y B tambien son lineas de marco
+///   con la forma de V8 (`es_marco`);
+/// - un toString fijo: A' contiene `FIJO_TOSTRING`, A y B coinciden con A' fuera de cada
+///   aparicion (el resto de la linea es igual), y en A con el contenido salado esa misma
+///   linea trae la sal (el contenido de A fluye a esa linea, no solo decide un camino).
+///
+/// r07/r08 (corpus-adv: el bug en la rama que el contenido fijo apaga) no pasan: la
+/// linea en A' es `none`, sin marca. Lo que sigue pasando (riesgo anotado): un programa
+/// que imprima a proposito una linea con forma de marco o el toString entero en la rama
+/// del contenido fijo.
+pub fn localizada_con_marca(a: &runner::Exec, b: &runner::Exec, a2: &runner::Exec, salada: &runner::Exec) -> bool {
+    let lines = |e: &runner::Exec| oracle::normalize_names(&e.stdout).lines().map(String::from).collect::<Vec<_>>();
+    let (la, lb, l2, ls) = (lines(a), lines(b), lines(a2), lines(salada));
+    let throw = format!("{}throw ", runner::DZ);
+    let cubre = |i: usize, x: &str, y: &str, z: &str| {
+        if z.starts_with(&throw) || x == z {
+            return false;
+        }
+        if z == FIJO_MARCO {
+            return es_marco(x) && es_marco(y);
+        }
+        if !z.contains(FIJO_TOSTRING) {
+            return false;
+        }
+        let partes: Vec<&str> = z.split(FIJO_TOSTRING).collect();
+        // La linea salada solo se alinea con la de A si la sal no agrego lineas.
+        let salada_ok = ls.len() == la.len() && ls[i].contains(SAL_TOSTRING);
+        salada_ok && encaja(&partes, x) && encaja(&partes, y)
+    };
+    b.completed()
+        && a.threw() == a2.threw()
+        && la.len() == lb.len()
+        && la.len() == l2.len()
+        && la.iter().zip(&lb).zip(&l2).enumerate().all(|(i, ((x, y), z))| x == y || cubre(i, x, y, z))
+}
+
+/// Paso 7: una linea de marco de V8 (`    at f (archivo:3:15)`, `    at archivo:3:15` o
+/// `    at Array.map (<anonymous>)`), no cualquier linea que empiece con `    at `.
+fn es_marco(l: &str) -> bool {
+    let Some(resto) = l.strip_prefix("    at ") else {
+        return false;
+    };
+    if resto.ends_with("(<anonymous>)") {
+        return true;
+    }
+    let resto = resto.strip_suffix(')').unwrap_or(resto);
+    let mut p = resto.rsplitn(3, ':');
+    let digitos = |s: Option<&str>| s.is_some_and(|s| !s.is_empty() && s.bytes().all(|c| c.is_ascii_digit()));
+    digitos(p.next()) && digitos(p.next()) && p.next().is_some_and(|s| !s.is_empty())
+}
+
+/// Paso 7: `s` es `partes` unidas por cualquier texto (cada separador, un comodin).
+fn encaja(partes: &[&str], s: &str) -> bool {
+    let (Some(primera), Some(ultima)) = (partes.first(), partes.last()) else {
+        return false;
+    };
+    if partes.len() < 2 || s.len() < primera.len() + ultima.len() || !s.starts_with(primera) || !s.ends_with(ultima) {
+        return false;
+    }
+    let mut medio = &s[primera.len()..s.len() - ultima.len()];
+    for p in &partes[1..partes.len() - 1] {
+        match medio.find(p) {
+            Some(j) => medio = &medio[j + p.len()..],
+            None => return false,
+        }
+    }
+    true
 }
 
 /// b1-b: `Explica` solo si la divergencia desaparece con los globals definidos
@@ -190,14 +313,24 @@ pub fn with_matters(
 /// Se corren el original y el minificado con el contenido FIJO (preload,
 /// DIFUZZ_SALT=fijo: el mismo texto para cualquier funcion y solo la cabecera del
 /// stack), y rige `veredicto`. Sin re-minificar: 2 node.
-pub fn contenido_matters(r: &runner::Runner, original: &str, minified: &str, a: &runner::Exec, b: &runner::Exec) -> Recheck {
+/// Paso 7 (revision-tint B1, r07/r08): rige `veredicto_neutralizado` con `salada` (la
+/// corrida de A con el contenido salado que ya hizo clasificar): B tiene que comportarse
+/// como A', o diferir solo en lineas que muestran contenido (`localizada_con_marca`).
+pub fn contenido_matters(
+    r: &runner::Runner,
+    original: &str,
+    minified: &str,
+    a: &runner::Exec,
+    b: &runner::Exec,
+    salada: &runner::Exec,
+) -> Recheck {
     let env = [("DIFUZZ_SALT", "fijo")];
     let a2 = r.run_with_env(original, &env);
     if !a2.completed() {
         return Recheck::Inconcluso(format!("el original con contenido fijo no termino ({:?})", a2.status));
     }
     let b2 = r.run_with_env(minified, &env);
-    veredicto(a, b, &a2, &b2)
+    veredicto_neutralizado(a, b, &a2, &b2, Some(salada))
 }
 
 /// t-principio: lo que el preload vio pisado en `a` (lineas `builtin <objeto>
@@ -217,6 +350,9 @@ pub fn builtins_pisados(a: &runner::Exec) -> Vec<&str> {
 /// corren con cada propiedad que A piso fijada a su valor original (preload,
 /// DIFUZZ_BUILTINS_FIJOS: las escrituras no hacen nada). Si la divergencia sigue,
 /// el pisado no la explica. Rige `veredicto`. Sin re-minificar: 2 node.
+/// Paso 7 (revision-tint B1, r04/r05/r11/r15): rige `veredicto_neutralizado` (B tiene
+/// que comportarse como A'): el codigo que pisa no corre en A' ni en B', y si tiene el
+/// bug, B' == A' no prueba nada.
 pub fn builtins_matter(r: &runner::Runner, original: &str, minified: &str, a: &runner::Exec, b: &runner::Exec) -> Recheck {
     let v = builtins_pisados(a);
     if v.is_empty() {
@@ -235,13 +371,15 @@ pub fn builtins_matter(r: &runner::Runner, original: &str, minified: &str, a: &r
         return Recheck::Inconcluso(format!("el original con los built-ins fijos no termino ({:?})", a2.status));
     }
     let b2 = r.run_with_env(minified, &env);
-    veredicto(a, b, &a2, &b2)
+    veredicto_neutralizado(a, b, &a2, &b2, None)
 }
 
 /// t-principio: `coercion` (estatico; oxc: "Coercion Methods Are Pure"; antes iba a
 /// known/ sin re-chequeo). Se renombran las definiciones de helpers de coercion
 /// (`neutralize_coercion`): la coercion usa la de Object.prototype, que es pura. Se
 /// minifica igual y rige `veredicto`. 1 minify + 2 node.
+/// Paso 7 (revision-tint B1, r01/r02/r10/r12/r14): rige `veredicto_neutralizado`: los
+/// helpers renombrados no corren en A' ni en B'.
 pub fn coercion_matters(
     r: &runner::Runner,
     recheck: (backend::Minifier, minify::Preset, SourceKind),
@@ -269,7 +407,7 @@ pub fn coercion_matters(
         return Recheck::Inconcluso(format!("la variante sin helpers de coercion no termino ({:?})", a2.status));
     }
     let b2 = r.run(&m2);
-    veredicto(a, b, &a2, &b2)
+    veredicto_neutralizado(a, b, &a2, &b2, None)
 }
 
 /// t-principio: el prefijo de los helpers de coercion renombrados.
@@ -787,6 +925,48 @@ mod tests {
         assert!(matches!(r, Recheck::Inconcluso(ref n) if n.contains("Timeout")), "{r:?}");
         let r = veredicto(&ok("1\n"), &ok("2\n"), &ok("1\n"), &ex(Status::Timeout, ""));
         assert!(matches!(r, Recheck::Inconcluso(_)), "{r:?}");
+    }
+
+    /// Paso 7 (revision-tint B1): en los re-chequeos por neutralizacion solo B == A' es
+    /// concluyente; `mismo_camino` y `localizada` ya no (el bug puede estar en lo neutralizado).
+    #[test]
+    fn veredicto_neutralizado_exige_b_igual_a_a2() {
+        use super::{localizada_con_marca, veredicto_neutralizado, FIJO_MARCO, FIJO_TOSTRING};
+        let ok = |s: &str| ex(Status::Exited(0), s);
+        // B ya se comporta como A' (16-builtins-positivo, keep_comparisons): Explica.
+        assert_eq!(veredicto_neutralizado(&ok("pisado\n"), &ok("ABC\n"), &ok("ABC\n"), &ok("ABC\n"), None), Recheck::Explica);
+        // 20-p01: A' == A (el pisado devuelve lo mismo que el original) y B difiere: antes
+        // `mismo_camino`, Explica; ahora inconcluso.
+        let r = veredicto_neutralizado(&ok("true\n"), &ok("false\n"), &ok("true\n"), &ok("true\n"), None);
+        assert!(matches!(r, Recheck::Inconcluso(ref n) if n.contains("B != A'")), "{r:?}");
+        assert_eq!(veredicto(&ok("true\n"), &ok("false\n"), &ok("true\n"), &ok("true\n")), Recheck::Explica);
+        // r05/r09: la linea del bug cambia en A' (no corre): antes `localizada`, ahora inconcluso.
+        let r = veredicto_neutralizado(&ok("-2\n"), &ok("NaN\n"), &ok("none\n"), &ok("none\n"), None);
+        assert!(matches!(r, Recheck::Inconcluso(_)), "{r:?}");
+        assert_eq!(veredicto(&ok("-2\n"), &ok("NaN\n"), &ok("none\n"), &ok("none\n")), Recheck::Explica);
+        // La divergencia sigue: NoExplica, como en `veredicto`.
+        assert_eq!(veredicto_neutralizado(&ok("1\n"), &ok("2\n"), &ok("3\n"), &ok("4\n"), None), Recheck::NoExplica);
+        // Contenido con marca: el toString impreso (17-tostring-positivo) y los marcos del stack.
+        let fuente = "function suma(a, b) { return a + b; }";
+        let (a, b) = (ok(&format!("f: {fuente}\nfin\n")), ok("f: function suma(n,r){return n+r}\nfin\n"));
+        let a2 = ok(&format!("f: {FIJO_TOSTRING}\nfin\n"));
+        let salada = ok(&format!("f: {fuente}/*dz*/\nfin\n"));
+        assert!(localizada_con_marca(&a, &b, &a2, &salada));
+        assert_eq!(veredicto_neutralizado(&a, &b, &a2, &a2, Some(&salada)), Recheck::Explica);
+        // ... sin la sal en esa linea de A (el contenido decide un camino, no se imprime): no.
+        assert!(!localizada_con_marca(&a, &b, &a2, &a));
+        // ... el resto de la linea distinto (bug al lado del contenido): no.
+        assert!(!localizada_con_marca(&a, &ok("g: function suma(n,r){return n+r}\nfin\n"), &a2, &salada));
+        // r07/p03: la linea del bug no muestra contenido en A' (`none`): no.
+        assert!(!localizada_con_marca(&ok("-2\n"), &ok("NaN\n"), &ok("none\n"), &ok("-2\n")));
+        let (a, b) = (ok("TypeError: x\n    at falla (/tmp/p.js:3:15)\n"), ok("TypeError: x\n    at r (/tmp/p.js:1:30)\n"));
+        let a2 = ok(&format!("TypeError: x\n{FIJO_MARCO}\n"));
+        assert!(localizada_con_marca(&a, &b, &a2, &a));
+        // 20-p04: una linea que empieza con `    at ` pero no es un marco de V8.
+        assert!(!localizada_con_marca(&ok("    at -2\n"), &ok("    at NaN\n"), &ok(&format!("{FIJO_MARCO}\n")), &ok("    at -2\n")));
+        assert!(super::es_marco("    at Array.map (<anonymous>)") && super::es_marco("    at /tmp/p.js:1:2"));
+        assert!(!super::es_marco("    at f (x.js:1:-2)") && !super::es_marco("    at "));
+        assert!(super::encaja(&["a ", " b"], "a xyz b") && !super::encaja(&["a ", " b"], "a b") && super::encaja(&["", ""], ""));
     }
 
     #[test]

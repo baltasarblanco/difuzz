@@ -358,6 +358,32 @@
   // puede atrapar una excepcion) el sensor no se prende al arrancar: queda aca y lo prende
   // `invocar` antes de la primera funcion que llama (el preload si atrapa lo que lanza).
   let sensorPerezoso = null;
+  // Paso 7 (revision-tint I2): prende el sensor perezoso, si esta pendiente. Ademas de
+  // `invocar`, lo llaman `ser` (si hay built-ins pisados: es la unica forma de que la
+  // serializacion corra codigo del programa sin nada de la lista de puede_atrapar, como
+  // `Map.prototype[@@iterator]` alcanzado con getPrototypeOf) y `onThrow` (con un objeto:
+  // `String(e)` puede llamar a un @@toPrimitive propio). Lo que lancen adentro lo atrapa
+  // el preload y el sensor tiene que verlo, como con el sensor prendido desde el arranque.
+  const prenderPerezoso = () => {
+    if (sensorPerezoso === null) return;
+    const prender = sensorPerezoso;
+    sensorPerezoso = null;
+    prender();
+  };
+  // Paso 7 (I2): antes de serializar (entradas de la observacion: __difuzzObserve, los
+  // exports, los globals nuevos, serSafe). Con un built-in pisado, `ser` puede correr codigo
+  // del programa (iterar un Map, `Math.min`, `push`/`join`). Una vez por entrada y no en cada
+  // `ser`: entre dos bindings de la misma entrada no corre codigo del programa salvo por un
+  // pisado (y entonces ya se prendio). builtinsChanged: ~0,1 ms (MEDIDO, node 24, 509 claves).
+  // sensorPerezoso solo deja de ser null al final del preload, despues de `before`.
+  const prenderSiPisado = () => {
+    if (sensorPerezoso === null) return;
+    let pisado = true;
+    try {
+      pisado = builtinsChanged();
+    } catch {}
+    if (pisado) prenderPerezoso();
+  };
   // I3 (revision-b456): el sensor llego a MAX_PAUSAS y se apago a mitad de la corrida
   // (linea `sensor_tope` del canal, al salir): el resto corrio sin sus efectos.
   let sensorTope = false;
@@ -390,7 +416,29 @@
     }
     return posDeMarco(e);
   };
+  // Paso 7 (I2): un Error nativo (prototipo de uno de ERRORS) sin mas claves propias que
+  // `stack` y `message`: String(e) y su stack no llegan a codigo del programa salvo por un
+  // built-in pisado (Error.prototype esta en la foto) o por lo que esta en la lista de
+  // runner::puede_atrapar (prototype, getPrototypeOf, prepareStackTrace, Proxy...).
+  const errorNativo = (e) => {
+    try {
+      const p = Object.getPrototypeOf(e);
+      if (!ERRORS.some((E) => E.prototype === p)) return false;
+      return Reflect.ownKeys(e).every((k) => k === 'stack' || k === 'message');
+    } catch {
+      return false;
+    }
+  };
   const onThrow = (e) => {
+    // Paso 7 (I2, revision-tint s04): con un objeto, lo que sigue puede correr codigo del
+    // programa (@@toPrimitive, toString propio) adentro de un try del preload.
+    if (sensorPerezoso !== null && e !== null && (typeof e === 'object' || typeof e === 'function')) {
+      let pisado = true;
+      try {
+        pisado = builtinsChanged();
+      } catch {}
+      if (pisado || !errorNativo(e)) prenderPerezoso();
+    }
     try {
       if (e instanceof ReferenceError && / before initialization/.test(e.message)) flags.add('tdz');
     } catch {}
@@ -433,6 +481,7 @@
 
   Object.defineProperty(globalThis, '__difuzzObserve', {
     value: (...pairs) => {
+      prenderSiPisado();
       for (const [name, value] of pairs) {
         let s;
         try {
@@ -506,6 +555,7 @@
   // puede renombrarlos, y observarlos al salir no agrega usos al fuente.
   const baseGlobals = new Set(Reflect.ownKeys(globalThis));
   const observeNewGlobals = () => {
+    prenderSiPisado();
     for (const k of Reflect.ownKeys(globalThis)) {
       if (baseGlobals.has(k)) continue;
       const d = Object.getOwnPropertyDescriptor(globalThis, k);
@@ -693,6 +743,7 @@
   const RealPromise = Promise;
   const promesas = [];
   const serSafe = (v) => {
+    prenderSiPisado();
     try {
       return ser(v, 0, new Set());
     } catch (e) {
@@ -702,11 +753,7 @@
   const invocar = (name, f) => {
     let r;
     // t-sensor: lo que lanza `f` lo atrapa este try: desde aca el sensor tiene que estar.
-    if (sensorPerezoso !== null) {
-      const prender = sensorPerezoso;
-      sensorPerezoso = null;
-      prender();
-    }
+    prenderPerezoso();
     const nViol = violaciones.length;
     try {
       r = Reflect.apply(f, undefined, []);
@@ -823,6 +870,7 @@
   // El namespace trae los nombres ordenados; un binding en TDZ se lee como [throws ...].
   Object.defineProperty(globalThis, '__difuzzObserveExports', {
     value: (ns) => {
+      prenderSiPisado();
       for (const k of Reflect.ownKeys(ns)) {
         if (typeof k !== 'string') continue;
         let s;

@@ -476,15 +476,15 @@ impl Runner {
     /// no termina a tiempo con el sensor, se repite sin el: el resultado es el de
     /// siempre (sin flags de violacion) y el canal lleva `sensor_caido`.
     ///
-    /// M2 (revision-b456): ante Timeout, la repeticion sin el sensor es una sonda con
-    /// `presupuesto_sonda` (un cuarto del timeout, minimo 1 s), no otro timeout entero.
-    /// Un programa que cuelga de verdad cuelga tambien sin el sensor y pagaba 2x el
-    /// timeout (en A, en B, en la confirmacion de B con 4x y en cada re-chequeo); ahora
-    /// paga 1,25x. La evidencia de que la demora era del sensor es que sin el termina.
-    /// No se puede pedir esa evidencia al preload: en la recursion que atrapa en el
-    /// limite de la pila, la primera pausa tarda ~50 s en llegar al handler del sensor
-    /// (MEDIDO, node 24.14.1, 6307 frames) y antes de eso no corre nada de JS. Ante una
-    /// senal la repeticion conserva el timeout entero (morir por senal es rapido).
+    /// Paso 7 (revision-tint I1): ante Timeout la repeticion sin el sensor usa el
+    /// timeout entero, como en b4c98fd. La sonda de M2 (un cuarto del timeout, minimo
+    /// 1 s) perdia un div/ real (corpus-sonda/t01: una recursion que atrapa, lenta con
+    /// el sensor, y despues un bucle de ~2,5 s y el bug; sin el sensor tarda mas que la
+    /// sonda y quedaba en Timeout). El costo: un programa que cuelga de verdad (y que
+    /// tiene algo que el sensor ve) paga dos timeouts enteros en cada corrida (A, B, la
+    /// confirmacion de B y cada re-chequeo). No se puede saber antes si la demora es
+    /// del sensor: en la recursion que atrapa en el limite de la pila, la primera pausa
+    /// tarda ~50 s en llegar al handler del sensor (MEDIDO, node 24.14.1, 6307 frames).
     ///
     /// t-sensor: si el programa no puede atrapar una excepcion (`puede_atrapar`),
     /// el sensor va perezoso (lo prende `invocar` del preload, si llega). El
@@ -496,9 +496,7 @@ impl Runner {
         if !matches!(e.status, Status::Signal | Status::Timeout) || opts.sin_sensor {
             return e;
         }
-        let timeout = opts.timeout.unwrap_or(self.timeout);
-        let timeout = if e.status == Status::Timeout { presupuesto_sonda(timeout) } else { timeout };
-        let mut e = self.run_once(js, Opts { sin_sensor: true, timeout: Some(timeout), ..opts });
+        let mut e = self.run_once(js, Opts { sin_sensor: true, ..opts });
         e.ctl.insert_str(0, &format!("{SENSOR_CAIDO}\n"));
         e
     }
@@ -555,17 +553,6 @@ pub fn module_wrapper(program_file: &str, invocar: bool) -> String {
     format!("import * as ns from \"./{spec}\";\nglobalThis.{observe}(ns);\n")
 }
 
-/// M2 (revision-b456): cuanto tiene la repeticion sin el sensor tras un Timeout con
-/// el: un cuarto de `timeout`, al menos `SONDA_MIN` (arranque de node con carga) y
-/// nunca mas que `timeout`. Lo que se pierde: un programa que sin el sensor tarda
-/// entre esto y `timeout` y con el sensor no llega a tiempo queda como Timeout.
-fn presupuesto_sonda(timeout: Duration) -> Duration {
-    (timeout / 4).max(SONDA_MIN).min(timeout)
-}
-
-/// M2: minimo de la sonda sin sensor (node arranca en ~0,1 s; con 8 agentes, mas).
-const SONDA_MIN: Duration = Duration::from_secs(1);
-
 /// Variantes de una ejecucion: salada, otro timeout, argumentos extra de node.
 #[derive(Default, Clone, Copy)]
 struct Opts<'a> {
@@ -595,9 +582,14 @@ struct Opts<'a> {
 ///   modulo ES y `queueMicrotask`, pero el error termina sin atrapar: `onThrow` saca la
 ///   violacion y lo unico que cambia es `stack`, que la pausa prendia al formatear.
 /// - el preload: `invocar` atrapa lo que lanzan las funciones del programa; por eso
-///   el modo perezoso lo prende ahi. Lo demas del preload que atrapa (`ser`, `onThrow`,
-///   prepareStackTrace) llega a codigo del programa solo por lo que esta en la lista
-///   (Proxy, getters de `stack`/`message`, toString/valueOf, prototipos y subclases).
+///   el modo perezoso lo prende ahi. Paso 7 (revision-tint I2): tambien lo prenden
+///   `onThrow` (si lo lanzado es un objeto que no es un Error nativo comun, o si hay un
+///   built-in pisado segun la foto del preload) y las entradas de la observacion antes de
+///   `ser` (si hay un built-in pisado), porque s03/s04 llegaban a codigo propio sin nada de
+///   la lista (un @@iterator o @@toPrimitive alcanzado con getPrototypeOf/getOwnPropertySymbols).
+///   Lo demas del preload que atrapa (prepareStackTrace, `ser` sin built-ins pisados)
+///   llega a codigo del programa solo por lo que esta en la lista (Proxy, getters de
+///   `stack`/`message`, toString/valueOf, prototipos, subclases e introspeccion).
 ///
 /// Sobre-aproximado a proposito: el texto entero, strings y comentarios incluidos,
 /// sin parsear. Con `\u` (un identificador escapado) o ante la duda: true.
@@ -616,6 +608,10 @@ pub fn puede_atrapar(js: &str) -> bool {
         "Proxy", "Symbol", "Reflect", "extends", "prototype", "__proto__", "setPrototypeOf",
         "create", "defineProperty", "defineProperties", "__defineGetter__", "__defineSetter__",
         "stack", "message", "toString", "valueOf", "prepareStackTrace", "captureStackTrace",
+        // Paso 7 (revision-tint I2, s03/s04): introspeccion que llega a prototipos que la
+        // foto de built-ins del preload no mira (los de los iteradores) y a los Symbol bien
+        // conocidos sin escribir `Symbol` (un @@iterator propio en una instancia de Map).
+        "getPrototypeOf", "getOwnPropertySymbols", "getOwnPropertyDescriptor", "getOwnPropertyDescriptors",
     ];
     if js.contains("\\u") || js.contains("romis") {
         return true;
@@ -1011,33 +1007,29 @@ mod tests {
         assert!(t < base + READ_GRACE / 2, "espero al hijo en los 3 intentos (tiempo, base): {tiempos:?}");
     }
 
-    /// M2 (revision-b456): un programa que cuelga de verdad (con un throw atrapado
-    /// antes, que el sensor vio) ya no paga dos timeouts enteros: la repeticion sin el
-    /// sensor es una sonda de un cuarto (minimo 1 s). La recursion lenta por el sensor
-    /// sigue resolviendose (recheck::sensor_de_violaciones_solo_observa, timeout 4 s).
+    /// Paso 7 (revision-tint I1): ante Timeout con el sensor, la repeticion sin el usa
+    /// el timeout entero (como en b4c98fd). Con la sonda de M2 (un cuarto) un programa
+    /// lento por el sensor y que sin el tarda mas que la sonda quedaba en Timeout y se
+    /// perdia un div/ real (corpus-sonda/t01). El costo: un cuelgue de verdad paga dos
+    /// timeouts.
     #[test]
-    fn timeout_real_paga_una_sonda_no_dos_timeouts() {
-        use super::{presupuesto_sonda, Preload, Runner, Status};
+    fn timeout_con_sensor_repite_con_el_timeout_entero() {
+        use super::{Preload, Runner, Status};
         use std::time::{Duration, Instant};
 
-        let s = |ms: u64| Duration::from_millis(ms);
-        assert_eq!(presupuesto_sonda(s(5000)), s(1250));
-        assert_eq!(presupuesto_sonda(s(3000)), s(1000));
-        assert_eq!(presupuesto_sonda(s(500)), s(500));
         if !crate::test_util::requiere_node() {
             return;
         }
-        let preload = Preload::write_tagged("m2-sonda").unwrap();
-        let t = s(3000);
+        let preload = Preload::write_tagged("i1-timeout").unwrap();
+        let t = Duration::from_millis(1500);
         let r = Runner::new(&preload, crate::test_util::id_runner(), t);
+        // Cuelga de verdad: dos timeouts enteros.
         let t0 = Instant::now();
         let e = r.run("try { null.x; } catch (e) {}\nconsole.log('antes');\nfor (;;) {}\n");
         let dt = t0.elapsed();
         assert_eq!(e.status, Status::Timeout);
         assert!(e.ctl.starts_with("sensor_caido\n"), "{}", e.ctl);
-        // Antes: 3 s + 3 s. Ahora: 3 s + 1 s (y el arranque de dos node).
-        assert!(dt >= t + s(1000), "{dt:?}");
-        assert!(dt < t + s(2500), "la repeticion sin sensor no fue una sonda: {dt:?}");
+        assert!(dt >= t + t, "la repeticion sin sensor no uso el timeout entero: {dt:?}");
     }
 
     /// M9: en el carril A, un require no atrapado de algo que no existe es
@@ -1328,7 +1320,9 @@ mod tests {
         let mi = Runner::new(&preload, crate::test_util::id_runner(), Duration::from_secs(20)).with_kind(SourceKind::Module).with_invocar(true);
         let mio = mi.observing();
         let viol = |e: &super::Exec| e.ctl.lines().filter(|l| l.starts_with("viol ")).map(String::from).collect::<Vec<_>>();
-        let simbolo = "const s = Object.getOwnPropertySymbols(Object.getPrototypeOf([]))[0];\n";
+        // Paso 7 (I2): getOwnPropertySymbols y getPrototypeOf ya estan en la lista; un Symbol
+        // sin ninguna palabra de la lista sale del nombre armado en runtime (riesgo anotado).
+        let simbolo = "const s = globalThis[\"Sym\" + \"bol\"](\"s\");\n";
         let casos = [
             (&r, format!("{simbolo}function f() {{ return s + 1; }}\n__difuzzObserveInvocar([\"f\", f]);\n")),
             (&r, "function f() { return z; }\n__difuzzObserveInvocar([\"f\", f]);\nlet z = 1;\n".to_string()),
@@ -1337,6 +1331,9 @@ mod tests {
             (&r, "setTimeout(() => { f(); });\nfunction f() { z; let z; }\n".to_string()),
             (&mio, "export function f() { return z; }\nlet z = 1;\n".to_string()),
             (&mio, format!("{simbolo}export function f() {{ return s + 1; }}\n")),
+            // Paso 7 (revision-tint I2, s03 sin palabras de la lista): la TDZ ocurre adentro
+            // de `ser` (un built-in pisado que la serializacion llama).
+            (&r, "Math.min = function () { return z; };\n__difuzzObserve([\"a\", [1]]);\nlet z = 1;\n".to_string()),
         ];
         for (run, js) in &casos {
             assert!(!puede_atrapar(js), "{js}");
@@ -1346,6 +1343,18 @@ mod tests {
         // El de Symbol atrapado por invocar: sin el sensor no tendria flag.
         let e = r.run(&casos[0].1);
         assert!(e.flags.iter().any(|f| f == "coercion_symbol"), "{:?} {}", e.flags, e.ctl);
+        // Paso 7 (I2): el de `ser` (antes, perezoso: sin flag ni `viol`).
+        let e = r.run(&casos[casos.len() - 1].1);
+        assert!(e.flags.iter().any(|f| f == "tdz_atrapada"), "{:?} {}", e.flags, e.ctl);
+        // Paso 7 (I2, s04 sin palabras de la lista): la TDZ adentro de `onThrow` (String(e) de
+        // un objeto con toString propio). La violacion es la misma (MEDIDO); prendido desde el
+        // arranque ademas sale `stack` y la linea `viol` repetida (la TDZ pasa dos veces).
+        let js = "const o = { [\"toStr\" + \"ing\"]() { return z; } };\nconsole.log(\"antes\");\nthrow o;\nlet z = 1;\n";
+        assert!(!puede_atrapar(js));
+        let (a, b) = (r.run(js), r.run(&format!("{js}/* try */\n")));
+        assert_eq!((&a.stdout, &a.status), (&b.stdout, &b.status));
+        assert_eq!(crate::recheck::violaciones(&a), crate::recheck::violaciones(&b), "{}\n{}", a.ctl, b.ctl);
+        assert!(a.flags.iter().any(|f| f == "tdz_atrapada") && b.flags.iter().any(|f| f == "tdz_atrapada"), "{}\n{}", a.ctl, b.ctl);
         // Lo unico que cambia (MEDIDO): el top-level de un modulo ES que lanza. V8 pausa
         // (lo atrapa el import) y al formatear el stack prendia `stack`; la violacion
         // la saca onThrow igual.
