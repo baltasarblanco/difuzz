@@ -96,7 +96,8 @@ fn lanzador() -> Lanzador {
     if let Some(l) = LANZADOR_TEST.with(|l| l.borrow().clone()) {
         return l;
     }
-    (std::env::current_exe().unwrap_or_else(|_| PathBuf::from("difuzz")), vec!["--analizar".to_string()], Vec::new())
+    // M3: `/proc/self/exe` (Linux), el codigo de esta corrida aunque recompilen.
+    (crate::binario::propio(), vec!["--analizar".to_string()], Vec::new())
 }
 
 /// Agrega una nota de fallo del analisis al caso en curso.

@@ -474,16 +474,26 @@ impl Runner {
     /// excepciones atrapadas cada throw recorre la pila; una recursion que atrapa
     /// en cada nivel pasa de 0,05 s a mas de 40 s). Si node muere por una senal o
     /// no termina a tiempo con el sensor, se repite sin el: el resultado es el de
-    /// siempre (sin flags de violacion) y el canal lleva `sensor_caido`. Un
-    /// programa que muere o cuelga por su cuenta hace lo mismo otra vez (cuesta
-    /// el doble).
+    /// siempre (sin flags de violacion) y el canal lleva `sensor_caido`.
+    ///
+    /// M2 (revision-b456): ante Timeout, la repeticion sin el sensor es una sonda con
+    /// `presupuesto_sonda` (un cuarto del timeout, minimo 1 s), no otro timeout entero.
+    /// Un programa que cuelga de verdad cuelga tambien sin el sensor y pagaba 2x el
+    /// timeout (en A, en B, en la confirmacion de B con 4x y en cada re-chequeo); ahora
+    /// paga 1,25x. La evidencia de que la demora era del sensor es que sin el termina.
+    /// No se puede pedir esa evidencia al preload: en la recursion que atrapa en el
+    /// limite de la pila, la primera pausa tarda ~50 s en llegar al handler del sensor
+    /// (MEDIDO, node 24.14.1, 6307 frames) y antes de eso no corre nada de JS. Ante una
+    /// senal la repeticion conserva el timeout entero (morir por senal es rapido).
     fn run_inner(&self, js: &str, opts: Opts) -> Exec {
         let opts = Opts { sin_sensor: opts.sin_sensor || !self.sensor, ..opts };
         let e = self.run_once(js, opts);
         if !matches!(e.status, Status::Signal | Status::Timeout) || opts.sin_sensor {
             return e;
         }
-        let mut e = self.run_once(js, Opts { sin_sensor: true, ..opts });
+        let timeout = opts.timeout.unwrap_or(self.timeout);
+        let timeout = if e.status == Status::Timeout { presupuesto_sonda(timeout) } else { timeout };
+        let mut e = self.run_once(js, Opts { sin_sensor: true, timeout: Some(timeout), ..opts });
         e.ctl.insert_str(0, &format!("{SENSOR_CAIDO}\n"));
         e
     }
@@ -539,6 +549,17 @@ pub fn module_wrapper(program_file: &str, invocar: bool) -> String {
     let observe = if invocar { "__difuzzObserveExportsInvocar" } else { "__difuzzObserveExports" };
     format!("import * as ns from \"./{spec}\";\nglobalThis.{observe}(ns);\n")
 }
+
+/// M2 (revision-b456): cuanto tiene la repeticion sin el sensor tras un Timeout con
+/// el: un cuarto de `timeout`, al menos `SONDA_MIN` (arranque de node con carga) y
+/// nunca mas que `timeout`. Lo que se pierde: un programa que sin el sensor tarda
+/// entre esto y `timeout` y con el sensor no llega a tiempo queda como Timeout.
+fn presupuesto_sonda(timeout: Duration) -> Duration {
+    (timeout / 4).max(SONDA_MIN).min(timeout)
+}
+
+/// M2: minimo de la sonda sin sensor (node arranca en ~0,1 s; con 8 agentes, mas).
+const SONDA_MIN: Duration = Duration::from_secs(1);
 
 /// Variantes de una ejecucion: salada, otro timeout, argumentos extra de node.
 #[derive(Default, Clone, Copy)]
@@ -868,6 +889,35 @@ mod tests {
         }
         let (t, base) = *tiempos.last().unwrap();
         assert!(t < base + READ_GRACE / 2, "espero al hijo en los 3 intentos (tiempo, base): {tiempos:?}");
+    }
+
+    /// M2 (revision-b456): un programa que cuelga de verdad (con un throw atrapado
+    /// antes, que el sensor vio) ya no paga dos timeouts enteros: la repeticion sin el
+    /// sensor es una sonda de un cuarto (minimo 1 s). La recursion lenta por el sensor
+    /// sigue resolviendose (recheck::sensor_de_violaciones_solo_observa, timeout 4 s).
+    #[test]
+    fn timeout_real_paga_una_sonda_no_dos_timeouts() {
+        use super::{presupuesto_sonda, Preload, Runner, Status};
+        use std::time::{Duration, Instant};
+
+        let s = |ms: u64| Duration::from_millis(ms);
+        assert_eq!(presupuesto_sonda(s(5000)), s(1250));
+        assert_eq!(presupuesto_sonda(s(3000)), s(1000));
+        assert_eq!(presupuesto_sonda(s(500)), s(500));
+        if !crate::test_util::requiere_node() {
+            return;
+        }
+        let preload = Preload::write_tagged("m2-sonda").unwrap();
+        let t = s(3000);
+        let r = Runner::new(&preload, crate::test_util::id_runner(), t);
+        let t0 = Instant::now();
+        let e = r.run("try { null.x; } catch (e) {}\nconsole.log('antes');\nfor (;;) {}\n");
+        let dt = t0.elapsed();
+        assert_eq!(e.status, Status::Timeout);
+        assert!(e.ctl.starts_with("sensor_caido\n"), "{}", e.ctl);
+        // Antes: 3 s + 3 s. Ahora: 3 s + 1 s (y el arranque de dos node).
+        assert!(dt >= t + s(1000), "{dt:?}");
+        assert!(dt < t + s(2500), "la repeticion sin sensor no fue una sonda: {dt:?}");
     }
 
     /// M9: en el carril A, un require no atrapado de algo que no existe es

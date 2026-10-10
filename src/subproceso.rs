@@ -269,7 +269,8 @@ struct Hijo {
 
 impl Remoto {
     pub fn new(minifier: Minifier, preset: Preset, kind: SourceKind, keep_names: bool) -> Remoto {
-        let exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("difuzz"));
+        // M3: `/proc/self/exe` (Linux), el codigo de esta corrida aunque recompilen.
+        let exe = crate::binario::propio();
         let mut args = vec!["--preparar".to_string()];
         args.extend(args_config(minifier, preset, kind, keep_names));
         Remoto {
@@ -305,7 +306,9 @@ impl Remoto {
     fn lanzar(&self) -> std::io::Result<Hijo> {
         // R1-H18: si el binario (o el oraculo) cambio desde el arranque, no se lanza.
         crate::binario::comprobar().map_err(std::io::Error::other)?;
-        let mut cmd = Command::new(&self.lanzador.exe);
+        // M3: el oraculo por el fd abierto al arrancar (`/proc/self/fd/N`): el inodo
+        // validado, aunque su ruta ya apunte a otro archivo.
+        let mut cmd = Command::new(crate::binario::para_lanzar(&self.lanzador.exe));
         cmd.args(&self.lanzador.args)
             .envs(self.lanzador.env.iter().map(|(k, v)| (k, v)))
             .stdin(Stdio::piped())

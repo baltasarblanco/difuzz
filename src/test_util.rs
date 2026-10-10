@@ -7,7 +7,8 @@
 //! - `id_runner()`: el id de `Runner` de cada test. Dos `Runner` con el mismo id
 //!   en el mismo proceso comparten script, ctl y cwd, y en paralelo uno pisa al
 //!   otro (paso con 9988 y 9989). El test `ningun_runner_con_id_fijo` falla si
-//!   un `Runner::new(` de `src/` o `tests/` lleva un id literal.
+//!   un `Runner::new(` de `src/` o `tests/` lleva un id fijo (literal, constante o
+//!   `let` a un literal; M4: tambien con la llamada partida en varias lineas).
 //!
 //! No depende de nada del crate: `tests/salida_celdas.rs` lo incluye con
 //! `#[path]` (difuzz es solo binario, no hay `difuzz::` para importar).
@@ -81,24 +82,70 @@ mod tests {
         }
     }
 
-    /// Los ids literales de los `Runner::new(` de una linea: el segundo
-    /// argumento, hasta la coma siguiente, si es un numero.
-    fn ids_en_linea(linea: &str) -> Vec<String> {
+    /// M4 (revision-b456): el segundo argumento de cada `Runner::new(` de un fuente,
+    /// con su linea, aunque la llamada este partida en varias lineas (se lee hasta el
+    /// `)` que la cierra, contando parentesis, corchetes y llaves). Se saltean las
+    /// apariciones dentro de un comentario `//` de la misma linea.
+    fn segundos_args(txt: &str) -> Vec<(usize, String)> {
         let aguja = concat!("Runner", "::new(");
-        let mut ids = Vec::new();
-        let mut resto = linea;
-        while let Some(pos) = resto.find(aguja) {
-            resto = &resto[pos + aguja.len()..];
-            let arg = resto.split(',').nth(1).unwrap_or("").trim();
-            let digitos = arg.trim_end_matches("usize").replace('_', "");
-            if !digitos.is_empty() && digitos.chars().all(|c| c.is_ascii_digit()) {
-                ids.push(arg.to_string());
+        let mut v = Vec::new();
+        let mut desde = 0;
+        while let Some(pos) = txt[desde..].find(aguja) {
+            let pos = desde + pos;
+            desde = pos + aguja.len();
+            let ini_linea = txt[..pos].rfind('\n').map_or(0, |i| i + 1);
+            if txt[ini_linea..pos].contains("//") {
+                continue;
+            }
+            let mut prof = 0usize;
+            let mut args = vec![String::new()];
+            for c in txt[desde..].chars() {
+                match c {
+                    '(' | '[' | '{' => prof += 1,
+                    ')' | ']' | '}' if prof == 0 => break,
+                    ')' | ']' | '}' => prof -= 1,
+                    ',' if prof == 0 => {
+                        args.push(String::new());
+                        continue;
+                    }
+                    _ => {}
+                }
+                args.last_mut().expect("nunca vacio").push(c);
+            }
+            if let Some(a) = args.get(1) {
+                v.push((txt[..pos].matches('\n').count() + 1, a.split_whitespace().collect::<Vec<_>>().join(" ")));
             }
         }
-        ids
+        v
     }
 
-    /// Ids de `Runner` literales en `src/` y `tests/`: (archivo:linea, id).
+    /// M4: una expresion que da un id fijo: tiene un literal numerico (`9988`,
+    /// `1_000usize`, `9000 + i`) o una constante (identificador en mayusculas:
+    /// `ID_FIJO`, `otro::ID`, `usize::MAX`).
+    fn es_fija(expr: &str) -> bool {
+        expr.split(|c: char| !(c.is_ascii_alphanumeric() || c == '_')).filter(|t| !t.is_empty()).any(|t| {
+            t.starts_with(|c: char| c.is_ascii_digit())
+                || (t.starts_with(|c: char| c.is_ascii_uppercase()) && t.chars().all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_'))
+        })
+    }
+
+    /// M4: los ids fijos de los `Runner::new(` de un fuente: (linea, id). Tambien un
+    /// identificador que el mismo fuente liga con `let` a una expresion fija
+    /// (`let id = 9988;`); si el nombre se liga en otro lado a algo fijo, lo marca
+    /// igual (conservador: lo revisa una persona).
+    fn ids_fijos(txt: &str) -> Vec<(usize, String)> {
+        let es_ident = |s: &str| !s.is_empty() && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
+        let ligado_fijo = |id: &str| {
+            txt.match_indices(&format!("let {id}")).any(|(i, m)| {
+                let resto = &txt[i + m.len()..];
+                let (sigue, rhs) = (resto.chars().next(), resto.split(';').next().unwrap_or(""));
+                matches!(sigue, Some(' ' | ':' | '=')) && rhs.split_once('=').is_some_and(|(_, e)| es_fija(e))
+            })
+        };
+        segundos_args(txt).into_iter().filter(|(_, a)| es_fija(a) || (es_ident(a) && ligado_fijo(a))).collect()
+    }
+
+    /// Ids de `Runner` fijos en `src/` y `tests/`: (archivo:linea, id).
     fn ids_literales() -> Vec<(String, String)> {
         let raiz = Path::new(env!("CARGO_MANIFEST_DIR"));
         let mut archivos = Vec::new();
@@ -107,11 +154,9 @@ mod tests {
         let mut hallados = Vec::new();
         for f in archivos {
             let txt = std::fs::read_to_string(&f).unwrap();
-            for (i, linea) in txt.lines().enumerate() {
-                for id in ids_en_linea(linea) {
-                    let rel = f.strip_prefix(raiz).unwrap_or(&f).display().to_string();
-                    hallados.push((format!("{rel}:{}", i + 1), id));
-                }
+            for (linea, id) in ids_fijos(&txt) {
+                let rel = f.strip_prefix(raiz).unwrap_or(&f).display().to_string();
+                hallados.push((format!("{rel}:{linea}"), id));
             }
         }
         hallados
@@ -137,14 +182,29 @@ mod tests {
     }
 
     /// El detector ve un id literal (si no, el test de arriba no prueba nada)
-    /// y no confunde el id de produccion (`w`) ni `id_runner()` con uno.
+    /// y no confunde el id de produccion (`w`) ni `id_runner()` con uno. M4: tambien
+    /// llamadas partidas en varias lineas, constantes, expresiones y `let` a un literal.
     #[test]
     fn el_detector_ve_ids_literales() {
         let new = concat!("Runner", "::new(");
-        assert_eq!(ids_en_linea(&format!("let r = {new}&preload, 9988, Duration::from_secs(20));")), ["9988"]);
-        assert_eq!(ids_en_linea(&format!("let r = runner::{new}&preload, 1_000usize, d);")), ["1_000usize"]);
-        assert!(ids_en_linea(&format!("let runner = runner::{new}preload, w, cli.timeout)")).is_empty());
-        assert!(ids_en_linea(&format!("let r = {new}&preload, crate::test_util::id_runner(), d);")).is_empty());
+        let ids = |s: String| ids_fijos(&s).into_iter().map(|(l, id)| format!("{l}:{id}")).collect::<Vec<_>>();
+        assert_eq!(ids(format!("let r = {new}&preload, 9988, Duration::from_secs(20));")), ["1:9988"]);
+        assert_eq!(ids(format!("let r = runner::{new}&preload, 1_000usize, d);")), ["1:1_000usize"]);
+        assert!(ids(format!("let runner = runner::{new}preload, w, cli.timeout)")).is_empty());
+        assert!(ids(format!("let r = {new}&preload, crate::test_util::id_runner(), d);")).is_empty());
+        // Partida en varias lineas (lo que `cargo fmt` hace con una llamada larga).
+        assert_eq!(ids(format!("x;\nlet r = {new}\n    &preload,\n    9988,\n    Duration::from_secs(20),\n);")), ["2:9988"]);
+        assert!(ids(format!("let r = {new}\n    &preload,\n    crate::test_util::id_runner(),\n    d,\n);")).is_empty());
+        // Constantes con nombre, expresiones y `let` ligado a algo fijo.
+        assert_eq!(ids(format!("const ID_FIJO: usize = 7;\nlet r = {new}&p, ID_FIJO, d);")), ["2:ID_FIJO"]);
+        assert_eq!(ids(format!("let r = {new}&p, otro::ID, d);")), ["1:otro::ID"]);
+        assert_eq!(ids(format!("let r = {new}&p, 9000 + i, d);")), ["1:9000 + i"]);
+        assert_eq!(ids(format!("let id = 9988;\nlet r = {new}&p, id, d);")), ["2:id"]);
+        assert_eq!(ids(format!("let id: usize = BASE + 1;\nlet r = {new}&p, id, d);")), ["2:id"]);
+        assert!(ids(format!("let id = crate::test_util::id_runner();\nlet r = {new}&p, id, d);")).is_empty());
+        // Argumentos con parentesis y comas adentro; y un comentario no cuenta.
+        assert!(ids(format!("let r = {new}&f(a, 1), g(), d);")).is_empty());
+        assert!(ids(format!("// un `{new}` de `src/` con id 9988, d)\nx;")).is_empty());
     }
 
     /// `id_runner()` no repite ids aunque lo pidan muchos hilos a la vez.
