@@ -70,6 +70,10 @@ fn codigo_0_ayuda_y_corrida_entera() {
         assert!(s.contains("codigos de salida"), "{s}");
         assert!(s.contains("total = iguales + DIVERGENCIAS + conocidas + PANICS + RECURSOS + filas(descartes.tsv)"), "{s}");
     }
+    // La ayuda como argumento propio, aunque haya un `-h` que es el valor de --out.
+    let o = difuzz(&b, &["--out", "-h", "--help"]);
+    assert_eq!(rc(&o), Some(0), "{}", err(&o));
+    assert!(String::from_utf8_lossy(&o.stdout).starts_with("uso: difuzz"));
     // La corrida entera necesita node: sin node falla (salvo DIFUZZ_SIN_NODE=1).
     if test_util::requiere_node() {
         let corpus = b.join("corpus");
@@ -94,12 +98,14 @@ fn codigo_1_entrada_o_entorno() {
     let out = b.join("out");
     let o = out.to_str().unwrap();
     let (no_existe, no_existe_js) = (b.join("no-existe"), b.join("no-existe.js"));
-    let casos: [(&str, Vec<&str>); 5] = [
+    let casos: [(&str, Vec<&str>); 6] = [
         ("corpus sin input.js", vec![vacio.to_str().unwrap(), "--out", o]),
         ("corpus inexistente", vec![no_existe.to_str().unwrap(), "--out", o]),
         ("--out es un archivo", vec![corpus.to_str().unwrap(), "--out", archivo.to_str().unwrap(), "--no-cache"]),
         ("--cruce sin indices", vec!["--cruce", vacio.to_str().unwrap()]),
         ("--emitir sin archivo", vec!["--emitir", no_existe_js.to_str().unwrap()]),
+        // `-h` como valor de --emitir es el archivo `-h` (que no existe), no la ayuda.
+        ("--emitir -h", vec!["--emitir", "-h"]),
     ];
     for (que, args) in casos {
         let r = difuzz(&b, &args);
@@ -131,6 +137,10 @@ fn codigo_2_uso() {
         vec![c, "--limit", "x"],
         vec![],
         vec![c, "--cruce", o],
+        // `-h` como valor de una opcion no es la ayuda (antes: 0): --out sin corpus,
+        // y un --minifier invalido.
+        vec!["--out", "-h"],
+        vec![c, "--minifier", "-h"],
     ] {
         let r = difuzz(&b, &args);
         assert_eq!(rc(&r), Some(2), "{args:?}: {}", err(&r));

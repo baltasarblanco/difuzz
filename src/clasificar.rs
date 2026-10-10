@@ -355,7 +355,17 @@ pub fn clasificar<'a>(
         Some(w) => traza.paso("decision", format!("known/ ({w})")),
         None => traza.paso("decision", "div/"),
     }
+    sin_repetidos(&mut flags);
     Clasificacion { flags, why, nota, drift: drift_hubo, traza }
+}
+
+/// H07 (revision 2): un flag que llega dos veces (`extends` de A y de los
+/// estaticos) va una sola vez en `flags_a:`, en el orden de su primera
+/// aparicion. Solo cambia el texto: lo que clasifica (este modulo,
+/// known::classify_causa) mira si un flag esta, no cuantas veces.
+pub fn sin_repetidos(flags: &mut Vec<&str>) {
+    let mut vistos = std::collections::HashSet::new();
+    flags.retain(|f| vistos.insert(*f));
 }
 
 /// `apply_recheck` con su linea en la traza.
@@ -596,6 +606,17 @@ fn rechazo_estricto(runner: &runner::Runner, strict: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::names_visible;
+
+    /// H07 (revision 2): sin repetidos, en el orden de la primera aparicion.
+    #[test]
+    fn flags_sin_repetidos_en_orden() {
+        let mut f = vec!["extends", "coercion", "extends", "with", "coercion", "extends"];
+        super::sin_repetidos(&mut f);
+        assert_eq!(f, ["extends", "coercion", "with"]);
+        let mut v: Vec<&str> = Vec::new();
+        super::sin_repetidos(&mut v);
+        assert!(v.is_empty());
+    }
 
     #[test]
     fn nombres_visibles_solo_si_la_salida_puede_mostrarlos() {

@@ -91,7 +91,8 @@ uso: difuzz <corpus_dir> [--out DIR] [--minifier M] [--config C] [--forma F] [--
   y se busca en <este binario>-oraculo y <dir>/../oraculo/difuzz, o solo en DIFUZZ_ORACULO=RUTA si
   esta (DIFUZZ_ORACULO=ninguno lo apaga). Si no hay, un aviso al arrancar y los panics van a
   panic/ como siempre
-  --help, -h     imprimir esta ayuda (stdout) y salir con 0
+  --help, -h     imprimir esta ayuda (stdout) y salir con 0, en cualquier posicion menos como valor
+                 de otra opcion (`--out -h` es el directorio -h)
 
   salida (R2-H06): cada caso termina en un destino, div/ known/ panic/ recursos/ (un directorio por
   caso), en iguales (sin archivo) o con una fila en descartes.tsv (caso, causa, elapsed_ms), incluidos
@@ -113,6 +114,41 @@ uso: difuzz <corpus_dir> [--out DIR] [--minifier M] [--config C] [--forma F] [--
 const SALIDA_ERROR: i32 = 1;
 const SALIDA_USO: i32 = 2;
 const SALIDA_INTERRUMPIDA: i32 = 130;
+
+/// Las opciones de `Cli::parse` que toman el argumento siguiente como valor. Las
+/// usa `pide_ayuda`; el test `opciones_con_valor_al_dia` las cruza con `Cli::parse`.
+const OPCIONES_CON_VALOR: [&str; 15] = [
+    "--out",
+    "--timeout-ms",
+    "--limit",
+    "--jobs",
+    "--minifier",
+    "--cache",
+    "--indice",
+    "--mem-hijo",
+    "--emitir",
+    "--cruce",
+    "--mutaciones",
+    "--mutaciones-extra",
+    "--config",
+    "--forma",
+    "--carril",
+];
+
+/// R2-H09: `--help`/`-h` solo como argumento propio, no como el valor de una
+/// opcion: `--out -h` es el directorio `-h` (antes pedia la ayuda y salia con 0).
+fn pide_ayuda(args: &[String]) -> bool {
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        if a == "--help" || a == "-h" {
+            return true;
+        }
+        if OPCIONES_CON_VALOR.contains(&a.as_str()) {
+            it.next();
+        }
+    }
+    false
+}
 
 struct Cli {
     corpus: PathBuf,
@@ -562,7 +598,8 @@ fn main() {
         std::process::exit(analisis::serve());
     }
     // R2-H09: la ayuda es un pedido, no un error de uso (antes: "opcion desconocida", 2).
-    if args.iter().any(|a| a == "--help" || a == "-h") {
+    // Solo como argumento propio: `--out -h` sigue por Cli::parse (pide_ayuda).
+    if pide_ayuda(&args) {
         println!("{USAGE}");
         return;
     }
@@ -1019,15 +1056,7 @@ fn process_case(
     }
     // Precondicion del oraculo: el original termina solo (exit 0 o lanzando).
     let (a, a_cached) = ctx.cache.run(runner, &original, &mut stats.cache_hits);
-    // Un SyntaxError antes de imprimir nada puede ser que node no acepta el
-    // original como script: entonces no es un caso.
-    // R2-H03: tambien un RangeError que `node --check` reproduce: V8 no pudo
-    // compilar el fuente (anidamiento extremo: 20000 `[`). Un RangeError en
-    // runtime (recursion, `new Array(-1)`) pasa `node --check` y se compara.
-    if a.threw()
-        && (a.stdout.starts_with("!dz throw SyntaxError") || a.stdout.starts_with("!dz throw RangeError"))
-        && !runner.node_accepts(&original)
-    {
+    if original_no_compila(runner, &a, &original) {
         stats.a_invalid += 1;
         ctx.reporter.discard(rel, "invalido", a.elapsed);
         return;
@@ -1577,7 +1606,8 @@ fn compare_and_report(
             if c.drift {
                 stats.known_drift += 1;
             }
-            let flags_b: Vec<&str> = b.flags.iter().map(String::as_str).collect();
+            let mut flags_b: Vec<&str> = b.flags.iter().map(String::as_str).collect();
+            clasificar::sin_repetidos(&mut flags_b);
             let clasificar::Clasificacion { flags, why, nota, mut traza, .. } = c;
             // M1 (revision-b456): que el sensor no corrio entero queda en meta.txt.
             if let Some(p) = paso_sensor {
@@ -1882,9 +1912,8 @@ fn process_mutants(
             m.mudas += 1;
             continue;
         }
-        if !a.ok_with_output()
-            || (a.stdout.starts_with("!dz throw SyntaxError") && !runner.node_accepts(&original))
-        {
+        // Mismo criterio que process_case: tambien el RangeError de compilacion.
+        if !a.ok_with_output() || original_no_compila(runner, &a, &original) {
             m.original += 1;
             continue;
         }
@@ -1894,6 +1923,18 @@ fn process_mutants(
             ctx.reporter.attach(&rel, &files);
         }
     }
+}
+
+/// El original no es un programa que node compile: lanzo un SyntaxError antes de
+/// imprimir nada y `node --check` lo rechaza (node no lo acepta como script), o
+/// R2-H03: un RangeError que `node --check` reproduce (V8 no pudo compilar el
+/// fuente: anidamiento extremo, 20000 `[`). Un RangeError en runtime (recursion,
+/// `new Array(-1)`) pasa `node --check` y se compara. Lo usan el caso
+/// (`invalido`) y las variantes (`original=` de las mutaciones).
+fn original_no_compila(runner: &runner::Runner, a: &runner::Exec, original: &str) -> bool {
+    a.threw()
+        && (a.stdout.starts_with("!dz throw SyntaxError") || a.stdout.starts_with("!dz throw RangeError"))
+        && !runner.node_accepts(original)
 }
 
 /// R1-H15: suma a `m` lo que dejo `compare_and_report` para una variante.
@@ -2393,6 +2434,134 @@ mod tests {
         let mut st = Stats::default();
         observe_epilogue(&ctx, &r, &cfg, None, &cli, &mut st, rel, "let k = 1;\nexport {};\nfunction f() { k = 2; }\nf;\n", false, true);
         assert_eq!((st.observed, st.divergences, st.same), (1, 0, 1));
+        std::fs::remove_dir_all(&d).unwrap();
+    }
+
+    /// R2-H09: `--help`/`-h` cuenta como ayuda en cualquier posicion, menos como el
+    /// valor de una opcion. `--out -h` sigue por Cli::parse: sin corpus, error de
+    /// uso (2); con corpus, el directorio `-h`.
+    #[test]
+    fn ayuda_solo_como_argumento_propio() {
+        use super::{pide_ayuda, Cli};
+        let v = |a: &[&str]| a.iter().map(|s| s.to_string()).collect::<Vec<String>>();
+        for a in [&["-h"][..], &["--help"], &["c", "-h"], &["c", "--out", "x", "-h"], &["c", "--jobs", "0", "--help"], &["--out", "-h", "-h"]] {
+            assert!(pide_ayuda(&v(a)), "{a:?}");
+        }
+        for a in [&["--out", "-h"][..], &["c", "--out", "--help"], &["--emitir", "-h"], &["c", "--minifier", "-h"], &["c", "--out"], &[]] {
+            assert!(!pide_ayuda(&v(a)), "{a:?}");
+        }
+        assert_eq!(Cli::parse(v(&["--out", "-h"])).err().as_deref(), Some("falta <corpus_dir>"));
+        assert_eq!(Cli::parse(v(&["c", "--out", "-h"])).unwrap().out, std::path::PathBuf::from("-h"));
+        assert!(Cli::parse(v(&["c", "--minifier", "-h"])).err().is_some_and(|e| e.starts_with("--minifier invalido: -h")));
+    }
+
+    /// OPCIONES_CON_VALOR al dia con Cli::parse: de cada opcion que nombra el USAGE
+    /// y que Cli::parse conoce, toma un valor si y solo si esta en la lista.
+    #[test]
+    fn opciones_con_valor_al_dia() {
+        use super::{Cli, OPCIONES_CON_VALOR, USAGE};
+        let mut opciones: Vec<&str> = USAGE
+            .split(|c: char| !(c.is_ascii_alphanumeric() || c == '-'))
+            .filter(|t| t.starts_with("--") && t.len() > 2)
+            .collect();
+        opciones.sort_unstable();
+        opciones.dedup();
+        let mut con_valor = 0;
+        for o in opciones {
+            if o == "--help" {
+                continue;
+            }
+            let e = Cli::parse(vec![o.to_string()]).err().unwrap_or_default();
+            if e.starts_with("opcion desconocida") {
+                continue;
+            }
+            let pide = e.starts_with(&format!("{o} necesita"));
+            assert_eq!(pide, OPCIONES_CON_VALOR.contains(&o), "{o}: {e}");
+            con_valor += usize::from(pide);
+        }
+        assert_eq!(con_valor, OPCIONES_CON_VALOR.len());
+    }
+
+    /// H07 (revision 2): `extends` de A (runtime) y de los estaticos va una sola vez
+    /// en `flags_a:` de meta.txt.
+    #[test]
+    fn flags_a_sin_repetidos_en_meta() {
+        use super::{backend::Minifier, cache, compare_and_report, known, oracle, runner, triage, Ctx, Stats};
+        use std::path::Path;
+        if !crate::test_util::requiere_node() {
+            return;
+        }
+        let d = std::env::temp_dir().join(format!("difuzz-test-h07-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        let reporter = oracle::Reporter::new(&d, "test".into(), runner::PRELOAD);
+        let known = known::Known::load(&d, &d, 0, Minifier::Oxc);
+        let cache = cache::CacheA::new(None, &[]);
+        let triage = triage::Triage::load(&d);
+        let ctx = Ctx { reporter: &reporter, known: &known, cache: &cache, triage: &triage, medido: None };
+        let preload = runner::Preload::write_tagged("h07").unwrap();
+        let r = runner::Runner::new(&preload, crate::test_util::id_runner(), std::time::Duration::from_secs(20));
+        let o = "const v = 1;\nclass A extends v {}\n";
+        let a = r.run(o);
+        assert_eq!(a.flags, ["extends"], "sin esto el test no prueba nada");
+        let mut st = Stats::default();
+        assert!(compare_and_report(&ctx, &r, &mut st, Path::new("x/input.js"), o, "console.log(2);\n", a, false, false, &["extends"], None));
+        assert_eq!(st.known + st.divergences, 1);
+        let dest = if st.known == 1 { "known" } else { "div" };
+        let meta = std::fs::read_to_string(d.join(dest).join("x/meta.txt")).unwrap();
+        assert!(meta.contains("\nflags_a: extends\n"), "{meta}");
+        drop(r);
+        std::fs::remove_dir_all(&d).unwrap();
+    }
+
+    /// Mutantes: el original de una variante que V8 no compila (RangeError al
+    /// parsear, `node --check` lo rechaza) es `original=`, como `invalido` en
+    /// process_case; antes solo el SyntaxError y el RangeError se comparaba. Un
+    /// RangeError en runtime se sigue comparando.
+    #[test]
+    fn variante_que_node_no_compila_no_se_compara() {
+        use super::{cache, known, minify, oracle, process_mutants, runner, triage, Cli, Ctx, MutStats};
+        use crate::backend::Backend;
+        use std::path::Path;
+        if !crate::test_util::requiere_node() {
+            return;
+        }
+        /// "Minifica" cualquier variante a un original fijo y un minificado que imprime otra cosa.
+        struct Fijo(String);
+        impl Backend for Fijo {
+            fn prepare(&self, _src: &str) -> minify::Outcome {
+                minify::Outcome::Ok { original: self.0.clone(), minified: "console.log(2);\n".into(), static_flags: Vec::new(), dead_writes: (0, 0), analisis: Default::default() }
+            }
+        }
+        let d = std::env::temp_dir().join(format!("difuzz-test-mut-rango-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        let reporter = oracle::Reporter::new(&d, "test".into(), runner::PRELOAD);
+        let known = known::Known::load(&d, &d, 0, super::backend::Minifier::Swc);
+        let cache = cache::CacheA::new(None, &[]);
+        let triage = triage::Triage::load(&d);
+        let ctx = Ctx { reporter: &reporter, known: &known, cache: &cache, triage: &triage, medido: None };
+        let cli = Cli::parse(["c", "--no-cache", "--mutaciones", "2"].iter().map(|s| s.to_string()).collect()).unwrap();
+        let preload = runner::Preload::write_tagged("mut-rango").unwrap();
+        let r = runner::Runner::new(&preload, crate::test_util::id_runner(), std::time::Duration::from_secs(10));
+        let raw = "var a = 1;\nvar b = 2;\nconsole.log(a + b);\n";
+        // R2-H03: 6000 `[` anidados no compilan en node 24 (ver original_que_node_no_compila_es_invalido).
+        let anidado = format!("var a = {}{};console.log(1)\n", "[".repeat(6000), "]".repeat(6000));
+        assert!(!r.node_accepts(&anidado));
+        let cfg = minify::Config::from_backend(Box::new(Fijo(anidado)));
+        let mut m = MutStats::default();
+        process_mutants(&ctx, &r, &cfg, None, &cli, &mut m, Path::new("anidado/input.js"), raw, None, false);
+        assert!(m.variantes > 0);
+        assert_eq!((m.original, m.comparadas, m.divergencias, m.conocidas), (m.variantes, 0, 0, 0), "{}", m.line());
+        assert!(!d.join("div").exists() && !d.join("known").exists());
+        // Control: el RangeError en runtime pasa `node --check` y se compara (diverge).
+        let cfg = minify::Config::from_backend(Box::new(Fijo("Number(process.argv.length).toFixed(200);\n".into())));
+        let mut m = MutStats::default();
+        process_mutants(&ctx, &r, &cfg, None, &cli, &mut m, Path::new("runtime/input.js"), raw, None, false);
+        assert!(m.variantes > 0);
+        assert_eq!((m.original, m.comparadas), (0, m.variantes), "{}", m.line());
+        assert_eq!(m.divergencias + m.conocidas, m.variantes, "{}", m.line());
+        drop(r);
         std::fs::remove_dir_all(&d).unwrap();
     }
 
