@@ -485,8 +485,13 @@ impl Runner {
     /// limite de la pila, la primera pausa tarda ~50 s en llegar al handler del sensor
     /// (MEDIDO, node 24.14.1, 6307 frames) y antes de eso no corre nada de JS. Ante una
     /// senal la repeticion conserva el timeout entero (morir por senal es rapido).
+    ///
+    /// t-sensor: si el programa no puede atrapar una excepcion (`puede_atrapar`),
+    /// el sensor va perezoso (lo prende `invocar` del preload, si llega). El
+    /// reintento ante senal o timeout queda igual que con el sensor prendido.
     fn run_inner(&self, js: &str, opts: Opts) -> Exec {
         let opts = Opts { sin_sensor: opts.sin_sensor || !self.sensor, ..opts };
+        let opts = Opts { perezoso: !opts.sin_sensor && !puede_atrapar(js), ..opts };
         let e = self.run_once(js, opts);
         if !matches!(e.status, Status::Signal | Status::Timeout) || opts.sin_sensor {
             return e;
@@ -573,6 +578,119 @@ struct Opts<'a> {
     sin_sensor: bool,
     /// t-principio: variables de entorno extra (`run_with_env`).
     env: &'a [(&'a str, &'a str)],
+    /// t-sensor: el sensor no se prende al arrancar (DIFUZZ_SENSOR=perezoso), ver
+    /// `puede_atrapar`. Lo pone `run_inner`; `sin_sensor` manda sobre esto.
+    perezoso: bool,
+}
+
+/// t-sensor: si el programa puede atrapar una excepcion, directa o indirectamente,
+/// y por eso necesita el sensor de violaciones desde el arranque. Prender el sensor
+/// cuesta un `Debugger.enable` por node (MEDIDO, node 24: ~17 ms de pared en un
+/// programa trivial, contra ~27 ms del node entero con el preload).
+///
+/// El sensor solo pausa en excepciones que V8 predice atrapadas. Sin nada de esta
+/// lista en el texto, el programa no tiene quien las atrape, salvo node y el preload:
+/// - node: los timers, nextTick, el cargador CJS, los callbacks de fs y `emit` no
+///   pausan (MEDIDO, TDZ dentro de cada uno). Si pausan (MEDIDO) el top-level de un
+///   modulo ES y `queueMicrotask`, pero el error termina sin atrapar: `onThrow` saca la
+///   violacion y lo unico que cambia es `stack`, que la pausa prendia al formatear.
+/// - el preload: `invocar` atrapa lo que lanzan las funciones del programa; por eso
+///   el modo perezoso lo prende ahi. Lo demas del preload que atrapa (`ser`, `onThrow`,
+///   prepareStackTrace) llega a codigo del programa solo por lo que esta en la lista
+///   (Proxy, getters de `stack`/`message`, toString/valueOf, prototipos y subclases).
+///
+/// Sobre-aproximado a proposito: el texto entero, strings y comentarios incluidos,
+/// sin parsear. Con `\u` (un identificador escapado) o ante la duda: true.
+/// Riesgo conocido (no cubierto): codigo que arma estos nombres en runtime
+/// (`globalThis["Pro" + "mise"]`) o que pisa globals que el preload usa al observar
+/// (`Object`, `JSON`, `Array`) con funciones propias.
+pub fn puede_atrapar(js: &str) -> bool {
+    const PALABRAS: &[&str] = &[
+        // Atrapan en el programa: try/catch/finally, promesas y thenables, async.
+        "try", "catch", "finally", "async", "await", "then", "fromAsync", "waitAsync",
+        "queueMicrotask", "FinalizationRegistry",
+        // Codigo que no esta en el texto, o que node corre adentro de un try.
+        "eval", "Function", "require", "inspect", "stdout", "stderr",
+        "EventTarget", "addEventListener", "dispatchEvent", "AbortController", "AbortSignal",
+        // Codigo del programa que el preload puede llamar adentro de un try.
+        "Proxy", "Symbol", "Reflect", "extends", "prototype", "__proto__", "setPrototypeOf",
+        "create", "defineProperty", "defineProperties", "__defineGetter__", "__defineSetter__",
+        "stack", "message", "toString", "valueOf", "prepareStackTrace", "captureStackTrace",
+    ];
+    if js.contains("\\u") || js.contains("romis") {
+        return true;
+    }
+    let b = js.as_bytes();
+    let es_id = |c: u8| c.is_ascii_alphanumeric() || c == b'_' || c == b'$';
+    // El primer byte que no es espacio desde `i` hacia adelante (o hacia atras con
+    // `atras`). Un byte no ASCII cuenta como algo que no es espacio: ante la duda, true.
+    let sig = |mut i: usize| {
+        while i < b.len() && b[i].is_ascii_whitespace() {
+            i += 1;
+        }
+        (i < b.len()).then(|| (i, b[i]))
+    };
+    let atras = |mut i: usize| {
+        while i > 0 && b[i - 1].is_ascii_whitespace() {
+            i -= 1;
+        }
+        (i > 0).then(|| b[i - 1])
+    };
+    let mut i = 0;
+    while i < b.len() {
+        if !es_id(b[i]) {
+            i += 1;
+            continue;
+        }
+        let ini = i;
+        while i < b.len() && es_id(b[i]) {
+            i += 1;
+        }
+        let w = &js[ini..i];
+        if PALABRAS.contains(&w) {
+            return true;
+        }
+        let despues = sig(i);
+        match w {
+            // `import(...)`, el import dinamico (el estatico no atrapa nada).
+            "import" if matches!(despues, Some((_, b'(' | b'/' | 0x80..=0xff))) => return true,
+            // Un metodo `return` propio: IteratorClose descarta lo que lanza cuando el
+            // cuerpo del for-of ya lanzo (lo atrapa V8). `x.return`, `return: f`,
+            // `"return"` y `return(...) {`.
+            "return" => {
+                let q = ini.checked_sub(1).map(|j| b[j]);
+                if matches!(atras(ini), Some(b'.' | 0x80..=0xff))
+                    || matches!(despues, Some((_, b':' | 0x80..=0xff)))
+                    || (matches!(q, Some(b'"' | b'\'' | b'`')) && b.get(i) == q.as_ref())
+                {
+                    return true;
+                }
+                if let Some((p, b'(')) = despues {
+                    // El `)` que cierra (con parametros que llaman: `return(a = f()) {`) y
+                    // tambien el primero (sobra, pero asi el filtro solo agrega casos a la
+                    // version que se audito sobre el corpus de SWC). Sin cierre: true.
+                    let primero = b[p..].iter().position(|&c| c == b')');
+                    let mut prof = 0usize;
+                    let cierre = b[p..].iter().position(|&c| {
+                        match c {
+                            b'(' => prof += 1,
+                            b')' => prof -= 1,
+                            _ => {}
+                        }
+                        prof == 0
+                    });
+                    for c in [primero, cierre] {
+                        match c {
+                            Some(c) if !matches!(sig(p + c + 1), Some((_, b'{'))) => {}
+                            _ => return true,
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    false
 }
 
 fn run_file(r: &Runner, script: &Path, start: Instant, timeout: Duration, opts: Opts) -> Exec {
@@ -613,6 +731,8 @@ fn run_file(r: &Runner, script: &Path, start: Instant, timeout: Duration, opts: 
     }
     if opts.sin_sensor {
         cmd.env("DIFUZZ_SENSOR", "0");
+    } else if opts.perezoso {
+        cmd.env("DIFUZZ_SENSOR", "perezoso");
     }
     for (k, v) in opts.env {
         cmd.env(k, v);
@@ -1141,5 +1261,97 @@ mod tests {
         assert_eq!(ctl_flags("dz\nflags proxy,stack\ndz\n"), ["proxy", "stack"]);
         assert!(ctl_flags("flags \n").is_empty());
         assert!(ctl_flags("nada").is_empty());
+    }
+
+    /// t-sensor: el pre-filtro del sensor. Ante cualquier forma de atrapar (o de que
+    /// el preload atrape codigo del programa), true.
+    #[test]
+    fn puede_atrapar_sobre_aproxima() {
+        use super::puede_atrapar as p;
+        for js in [
+            "try { x; } catch {}\nlet x;\n",
+            "f().catch(() => {});\n",
+            "async function f() {}\n",
+            "new Promise((r) => r());\n",
+            "const p = fs.promises;\n",
+            "x.then(f);\n",
+            "import('./m.mjs');\n",
+            "import /* c */ ('./m.mjs');\n",
+            "queueMicrotask(f);\n",
+            "new Proxy({}, {});\n",
+            "class A extends B {}\n",
+            "throw { get stack() { return 1; } };\n",
+            "throw { toString() { return 1; } };\n",
+            "Object.defineProperty(o, 'x', {});\n",
+            "eval('1');\n",
+            "var \\u0074ry2 = 1;\n",
+            "const it = { next() {}, return() { z; } };\n",
+            "const it = { next() {}, return(v) {\n z; } };\n",
+            "const it = { next() {}, return(v = f(1)) { z; } };\n",
+            "function f() { return (1 +\n",
+            "const it = { next() {}, return: f };\n",
+            "it.return = f;\n",
+            "it[\"return\"] = f;\n",
+            "let a = Symbol();\n",
+            "// un try en un comentario tambien\n",
+        ] {
+            assert!(p(js), "{js}");
+        }
+        for js in [
+            "console.log(1);\n",
+            "x;\nlet x;\n",
+            "function f(a) { return (a); }\nfunction g() { return f(1) + 2; }\n",
+            "function f(a) { return (a(g(1)) + 1); }\n",
+            "import x from './m.mjs';\nexport const y = x;\n",
+            "var tryhard = 1, catcher = 2, thenable = 3;\n",
+            "setTimeout(() => { f(); });\nprocess.nextTick(f);\n",
+        ] {
+            assert!(!p(js), "{js}");
+        }
+    }
+
+    /// t-sensor: el sensor perezoso (un programa sin nada que atrape) da lo mismo
+    /// que el sensor prendido desde el arranque. El mismo programa con `/* try */`
+    /// al final (no mueve ninguna posicion) corre con el sensor prendido. Lo que
+    /// atrapa `invocar` (Symbol, TDZ) se sigue viendo porque `invocar` lo prende.
+    #[test]
+    fn sensor_perezoso_igual_que_prendido() {
+        use super::{puede_atrapar, Preload, Runner};
+        use crate::minify::SourceKind;
+        use std::time::Duration;
+        if !crate::test_util::requiere_node() {
+            return;
+        }
+        let preload = Preload::write_tagged("perezoso").unwrap();
+        let r = Runner::new(&preload, crate::test_util::id_runner(), Duration::from_secs(20));
+        let m = Runner::new(&preload, crate::test_util::id_runner(), Duration::from_secs(20)).with_kind(SourceKind::Module);
+        let mi = Runner::new(&preload, crate::test_util::id_runner(), Duration::from_secs(20)).with_kind(SourceKind::Module).with_invocar(true);
+        let mio = mi.observing();
+        let viol = |e: &super::Exec| e.ctl.lines().filter(|l| l.starts_with("viol ")).map(String::from).collect::<Vec<_>>();
+        let simbolo = "const s = Object.getOwnPropertySymbols(Object.getPrototypeOf([]))[0];\n";
+        let casos = [
+            (&r, format!("{simbolo}function f() {{ return s + 1; }}\n__difuzzObserveInvocar([\"f\", f]);\n")),
+            (&r, "function f() { return z; }\n__difuzzObserveInvocar([\"f\", f]);\nlet z = 1;\n".to_string()),
+            (&r, "console.log(1);\nx;\nlet x;\n".to_string()),
+            (&r, format!("{simbolo}console.log(1);\nMath.abs(s);\n")),
+            (&r, "setTimeout(() => { f(); });\nfunction f() { z; let z; }\n".to_string()),
+            (&mio, "export function f() { return z; }\nlet z = 1;\n".to_string()),
+            (&mio, format!("{simbolo}export function f() {{ return s + 1; }}\n")),
+        ];
+        for (run, js) in &casos {
+            assert!(!puede_atrapar(js), "{js}");
+            let (a, b) = (run.run(js), run.run(&format!("{js}/* try */\n")));
+            assert_eq!((&a.stdout, &a.status, &a.flags, viol(&a)), (&b.stdout, &b.status, &b.flags, viol(&b)), "{js}\n{}\n{}", a.ctl, b.ctl);
+        }
+        // El de Symbol atrapado por invocar: sin el sensor no tendria flag.
+        let e = r.run(&casos[0].1);
+        assert!(e.flags.iter().any(|f| f == "coercion_symbol"), "{:?} {}", e.flags, e.ctl);
+        // Lo unico que cambia (MEDIDO): el top-level de un modulo ES que lanza. V8 pausa
+        // (lo atrapa el import) y al formatear el stack prendia `stack`; la violacion
+        // la saca onThrow igual.
+        let js = "x;\nexport let x;\n";
+        let (a, b) = (m.run(js), m.run(&format!("{js}/* try */\n")));
+        assert_eq!((a.flags.clone(), viol(&a)), (vec!["tdz".to_string()], vec!["viol tdz 0:0".to_string()]), "{}", a.ctl);
+        assert_eq!((b.flags.clone(), viol(&b)), (vec!["stack".to_string(), "tdz".to_string()], vec!["viol tdz 0:0".to_string()]), "{}", b.ctl);
     }
 }

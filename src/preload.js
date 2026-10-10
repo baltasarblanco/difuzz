@@ -354,6 +354,10 @@
   // atrapa errores que no son del programa (el hook de --stubs): al pausar, V8 formatea su
   // stack y prenderia `stack`. Lo define el sensor; sin inspector no hace nada.
   let sensor = () => {};
+  // t-sensor: con DIFUZZ_SENSOR=perezoso (runner::puede_atrapar dijo que el programa no
+  // puede atrapar una excepcion) el sensor no se prende al arrancar: queda aca y lo prende
+  // `invocar` antes de la primera funcion que llama (el preload si atrapa lo que lanza).
+  let sensorPerezoso = null;
   // I3 (revision-b456): el sensor llego a MAX_PAUSAS y se apago a mitad de la corrida
   // (linea `sensor_tope` del canal, al salir): el resto corrio sin sus efectos.
   let sensorTope = false;
@@ -697,6 +701,12 @@
   };
   const invocar = (name, f) => {
     let r;
+    // t-sensor: lo que lanza `f` lo atrapa este try: desde aca el sensor tiene que estar.
+    if (sensorPerezoso !== null) {
+      const prender = sensorPerezoso;
+      sensorPerezoso = null;
+      prender();
+    }
     const nViol = violaciones.length;
     try {
       r = Reflect.apply(f, undefined, []);
@@ -956,11 +966,15 @@
   //     viejo), llama a Error.prepareStackTrace (o a la del programa, si la cambio) y
   //     prende `stack` (ver prepareStackTrace).
   //   - Debugger.enable cuesta ~12 ms por node y cada pausa ~0.4 ms: tope MAX_PAUSAS.
+  //     t-sensor (MEDIDO, node 24): Debugger.enable es casi todo el costo fijo (~11 ms dentro
+  //     del proceso, 17-27 ms de pared; require+connect ~1,6 ms, el resto ~0); ~0,5 ms por pausa.
   // Igual en A y en B: lo que cambie, cambia en los dos.
   // DIFUZZ_SENSOR=0: sin sensor (runner.rs lo pide si node murio por una senal con el).
-  const conSensor = process.env.DIFUZZ_SENSOR !== '0';
+  // DIFUZZ_SENSOR=perezoso (t-sensor): el programa no puede atrapar (runner::puede_atrapar);
+  // el sensor se prende solo si el preload va a atrapar algo del programa (`invocar`).
+  const modoSensor = process.env.DIFUZZ_SENSOR;
   delete process.env.DIFUZZ_SENSOR;
-  if (conSensor) try {
+  const prenderSensor = () => { try {
     const PRELOAD_URL = require('url').pathToFileURL(__filename).href;
     const inspector = require('inspector');
     const sesion = new inspector.Session();
@@ -1012,5 +1026,7 @@
     // pausas por excepcion siguen (MEDIDO).
     sesion.post('Debugger.setBreakpointsActive', { active: false });
     sensor(true);
-  } catch {}
+  } catch {} };
+  if (modoSensor === 'perezoso') sensorPerezoso = prenderSensor;
+  else if (modoSensor !== '0') prenderSensor();
 })();
