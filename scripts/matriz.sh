@@ -9,10 +9,15 @@
 # R1-H09: difuzz escribe cada celda en $OUT/<celda completa>/ (con backend y carril),
 # asi que todas comparten --out $OUT; correr MIN=swc y MIN=oxc en el mismo $OUT ya no
 # pisa hallazgos (los .log/.stats de aca si llevan solo el nombre corto de la celda).
-# uso: [BIN=...] [CORPUS=...] [MIN=swc|oxc] [CARRIL=a|b] matriz.sh [dir_salida]   (default: out-matriz)
+# uso: [BIN=...] CORPUS=... [MIN=swc|oxc] [CARRIL=a|b] matriz.sh [dir_salida]   (default: out-matriz)
+#   CORPUS  obligatoria (si falta, se usa DIFUZZ_CORPUS; sin ninguna de las dos sale con 2). El de los
+#           fixtures de SWC es <clon de swc>/crates/swc_ecma_minifier/tests
+#   -h, --help  esta ayuda (sale con 0)
 set -u
+case ${1:-} in -h|--help) rg '^#( |$)' -N "$0" | rg -v '^#!'; exit 0;; esac
 BIN=${BIN:-$(dirname "$0")/../target/release/difuzz}
-CORPUS=${CORPUS:-$HOME/swc-main/crates/swc_ecma_minifier/tests}
+CORPUS=${CORPUS:-${DIFUZZ_CORPUS:-}}
+[ -n "$CORPUS" ] || { echo "falta el corpus: CORPUS=DIR o DIFUZZ_CORPUS=DIR (ver --help)" >&2; exit 2; }
 MIN=${MIN:-oxc}
 CARRIL=${CARRIL:-a}
 OUT=${1:-out-matriz}

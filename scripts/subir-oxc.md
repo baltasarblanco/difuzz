@@ -1,6 +1,6 @@
 # Subir (o bajar) la version de oxc en difuzz
 
-Procedimiento C7 de `interno/MEJORAS.md`. El trabajo lo hace `scripts/subir-oxc.sh`; este documento
+Procedimiento C7 del registro interno de mejoras. El trabajo lo hace `scripts/subir-oxc.sh`; este documento
 dice cuando usarlo, como leer lo que deja y que queda a mano.
 
 ## Antes
@@ -19,12 +19,18 @@ dice cuando usarlo, como leer lo que deja y que queda a mano.
 ## Correr
 
 ```bash
-TARGET=~/difuzz/target RED=1 scripts/subir-oxc.sh 0.154.0 ~/difuzz/.claude/trabajo-<dia>/oxc-0.154.0
+CORPUS=<corpus> TARGET=<target con dependencias> RED=1 REPRO=<repro> ENVIAR=<textos> \
+  scripts/subir-oxc.sh 0.154.0 <dir de trabajo>/oxc-0.154.0
 ```
 
+- `CORPUS` (o `DIFUZZ_CORPUS`) es obligatoria: el arnes y el informe corren sobre ese corpus (el de
+  los fixtures de SWC es `<clon de swc>/crates/swc_ecma_minifier/tests`). `REPRO` (directorio con los
+  `*.mjs` y sus `.out`) es obligatoria con `RED=1`. `ENVIAR` (el archivo con los textos de reporte a
+  oxc sin mandar) es opcional: sin ella no hay aviso de version en esos textos. Ninguna tiene default.
 - Tarda ~20-30 min (dos builds de cada perfil, `cargo test`, clippy, golden y aceptacion dos veces
-  y el arnes en 5 celdas por lado). Anunciarlo antes (regla 9 de `CLAUDE.md`). `RED=1` (o `NPM=1`)
-  usa la red: npm install (repro de `ENVIAR.md` y `oxc-minify` en `probe/`), C1 y `gh api`.
+  y el arnes en 5 celdas por lado). Anunciarlo antes (las corridas largas se anuncian aparte).
+  `RED=1` (o `NPM=1`) usa la red: npm install (repro de `REPRO` y `oxc-minify` en `probe/`), C1 y
+  `gh api`.
 - Golden (`tests/golden/`), aceptacion de los re-chequeos (`tests/aceptacion/rechequeos/`) y arnes
   (`scripts/comparar-binarios.sh`) salen por defecto del arbol desde el que se llama (`REPO`); se
   cambian con `GOLDEN=`, `ACEPTACION=` y `ARNES=` (`GOLDEN=no`/`ACEPTACION=no` los saltean).
@@ -52,7 +58,7 @@ TARGET=~/difuzz/target RED=1 scripts/subir-oxc.sh 0.154.0 ~/difuzz/.claude/traba
 | `lock.diff`, `menciones-vieja.txt`, `api.stat` | paquetes del Cargo.lock que cambian; lineas que siguen nombrando la version vieja; archivos de src/ tocados |
 | `subida-oxc-<version>.patch` | la propuesta: Cargo.toml, Cargo.lock, `version()`, el test del oraculo, `probe/package.json` (y `probe/package-lock.json` con `RED=1`) y los arreglos de API. Se aplica con `git apply` en el arbol principal (orden del usuario) |
 | `bin-base/`, `bin-nuevo/` | los dos pares de binarios (`difuzz` y `difuzz-oraculo`) |
-| `npm/` | `oxc-minify@<version>` y la salida de los repro de `ENVIAR.md` (con `RED=1`) |
+| `npm/` | `oxc-minify@<version>` y la salida de los repro de `REPRO` (con `RED=1`) |
 | `logs/npm-probe.log`, `logs/c1.log` | la subida de `oxc-minify` en `probe/` y el test C1 de la muestra (con `RED=1`) |
 
 ## Como leer el informe de diferencias
@@ -91,10 +97,10 @@ Por celda, cada caso cuyo estado cambia. Estado = destinos del caso (`div:<kind>
   corre C1 (`cargo test c1_igual_a_oxc_minify_de_npm -- --ignored`). Sin `RED=1` queda avisado: el
   parche lleva un `package.json` que no coincide con su lock hasta que se haga
   `npm install --save-exact oxc-minify@<version>` en `probe/`.
-- **`ENVIAR.md`** (`.claude/trabajo-07oct/oxc/`): todos los textos dicen "0.153.0" y se reprodujeron
-  con esa version. Antes de mandar cualquiera, reproducirlo con la version nueva (`RED=1` corre los
-  `repro/*.mjs` y compara con sus `.out`) y cambiar la version del texto. El aviso sale en toda
-  corrida cuya version vieja aparezca en `ENVIAR.md` (tambien al bajar, donde no aplica). Si un repro da otra salida,
+- **Textos de reporte a oxc sin mandar** (`ENVIAR=`, con sus repro en `REPRO=`): nombran la version
+  con que se reprodujeron. Antes de mandar cualquiera, reproducirlo con la version nueva (`RED=1` corre los
+  `REPRO/*.mjs` y compara con sus `.out`) y cambiar la version del texto. El aviso sale en toda
+  corrida cuya version vieja aparezca en `ENVIAR` (tambien al bajar, donde no aplica). Si un repro da otra salida,
   el bug pudo arreglarse: no mandarlo sin revisar.
 - **Tests que dependen de bugs de oxc**: `subproceso.rs` `panic_del_minifier_cruza_el_pipe` usa el
   panic O6 (`"\ud800"["0"]`) para probar el camino de panic. Si oxc lo arregla, el test falla y hay
@@ -124,5 +130,6 @@ Por celda, cada caso cuyo estado cambia. Estado = destinos del caso (`div:<kind>
 
 Aplicar `subida-oxc-<version>.patch` en el arbol principal, volver a compilar los dos perfiles,
 `npm ci` en `probe/` (para que `probe/node_modules` tenga el `oxc-minify` nuevo y C1 pase), y
-anotar en `CLAUDE.md` (D1 nombra `oxc_minifier 0.153.0`) y en `interno/MEJORAS.md` la version nueva.
-Si se confirmaron fixes de oxc, actualizar golden y `ENVIAR.md` en el mismo momento.
+anotar la version nueva en el registro interno de decisiones (que nombra la version de
+`oxc_minifier`) y en el de mejoras. Si se confirmaron fixes de oxc, actualizar golden y los textos de `ENVIAR`
+en el mismo momento.

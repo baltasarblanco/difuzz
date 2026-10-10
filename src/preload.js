@@ -2,7 +2,7 @@
 // difuzz preload. Se carga con `node --require` antes de A y antes de B, igual en los dos.
 // No pasa por el minifier: es infraestructura del oraculo, no parte del programa.
 //
-// Tres trabajos:
+// Cinco trabajos:
 //   1. Determinismo: Date, performance.now y Math.random dan lo mismo en cada ejecucion.
 //   2. Observador: define __difuzzObserve, que el epilogo llama con los bindings top-level
 //      de programas que no imprimen nada.

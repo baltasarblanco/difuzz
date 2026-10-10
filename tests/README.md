@@ -10,8 +10,14 @@ cargo build --release && cargo build --profile oraculo   # los dos binarios
 
 ## Suite normal
 
-`cargo test` (unitarios en `src/`, `tests/salida_celdas.rs`). Los tests de `tests/verificaciones.rs` quedan
-ignorados.
+`cargo test`: los unitarios de `src/` y tres binarios de integración:
+
+- `tests/salida_celdas.rs`: dos celdas en el mismo `--out` no se pisan; una corrida cortada queda marcada.
+- `tests/salida_usuario.rs`: códigos de salida 0, 1 y 2 de difuzz, y que `descartes.tsv` reconstruya el total.
+- `tests/verificaciones.rs`: sus dos tests (golden y aceptación) quedan ignorados; ver "Como tests de cargo".
+
+Cada binario de integración incluye `src/test_util.rs` (con `#[path]`) y corre también sus 3 tests. Ignorados en
+total: 3, los dos de `tests/verificaciones.rs` y C1 de la muestra (`c1_igual_a_oxc_minify_de_npm`, en `src/`).
 
 Sin `node` en `PATH`, los tests que lo necesitan **fallan** con un mensaje claro (R1-H17). Con
 `DIFUZZ_SIN_NODE=1` se saltean y cada uno deja una línea `DIFUZZ_SALTEADO_SIN_NODE` en stderr (contarlas con
@@ -32,7 +38,10 @@ tests/golden/verificar.sh [--jobs N] [BINARIO] [DIR_SALIDA]
 
 ## Aceptación de los re-chequeos — `tests/aceptacion/rechequeos/`
 
-21 casos (revisión 1, C4) que combinan un bug real de oxc con un flag de asunción, en las 4 celdas de oxc.
+42 casos que combinan un bug real de oxc con un flag de asunción, en las 4 celdas de oxc (42 × 4 = 168
+comparaciones): 21 de la revisión 1 (C4, `00-` a `10-`), 9 adversariales del revisor de la fase R (`r01` a
+`r10`, sin `r05`), `14-tdz-positivo` y 11 de los flags que antes no tenían re-chequeo (`15-` coerción, `16-`
+built-ins, `17-` contenido de `toString`/`.stack`, `18-` profundidad: positivos y adversariales con el Issue A).
 Destino esperado en `esperado.tsv` (mismo formato que el golden). Reutiliza `tests/golden/verificar.sh`.
 
 ```sh
@@ -61,8 +70,10 @@ Compara dos binarios caso por caso (destinos, `meta.txt`, archivos, stats, desca
 por celda. Para un refactor que no debe cambiar nada:
 
 ```sh
-scripts/comparar-binarios.sh --jobs 2 BIN_BASE BIN_NUEVO DIR_SALIDA "oxc b"
+scripts/comparar-binarios.sh --jobs 2 --corpus DIR BIN_BASE BIN_NUEVO DIR_SALIDA "oxc b"
 ```
 
-El corpus por defecto es el de los fixtures de SWC en `~/swc-main` (ruta absoluta en el script); `--corpus DIR`
-lo cambia. `--help` lista las opciones (`--ignorar-campo`, `--reusar`, `--base-de`, ...).
+El corpus sale de `--corpus DIR` o de la variable `DIFUZZ_CORPUS`; sin ninguno de los dos, el script sale con 2.
+Para los fixtures de SWC: `<clon de swc>/crates/swc_ecma_minifier/tests`. `--help` lista las opciones
+(`--ignorar-campo`, `--reusar`, `--base-de`, ...) y sale con 0. `scripts/matriz.sh`, `scripts/medir-serie.sh` y
+`scripts/subir-oxc.sh` toman el corpus de `CORPUS` (o, si falta, de `DIFUZZ_CORPUS`).

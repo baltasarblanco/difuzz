@@ -1964,25 +1964,58 @@ fn contar_variante(m: &mut MutStats, s: &Stats) -> bool {
 }
 
 fn print_hint(out: &Path, stats: &Stats) {
-    if stats.divergences + stats.panics > 0 {
-        eprintln!("hallazgos en {}/div", out.display());
+    for l in hint_lines(out, stats) {
+        eprintln!("{l}");
     }
-    if stats.known > 0 {
-        eprintln!("conocidas (asuncion o backlog) en {}/known", out.display());
+}
+
+/// Una linea por directorio que la corrida lleno. Antes, con solo panics,
+/// decia "hallazgos en div" y nunca nombraba `panic/`; y no contaba lo que
+/// dejan las variantes de --mutaciones (van a los mismos directorios).
+fn hint_lines(out: &Path, stats: &Stats) -> Vec<String> {
+    let m = &stats.mutaciones;
+    let o = out.display();
+    let mut v = Vec::new();
+    if stats.divergences + m.divergencias > 0 {
+        v.push(format!("hallazgos (divergencias) en {o}/div"));
     }
-    if stats.lint > 0 {
-        eprintln!("sospechosos del lint (triage a mano) en {}/lint", out.display());
+    if stats.panics + m.panics > 0 {
+        v.push(format!("hallazgos (panics del minifier) en {o}/panic"));
     }
-    if stats.recursos_timeout + stats.recursos_memoria > 0 {
-        eprintln!("minifier lento o sin memoria (timeout/memoria) en {}/recursos", out.display());
+    if stats.known + m.conocidas > 0 {
+        v.push(format!("conocidas (asuncion o backlog) en {o}/known"));
+    }
+    if stats.lint + m.lint > 0 {
+        v.push(format!("sospechosos del lint (triage a mano) en {o}/lint"));
+    }
+    if stats.recursos_timeout + stats.recursos_memoria + m.recursos > 0 {
+        v.push(format!("minifier lento o sin memoria (timeout/memoria) en {o}/recursos"));
     }
     if stats.solo_asserts_sin_div > 0 {
-        eprintln!("panics solo de debug assertions, sin divergencia, en {}/asserts", out.display());
+        v.push(format!("panics solo de debug assertions, sin divergencia, en {o}/asserts"));
     }
+    v
 }
 
 #[cfg(test)]
 mod tests {
+    /// El aviso final nombra los directorios que de verdad tienen hallazgos:
+    /// con solo panics, `panic/` y no `div/` (antes decia "hallazgos en div").
+    #[test]
+    fn aviso_nombra_los_directorios_con_hallazgos() {
+        let out = std::path::Path::new("/o");
+        let solo_panic = super::Stats { panics: 1, ..super::Stats::default() };
+        assert_eq!(super::hint_lines(out, &solo_panic), ["hallazgos (panics del minifier) en /o/panic"]);
+        let solo_div = super::Stats { divergences: 2, ..super::Stats::default() };
+        assert_eq!(super::hint_lines(out, &solo_div), ["hallazgos (divergencias) en /o/div"]);
+        let mut mut_panic = super::Stats::default();
+        mut_panic.mutaciones.panics = 1;
+        mut_panic.mutaciones.divergencias = 1;
+        let l = super::hint_lines(out, &mut_panic);
+        assert_eq!(l, ["hallazgos (divergencias) en /o/div", "hallazgos (panics del minifier) en /o/panic"]);
+        assert!(super::hint_lines(out, &super::Stats::default()).is_empty());
+    }
+
     /// Decision del usuario (09-oct): el runner de la celda (el de produccion,
     /// `runner_de_celda`) corre el sensor de violaciones solo si la politica del
     /// backend lo usa. swc: node sin el sensor (DIFUZZ_SENSOR=0), sin flags ni

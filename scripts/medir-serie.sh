@@ -16,17 +16,22 @@
 # con la misma version se reusan; difuzz se recompila siempre porque cada commit
 # tiene su propia ruta.
 #
-# uso: [REPO=.] [CORPUS=...] [TARGET=<salida>/target] [ARGS="..."] medir-serie.sh RANGO [dir_salida]
+# uso: [REPO=.] CORPUS=... [TARGET=<salida>/target] [ARGS="..."] medir-serie.sh RANGO [dir_salida]
 #   RANGO       rango de git (p. ej. 9ac4db5..HEAD o HEAD~5..HEAD), en orden cronologico
 #   ARGS        argumentos extra para cada binario (p. ej. "--jobs 6 --no-cache"). Los
 #               commits viejos no conocen las opciones nuevas (--minifier, --carril...)
 #   dir_salida  default: out-serie
+#   CORPUS      obligatoria (si falta, se usa DIFUZZ_CORPUS; sin ninguna de las dos sale con 2). El
+#               de los fixtures de SWC es <clon de swc>/crates/swc_ecma_minifier/tests
+#   -h, --help  esta ayuda (sale con 0)
 # Escribe en dir_salida: bin-<c>, build-<c>.log, run-<c>.log, stats-<c>.txt, out-<c>/.
 set -u
+case ${1:-} in -h|--help) rg '^#( |$)' -N "$0" | rg -v '^#!'; exit 0;; esac
 RANGO=${1:?uso: medir-serie.sh RANGO [dir_salida]}
 OUT=${2:-out-serie}
 REPO=${REPO:-$(dirname "$0")/..}
-CORPUS=${CORPUS:-$HOME/swc-main/crates/swc_ecma_minifier/tests}
+CORPUS=${CORPUS:-${DIFUZZ_CORPUS:-}}
+[ -n "$CORPUS" ] || { echo "falta el corpus: CORPUS=DIR o DIFUZZ_CORPUS=DIR (ver --help)" >&2; exit 2; }
 ARGS=${ARGS:-}
 mkdir -p "$OUT"
 OUT=$(cd "$OUT" && pwd)

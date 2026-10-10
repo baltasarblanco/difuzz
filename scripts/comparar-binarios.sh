@@ -13,7 +13,9 @@
 #
 # opciones:
 #   --jobs N                 workers de difuzz (default 8). Las corridas son secuenciales.
-#   --corpus DIR             default /home/baltasarblanco/swc-main/crates/swc_ecma_minifier/tests
+#   --corpus DIR             default: $DIFUZZ_CORPUS. Sin ninguno de los dos sale con 2. El corpus
+#                            de los fixtures de SWC es <clon de swc>/crates/swc_ecma_minifier/tests
+#   -h, --help               esta ayuda (sale con 0)
 #   --reusar                 no volver a correr un lado/celda si su salida ya esta completa (rc 0)
 #   --base-de DIR            tomar las corridas del lado base de DIR (otro DIR_SALIDA/base) en vez de correrlas
 #   --solo-comparar          no correr nada: comparar lo que ya hay en DIR_SALIDA
@@ -64,7 +66,7 @@
 # intercala lineas (ya produjo un falso "2 perdidos" en este proyecto).
 set -uo pipefail
 
-corpus=/home/baltasarblanco/swc-main/crates/swc_ecma_minifier/tests
+corpus=${DIFUZZ_CORPUS:-}
 jobs=8
 reusar=0
 solo_comparar=0
@@ -75,7 +77,11 @@ campos_ign=()
 lineas_ign=()
 pos=()
 
-uso() { rg '^#( |$)' -N "$0" | sd '(?m)^# ?' '' >&2; exit 2; }
+# uso [CODIGO]: 0 (--help) a stdout; si no, a stderr y sale con 2.
+uso() {
+  if [[ ${1:-2} == 0 ]]; then rg '^#( |$)' -N "$0" | sd '(?m)^# ?' ''; exit 0; fi
+  rg '^#( |$)' -N "$0" | sd '(?m)^# ?' '' >&2; exit 2
+}
 
 while (($#)); do
   case $1 in
@@ -88,13 +94,14 @@ while (($#)); do
     --ignorar-linea) lineas_ign+=("${2:?}"); shift 2;;
     --permitir-sin-corrida) sin_corrida=1; shift;;
     --max-detalle) max_detalle=${2:?}; shift 2;;
-    -h|--help) uso;;
+    -h|--help) uso 0;;
     --) shift; pos+=("$@"); break;;
     --*) echo "opcion desconocida: $1" >&2; uso;;
     *) pos+=("$1"); shift;;
   esac
 done
 ((${#pos[@]} >= 3)) || uso
+[[ -n $corpus ]] || { echo "falta el corpus: --corpus DIR o DIFUZZ_CORPUS=DIR (ver --help)" >&2; exit 2; }
 bin_base=$(realpath "${pos[0]}") || exit 2
 bin_nuevo=$(realpath "${pos[1]}") || exit 2
 salida=${pos[2]}

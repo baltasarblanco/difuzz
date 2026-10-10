@@ -39,7 +39,7 @@
 #               `--emitir` con los dos binarios y dice si el minificado cambio (si no cambio, la
 #               diferencia no viene de oxc) y una pista de triage
 #  10 red       solo con RED=1: npm install oxc-minify@VERSION en DIR_SALIDA/npm y corre
-#               los repro de ENVIAR.md (REPRO/*.mjs) comparando con sus .out; sube oxc-minify en
+#               los repro de los textos de reporte (REPRO/*.mjs) comparando con sus .out; sube oxc-minify en
 #               probe/ del worktree (npm install --save-exact: package.json y package-lock.json) y
 #               corre C1 de la muestra (cargo test c1_igual_a_oxc_minify_de_npm -- --ignored); con
 #               gh, compara crates/oxc_minifier/docs/ASSUMPTIONS.md entre los tags crates_vVIEJA y
@@ -54,7 +54,9 @@
 #   BIN_BASE   binario base ya compilado de REV (con su BIN_BASE-oraculo al lado); saltea la
 #              compilacion del paso 2. Tiene que ser del MISMO codigo de difuzz que REV, si no el
 #              informe mezcla cambios de difuzz con cambios de oxc (no se puede verificar solo)
-#   CORPUS     default /home/baltasarblanco/swc-main/crates/swc_ecma_minifier/tests
+#   CORPUS     corpus del arnes y del --emitir del informe (OBLIGATORIA; si falta, se usa
+#              DIFUZZ_CORPUS, y sin ninguna de las dos sale con 2). El de los fixtures de SWC es
+#              <clon de swc>/crates/swc_ecma_minifier/tests
 #   JOBS       workers de difuzz en el arnes (default 8)
 #   CELDAS     celdas del arnes separadas por ';' (default "oxc a;oxc b;oxc b --invocar;swc a;swc b";
 #              las de swc son control: cambiar oxc no deberia moverlas)
@@ -62,46 +64,53 @@
 #   ARNES      default REPO/scripts/comparar-binarios.sh
 #   GOLDEN     default REPO/tests/golden (GOLDEN=no para saltearlo)
 #   ACEPTACION default REPO/tests/aceptacion/rechequeos (ACEPTACION=no para saltearla)
-#   ENVIAR     default <arbol principal>/.claude/trabajo-07oct/oxc/ENVIAR.md
-#   REPRO      default <arbol principal>/.claude/trabajo-07oct/oxc/probe-npm/repro
+#   ENVIAR     archivo con los textos de reporte a oxc sin mandar (opcional, sin default). Si
+#              esta, avisa cuantas veces nombra la version vieja
+#   REPRO      directorio con los repro de esos textos (*.mjs y su .out); sin default, OBLIGATORIA
+#              con RED=1 (sin ella sale con 2)
 #   RED=1      correr el paso 10 (npm y gh; NPM=1 es sinonimo)          MANTENER=1  no borrar el worktree
 #
 # Temporales: exporta TMPDIR=DIR_SALIDA/tmp (difuzz, cargo test y mktemp no dejan nada en /tmp).
 # Codigo de salida: 0 todo verde y sin diferencias en hallazgos; 1 terminado con algo para revisar
 # (tests, clippy, golden o diferencias); 2 argumentos o entorno; 3 no compila; 4 fallo un paso.
+# Con -h o --help imprime esta ayuda y sale con 0.
 # Dependencias: bash >= 4, git, cargo, node, rg, sd (>= 1.0), eza, sort, comm, cut, diff, sha256sum,
 # realpath, mktemp, join; npm y gh solo con RED=1. Los del arnes y el golden (ver sus cabeceras).
 set -uo pipefail
 
-uso() { rg '^#( |$)' -N "$0" | sd '(?m)^# ?' '' >&2; exit 2; }
+# uso [CODIGO]: 0 (--help) a stdout; si no, a stderr y sale con 2.
+uso() {
+  if [[ ${1:-2} == 0 ]]; then rg '^#( |$)' -N "$0" | sd '(?m)^# ?' ''; exit 0; fi
+  rg '^#( |$)' -N "$0" | sd '(?m)^# ?' '' >&2; exit 2
+}
+[[ ${1:-} == -h || ${1:-} == --help ]] && uso 0
 (($# == 2)) || uso
-[[ $1 == -h || $1 == --help ]] && uso
 VERSION=$1
 [[ $VERSION =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "VERSION invalida: $VERSION" >&2; exit 2; }
 for dep in git cargo node rg sd eza sort comm cut diff sha256sum realpath mktemp; do
   command -v "$dep" >/dev/null || { echo "falta la dependencia: $dep" >&2; exit 2; }
 done
+CORPUS=${CORPUS:-${DIFUZZ_CORPUS:-}}
+[[ -n $CORPUS ]] || { echo "falta el corpus: CORPUS=DIR o DIFUZZ_CORPUS=DIR (ver --help)" >&2; exit 2; }
+RED=${RED:-${NPM:-0}}
+[[ $RED != 1 || -n ${REPRO:-} ]] || { echo "RED=1 necesita REPRO=DIR (los repro de los textos de reporte; ver --help)" >&2; exit 2; }
 
 REPO=$(realpath "${REPO:-$(dirname "$0")/..}") || exit 2
 REPO=$(git -C "$REPO" rev-parse --show-toplevel) || exit 2
-# Los documentos de trabajo (.claude/, fuera de git: ENVIAR.md y sus repro) viven en el arbol
-# principal, no en otro worktree. Golden, aceptacion y arnes estan en git (REPO).
-PRINCIPAL=$(dirname "$(git -C "$REPO" rev-parse --path-format=absolute --git-common-dir)")
+# Golden, aceptacion y arnes estan en git (REPO); ENVIAR y REPRO no (se pasan por variable).
 REV=${REV:-HEAD}
 REV_ID=$(git -C "$REPO" rev-parse --short "$REV^{commit}") || { echo "REV invalido: $REV" >&2; exit 2; }
 mkdir -p "$2" || exit 2
 OUT=$(realpath "$2")
 TARGET=${TARGET:-${CARGO_TARGET_DIR:-$OUT/target}}
-CORPUS=${CORPUS:-/home/baltasarblanco/swc-main/crates/swc_ecma_minifier/tests}
 JOBS=${JOBS:-8}
 CELDAS=${CELDAS:-oxc a;oxc b;oxc b --invocar;swc a;swc b}
 ARNES_ARGS=${ARNES_ARGS:-}
 ARNES=${ARNES:-$REPO/scripts/comparar-binarios.sh}
 GOLDEN=${GOLDEN:-$REPO/tests/golden}
 ACEPTACION=${ACEPTACION:-$REPO/tests/aceptacion/rechequeos}
-ENVIAR=${ENVIAR:-$PRINCIPAL/.claude/trabajo-07oct/oxc/ENVIAR.md}
-REPRO=${REPRO:-$PRINCIPAL/.claude/trabajo-07oct/oxc/probe-npm/repro}
-RED=${RED:-${NPM:-0}}
+ENVIAR=${ENVIAR:-}
+REPRO=${REPRO:-}
 MANTENER=${MANTENER:-0}
 WT=$OUT/wt
 EST=$OUT/estado

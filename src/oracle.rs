@@ -176,10 +176,13 @@ pub struct Reporter {
 }
 
 impl Reporter {
-    /// Guarda el preload una vez en la raiz: cada hallazgo se reproduce con
-    /// `TZ=UTC node --require <out>/preload.cjs original.cjs`.
+    /// Guarda el preload una vez en la raiz (`<out>/<celda>/`): cada hallazgo se
+    /// reproduce con las lineas `repro_original`/`repro_minificado` de su `meta.txt`
+    /// (`cd <caso> && env -i PATH="$PATH" TZ=UTC HOME=/tmp node --no-warnings
+    /// --require <raiz>/preload.cjs original.cjs`; M21, en `divergence`).
     ///
-    /// Borra `div/`, `known/`, `panic/` y `lint/` de una corrida anterior: si no, los
+    /// Borra `div/`, `known/`, `panic/`, `lint/`, `asserts/` y `recursos/` de una
+    /// corrida anterior: si no, los
     /// hallazgos viejos se mezclan con los nuevos y el `ls` miente (paso en la
     /// corrida del 21-sep, con 8 directorios de sobra).
     pub fn new(root: &Path, config_name: String, preload: &str) -> Reporter {

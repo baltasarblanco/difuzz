@@ -12,7 +12,8 @@
 #   --celdas "C..."   celdas <minifier>-<carril>-<preset> separadas por espacios (default: las 8)
 #   --sin-modos       no correr la comparacion de modos opt-in (--invocar, --stubs)
 #   --jobs N          workers de difuzz (default ${VERIFICAR_JOBS:-4})
-# Sale con 0 si todas las comparaciones coinciden, 1 si hay alguna diferencia, 2 por argumentos.
+# Sale con 0 si todas las comparaciones coinciden (y con --help/-h), 1 si hay alguna diferencia,
+# 2 por argumentos.
 # El oraculo sin debug assertions (cargo build --profile oraculo) es parte de lo esperado: difuzz
 # lo busca junto al binario o en DIFUZZ_ORACULO (ver tests/README.md).
 # Herramientas: bash, fd, rg (no usa cat/grep/find/sed/awk).
@@ -33,7 +34,7 @@ while (($#)); do
     --celdas) read -r -a celdas <<< "${2:?--celdas necesita valor}"; shift 2;;
     --sin-modos) modos=0; shift;;
     --jobs) jobs=${2:?--jobs necesita valor}; shift 2;;
-    -h|--help) rg '^#( |$)' -N "$0" | rg -v '^#!' >&2; exit 2;;
+    -h|--help) rg '^#( |$)' -N "$0" | rg -v '^#!'; exit 0;;
     --*) echo "opcion desconocida: $1" >&2; exit 2;;
     *) pos+=("$1"); shift;;
   esac
@@ -54,7 +55,9 @@ while IFS=$'\t' read -r caso celda clase; do
   exp["$caso|$celda"]=$clase
 done < "$esperado"
 
-mapfile -t casos < <(fd -t f -g input.js "$corpus" -x dirname {} | while read -r d; do echo "${d#"$corpus"/}"; done | sort)
+# -u (= -H -I): como src/corpus.rs, tambien los directorios ocultos (p. ej. jquery/.19 de la muestra) y
+# sin mirar .gitignore. Sin -u, un caso oculto se corria pero no se comparaba.
+mapfile -t casos < <(fd -u -t f -g input.js "$corpus" -x dirname {} | while read -r d; do echo "${d#"$corpus"/}"; done | sort)
 
 # b2-a (R1-H09): difuzz escribe en <--out>/<celda>/. Cada --out de este script tiene una sola celda
 # (y --no-cache: sin cache-a), asi que el directorio de la celda es su unico subdirectorio.
