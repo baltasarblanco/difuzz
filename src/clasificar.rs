@@ -299,6 +299,17 @@ pub fn clasificar<'a>(
                     ),
                 );
             }
+            Ok(Sloppy::Renombrando) => {
+                flags.push("solo_sloppy");
+                why = Some(format!("{razon} (con el binding `arguments` renombrado: ligarlo solo es valido en sloppy)"));
+                traza.paso(
+                    "solo_sloppy",
+                    format!(
+                        "Explica (con el binding `arguments` renombrado a {}, sin \"use strict\", el original da lo mismo y la divergencia desaparece: ligar `arguments` solo es valido en sloppy)",
+                        recheck::ARGUMENTS_RENOMBRADO
+                    ),
+                );
+            }
             Ok(Sloppy::No) => traza.paso("solo_sloppy", "NoExplica (con \"use strict\" sigue)"),
             Err(nota) => {
                 traza.paso("solo_sloppy", format!("Inconcluso: {nota}"));
@@ -414,6 +425,8 @@ fn names_only(runner: &runner::Runner, cfg: &minify::Config, original: &str, a: 
 /// divergencia sigue, `extends` no la explica (`false`). Si no hay nada que
 /// cambiar o algo falla, inconcluso (b1-b: antes `true`, se conservaba el flag).
 /// El veredicto es el de recheck::veredicto (camino incluido).
+/// n-principio (n01/n02/n04: `extends 1` atrapado y el bug en el catch, que con
+/// `extends null` no corre): rige `recheck::veredicto_neutralizado` (B == A').
 fn extends_matters(
     runner: &runner::Runner,
     recheck: Medido,
@@ -441,7 +454,7 @@ fn extends_matters(
         return recheck::Recheck::Inconcluso(format!("la variante con `extends null` no termino ({:?})", a2.status));
     }
     let b2 = runner.run(&m2);
-    recheck::veredicto(a, b, &a2, &b2)
+    recheck::veredicto_neutralizado(a, b, &a2, &b2, None)
 }
 
 /// b1-b: aplica a `flags` el resultado del re-chequeo de `flag`. Solo `Explica`
@@ -517,6 +530,17 @@ fn depth_recheck(
 /// (`SiRenombrando`). Si renombrar no alcanza para que compile, sigue `Err`.
 /// B1 (revision-b456): ademas el renombre solo (en sloppy) tiene que dar lo mismo
 /// que A; si no, `Err` (el renombre cambio el programa, p. ej. `var arguments;`).
+/// n-principio: rige `recheck::veredicto_neutralizado` (B == A'): con `veredicto`, un
+/// bug en la rama que solo corre en sloppy (n33: `f() === undefined ? "estricto" :
+/// Math.cbrt(-8)`; n34: A' == A por construccion) iba a known/. Para el binding
+/// `arguments` se prueba antes el renombre SOLO, en sloppy y minificado igual
+/// (`Sloppy::Renombrando`): A con el binding renombrado ya da lo mismo que A (B1), asi
+/// que el renombre no cambia ningun camino; si ademas el minificado del renombrado da
+/// lo mismo que A, lo unico que separa a B de un minificado correcto es el NOMBRE del
+/// binding, y ligar `arguments` solo es valido en sloppy (collapse_vars_arguments: oxc
+/// confunde el `arguments` propio de `inner` con el binding de afuera). Un bug que no
+/// depende del nombre sigue en el minificado del renombrado (NoExplica por ese lado) y
+/// cae al estricto con B == A'.
 fn sloppy_only(
     runner: &runner::Runner,
     (minifier, preset): (backend::Minifier, minify::Preset),
@@ -552,6 +576,14 @@ fn sloppy_only(
                         a_ren.status
                     ));
                 }
+                // n-principio: el renombre solo, minificado igual (ver el comentario de la funcion).
+                let cfg = preset.build(minifier, minify::SourceKind::Script);
+                if let minify::Outcome::Ok { minified: m_ren, .. } = minify::prepare(ren, &cfg) {
+                    let b_ren = runner.run(&m_ren);
+                    if matches!(oracle::compare(a, &b_ren), oracle::Verdict::Same) {
+                        return Ok(Sloppy::Renombrando);
+                    }
+                }
                 strict = v;
                 si = Sloppy::SiRenombrando;
             }
@@ -567,7 +599,7 @@ fn sloppy_only(
         return Err(format!("re-chequeo sloppy inconcluso: la variante estricta no termino ({:?})", a2.status));
     }
     let b2 = runner.run(&m2);
-    match recheck::veredicto(a, b, &a2, &b2) {
+    match recheck::veredicto_neutralizado(a, b, &a2, &b2, None) {
         recheck::Recheck::Explica => Ok(si),
         recheck::Recheck::NoExplica => Ok(Sloppy::No),
         recheck::Recheck::Inconcluso(n) => Err(format!("re-chequeo sloppy inconcluso: {n}")),
@@ -583,6 +615,9 @@ enum Sloppy {
     Si,
     /// Idem, con el binding `arguments` renombrado (si no, no compilaba).
     SiRenombrando,
+    /// n-principio: con el binding `arguments` renombrado (sin "use strict") la
+    /// divergencia ya desaparece: la explica ligar `arguments`, valido solo en sloppy.
+    Renombrando,
 }
 
 /// R2-H12: la nota cuando node rechaza la variante estricta. `node --check` no
@@ -680,10 +715,24 @@ mod tests {
         };
         // terser/compress/dead_code/dead_code_2_should_warn (corpus completo): `g`
         // es una funcion en bloque (Anexo B, solo sloppy). En sloppy `g()` da
-        // TypeError, en estricto ReferenceError: mismo punto, se acepta como sloppy.
+        // TypeError, en estricto ReferenceError: mismo punto. Se aceptaba como sloppy
+        // (`mismo_camino`). n-principio: B (`throw Error`) no es A' (`throw ReferenceError`)
+        // y con la misma forma pasaba n34 (A' == A, el bug en la rama sloppy): inconcluso.
         let (o, a, b) = ab("function f(){g();x=10;throw new Error(`foo`);if(x){y();var x;function g(){}(function(){var q;function y(){}})()}}f();\n");
         assert_eq!(a.stdout, "!dz throw TypeError\n");
-        assert_eq!(sloppy_only(&r, (Minifier::Oxc, Preset::CoreDefaults), &o, &a, &b), Ok(super::Sloppy::Si));
+        let s = sloppy_only(&r, (Minifier::Oxc, Preset::CoreDefaults), &o, &a, &b);
+        assert!(s.as_ref().is_err_and(|n| n.contains("B != A'")), "{s:?}");
+        // n-principio (n33, n34): el bug en la rama que solo corre en sloppy. Con `veredicto`
+        // iban a known/ (`localizada` y `mismo_camino`); ahora inconcluso.
+        for src in [
+            "function f() { return this; }\nvar r = f() === undefined ? \"estricto\" : Math.cbrt(-8);\nconsole.log(r);\n",
+            "function f() { return this; }\nvar r = f() === undefined ? \"s\" : (Math.cbrt(-8) < 0 ? \"s\" : \"x\");\nconsole.log(r);\n",
+        ] {
+            let (o, a, b) = ab(src);
+            assert_ne!(b.stdout, a.stdout, "oxc ya no pliega mal Math.cbrt(-8): buscar otro bug");
+            let s = sloppy_only(&r, (Minifier::Oxc, Preset::CoreDefaults), &o, &a, &b);
+            assert!(s.as_ref().is_err_and(|n| n.contains("B != A'")), "{src}: {s:?}");
+        }
         let with = "with ({}) { console.log(1); }\n";
         assert!(sloppy_only(&r, (Minifier::Oxc, Preset::CarrilA), with, &r.run(with), &r.run(with)).is_err());
         let (o, a, b) = ab("const __proto__ = 0;\nconsole.log(Object.keys({ __proto__ }));\n");
@@ -695,7 +744,7 @@ mod tests {
         assert_eq!(a.stdout, "rest\nfin\n");
         assert_ne!(b.stdout, a.stdout, "oxc ya no tiene el bug de 9460: buscar otro");
         let s = sloppy_only(&r, (Minifier::Oxc, Preset::CoreDefaults), &o, &a, &b);
-        assert!(s.as_ref().is_err_and(|n| n.contains("otro camino")), "{s:?}");
+        assert!(s.as_ref().is_err_and(|n| n.contains("B != A'")), "{s:?}");
     }
 
     /// R2-H10: un original que liga `arguments` no compila en estricto. El
@@ -725,7 +774,9 @@ mod tests {
             let (o, a, b) = ab(cva, preset);
             assert_eq!(a.stdout, "[Arguments] { '0': 7, '1': 1 }\n");
             assert_ne!(b.stdout, a.stdout, "oxc ya no tiene el bug de collapse_vars_arguments: buscar otro");
-            assert_eq!(sloppy_only(&r, (Minifier::Oxc, preset), &o, &a, &b), Ok(Sloppy::SiRenombrando), "{preset:?}");
+            // n-principio: con el renombre solo (sin "use strict") el minificado ya da lo mismo.
+            // Antes SiRenombrando (estricto + `mismo_camino`, que ya no rige).
+            assert_eq!(sloppy_only(&r, (Minifier::Oxc, preset), &o, &a, &b), Ok(Sloppy::Renombrando), "{preset:?}");
         }
         // Miente: `var arguments` inofensivo y el bug de 9460 (IIFE con rest y
         // default con efecto) en otra sentencia. Renombrado y en estricto, el bug sigue.
@@ -750,7 +801,14 @@ mod tests {
         assert_eq!(a.stdout, "rest\nfin\n");
         assert_ne!(b.stdout, a.stdout);
         let s = sloppy_only(&r, (Minifier::Oxc, Preset::CoreDefaults), &o, &a, &b);
-        assert!(s.as_ref().is_err_and(|n| n.contains("otro camino")), "{s:?}");
+        assert!(s.as_ref().is_err_and(|n| n.contains("B != A'")), "{s:?}");
+        // n-principio: n34 con un `var arguments` inofensivo (para tomar el camino del
+        // renombre). El renombre solo no apaga el bug (sigue en la rama sloppy) y en estricto
+        // B != A': inconcluso. Con `veredicto` (`mismo_camino`) era SiRenombrando, known/.
+        let (o, a, b) = ab("function g() { var arguments = 1; return arguments; }\ng();\nfunction f() { return this; }\nvar r = f() === undefined ? \"s\" : (Math.cbrt(-8) < 0 ? \"s\" : \"x\");\nconsole.log(r);\n", Preset::CoreDefaults);
+        assert_eq!((a.stdout.as_str(), b.stdout.as_str()), ("s\n", "x\n"));
+        let s = sloppy_only(&r, (Minifier::Oxc, Preset::CoreDefaults), &o, &a, &b);
+        assert!(s.as_ref().is_err_and(|n| n.contains("B != A'")), "{s:?}");
     }
 
     /// R2-H12: "no es estricto-valido" solo ante un SyntaxError; un RangeError
@@ -903,7 +961,17 @@ mod tests {
         let cfg = preset.build(Minifier::Oxc, kind);
         // Issue A de ENVIAR.md: el spread con getter se mueve (oxc imprime "FAIL").
         let bug = "let result = \"FAIL\";\nconst o = { ...{ get prop() { result = \"PASS\"; } } };\nconsole.log(result);\nconsole.log(o);\n";
-        let casos: [(&str, String, bool, &str); 13] = [
+        let casos: [(&str, String, bool, &str); 22] = [
+            // n-principio (noche2/n-principio/corpus-ataque): el bug en la rama que solo corre con
+            // la violacion (A=-2, B=NaN). Con `veredicto` iban a known/ (`localizada`).
+            ("extends-adentro", "let r = \"none\";\ntry { class A extends 1 {} r = typeof A; } catch (e) { r = Math.cbrt(-8); }\nconsole.log(r);\n".into(), false, "  extends: Inconcluso"),
+            ("with-adentro", "var o = { k: 1 };\nvar r;\nwith (o) { r = typeof k !== \"undefined\" ? Math.cbrt(-8) : \"nok\"; }\nconsole.log(r);\n".into(), false, "  with: Inconcluso"),
+            ("global-adentro", "var r;\ntry { r = window.location ? \"nav\" : \"x\"; } catch (e) { r = Math.cbrt(-8); }\nconsole.log(r);\n".into(), false, "  global_conocido: Inconcluso"),
+            ("violacion-adentro", "let r = \"none\";\ntry { r = String(x); } catch (e) { r = Math.cbrt(-8); }\nconsole.log(r);\nlet x = 1;\n".into(), false, "  violaciones: Inconcluso"),
+            ("sloppy-adentro", "function f() { return this; }\nvar r = f() === undefined ? \"estricto\" : Math.cbrt(-8);\nconsole.log(r);\n".into(), false, "  solo_sloppy: Inconcluso"),
+            // ... y sus positivos (oxc usa la asuncion y B se comporta como A'): siguen en known/.
+            ("extends-pos", "try { class A extends 1 {} console.log(\"no lanzo\"); } catch (e) { console.log(\"lanzo\"); }\n".into(), true, "  extends: Explica"),
+            ("global-pos", "try { window; console.log(1); } catch (e) { console.log(2); }\n".into(), true, "  global_conocido: Explica"),
             // Paso 7 (revision-tint B1, corpus-adv r05/r10/r07/r09): el bug vive adentro de lo
             // que el re-chequeo neutraliza. Con el paso 6 iban a known/ (`localizada`).
             ("builtins-adentro", "Array.prototype.includes = function (v) { return Math.cbrt(-8); };\nvar arr = [1];\narr.push(2);\nconsole.log(arr.includes(2));\n".into(), false, "  builtins: Inconcluso"),
@@ -917,7 +985,11 @@ mod tests {
             ("builtins-neg", format!("Array.prototype.ultimo = function () {{ return 1; }};\n{bug}"), false, "  builtins: NoExplica -> builtins_irrelevante"),
             ("tostring-pos", "function suma(primero, segundo) { return primero + segundo; }\nconsole.log(String(suma));\n".into(), true, "  contenido: Explica"),
             ("tostring-neg", format!("function f() {{ return 1; }}\nconsole.log(String(f).length);\n{bug}"), false, "  contenido: NoExplica -> contenido_irrelevante (con el contenido fijo"),
-            ("stack-pos", "function falla() {\n  var nada = null;\n  return nada.x;\n}\ntry { falla(); } catch (e) { console.log(e.stack); }\n".into(), true, "  contenido: Explica"),
+            // n-principio (n-ruido r03): un marco con otro nombre ya no es "contenido"; el mangling
+            // de core_defaults (`at falla` -> `at e`) pasa a div/. El positivo es solo de posicion.
+            ("stack-mangling", "function falla() {\n  var nada = null;\n  return nada.x;\n}\ntry { falla(); } catch (e) { console.log(e.stack); }\n".into(), false, "  contenido: Inconcluso"),
+            ("stack-pos", "var nada = null;\n\ntry {   nada.x; } catch (e) { console.log(e.stack); }\n".into(), true, "  contenido: Explica"),
+            ("stack-nombre", "var ok = delete (0 / 0);\nfunction pasa() { return new Error(\"x\").stack; }\nfunction falla() { return new Error(\"x\").stack; }\nconsole.log((ok ? pasa : falla)());\n".into(), false, "  contenido: Inconcluso"),
             ("stack-neg", format!("try {{ null.x; }} catch (e) {{ console.log(e.stack.split(\"\\n\").length); }}\n{bug}"), false, "  contenido: NoExplica"),
             ("profundidad-neg", "let n = 0;\nfunction r() { n++; r(); }\ntry { r(); } catch (e) {}\nlet result = \"FAIL\";\nconst o = { ...{ get prop() { result = \"PASS\"; } } };\nconsole.log(n, result);\nconsole.log(o);\n".into(), false, "  profundidad: NoExplica"),
         ];

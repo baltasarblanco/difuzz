@@ -254,11 +254,21 @@ Principios:
     ahí adentro, A' y B' lo saltean los dos). Hace falta además que B dé lo mismo que A' (el
     minificado de verdad se comporta como el original neutralizado). En el contenido también
     vale que B difiera de A solo en líneas que muestran el contenido (en A' el texto fijo o un
-    marco fijo, y en A el contenido de verdad).
-  - `extends`, `with`, `global_conocido`, las violaciones que ubica el sensor (TDZ, atrapada o
-    no; coerción de `Symbol`; `extends` atrapado) y solo sloppy, en oxc: B' == A' y que el
-    camino se sostenga (A' da lo mismo que A, B lo mismo que A', o B difiere de A solo en líneas
-    que también cambian en A').
+    marco fijo, y en A el contenido de verdad); un marco solo puede cambiar la posición
+    (`archivo:L:C`): otro nombre, otro orden u otra cantidad de marcos es otro camino.
+  - `extends` (el heredero literal pasa a `null`), `with` (sin el scope), `global_conocido`
+    (stubs), las violaciones que ubica el sensor (TDZ, atrapada o no; coerción de `Symbol`;
+    `extends` atrapado: cada una pasa a algo que no lanza) y solo sloppy (`"use strict"`), en
+    oxc: la misma vara, B' == A' y B == A'. Acá la neutralización no apaga el código de la
+    asunción pero cambia el camino: lo que solo corre CON la violación (el `catch` de la TDZ, la
+    rama sin `window`, la rama sloppy) no corre en A' ni en B', y un bug ahí iba a `known/`
+    cuando alcanzaba con que A' diera lo mismo que A o que B difiriera solo en líneas que A'
+    también cambia (medido con oxc 0.153.0: 17 programas, 116 de 264 divergencias en 8 celdas).
+    Una TDZ que V8 ubica en un `return`/`throw` (no en el identificador) se neutraliza si la
+    sentencia tiene un solo identificador ligado con `let`/`const`/`class`; si no, inconcluso.
+    Para un original que liga `arguments` (no compila en estricto), primero se prueba el
+    renombre solo: si A con el binding renombrado da lo mismo que A y su minificado también,
+    la divergencia la explica ligar `arguments`, válido solo en sloppy.
   - los nombres (minificar preservándolos), en los dos: que la divergencia desaparezca.
 
   En oxc todos los flags de su tabla tienen re-chequeo. En swc, `proxy`, `tdz`, `callee`,
@@ -268,10 +278,15 @@ Principios:
   **Límites conocidos** (lo que no se prueba): el re-chequeo compara salidas, no caminos. Un
   programa armado para que la salida con el bug coincida justo con la del original neutralizado
   (o que imprima a propósito una línea con forma de marco de V8 en la rama del contenido fijo)
-  termina en `known/` (los dos casos se midieron así con oxc 0.153.0). Los
-  re-chequeos de la segunda lista siguen aceptando una divergencia confinada a las líneas que la
-  neutralización cambia; si el bug vive en el código que esa neutralización apaga, es el mismo
-  agujero (no medido para esos flags).
+  termina en `known/` (los dos casos se midieron así con oxc 0.153.0). Un bug que está en el
+  programa pero que B no ejecuta (oxc borró la sentencia que lanza y con eso el `catch` que lo
+  tenía) no deja rastro en la salida: la divergencia es entera de la asunción y va a `known/`.
+  Lo que se pierde por exigir B == A' (van a `div/`): los positivos en que B no da ni lo de A
+  ni lo de A' (con `with`, terser `issue_1105/assorted_*`: oxc pasa `0/0` a `NaN`, que adentro
+  del `with` resuelve a la propiedad del objeto; en sloppy, terser `dead_code_2_should_warn` y
+  `dead_code_constant_boolean_should_warn_more`: funciones en bloque de Anexo B), y un `.stack`
+  impreso en que el minificado cambia el nombre de un marco (el mangling de `core_defaults`) o
+  la cantidad de marcos (inlining).
 - **Un minificado que node no acepta nunca se explica con una asunción**: ninguna permite
   producir código inválido.
 - **Una conocida que cambia de síntoma vuelve a `div/`** (se compara contra
@@ -303,8 +318,8 @@ Sin `node` en el `PATH`, los tests que lo necesitan fallan con un mensaje claro.
 
 - **Golden de detección** (`tests/golden/`): 16 casos con bugs conocidos de oxc y swc, en 8
   celdas, más `--invocar` y `--stubs`; la clase esperada de cada caso está en `esperado.tsv`.
-- **Aceptación de los re-chequeos** (`tests/aceptacion/rechequeos/`): 62 casos que combinan un
-  bug real de oxc con un flag de asunción, en las 4 celdas de oxc (248 comparaciones).
+- **Aceptación de los re-chequeos** (`tests/aceptacion/rechequeos/`): 90 casos que combinan un
+  bug real de oxc con un flag de asunción, en las 4 celdas de oxc (360 comparaciones).
 
 ```sh
 tests/golden/verificar.sh --jobs 4                    # sale con 0 y "comparaciones=N fallas=0"

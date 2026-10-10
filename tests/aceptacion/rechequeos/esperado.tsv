@@ -185,9 +185,12 @@
 17-a04-stack-getter	oxc-a-carril_a	div:Stdout
 17-a04-stack-getter	oxc-b-core_defaults	div:Stdout
 17-a04-stack-getter	oxc-b-carril_a	div:Stdout
-17-stack-positivo	oxc-a-core_defaults	known
+# n-principio: en core_defaults el minificado renombra el marco (`at falla` -> `at e`); un marco con otro
+# nombre ya no se acepta como contenido (puede ser otra funcion: n-ruido r03), asi que pasa a div/. En carril_a
+# (keep_fnames) solo cambian las posiciones: known/.
+17-stack-positivo	oxc-a-core_defaults	div:Stdout
 17-stack-positivo	oxc-a-carril_a	known
-17-stack-positivo	oxc-b-core_defaults	known
+17-stack-positivo	oxc-b-core_defaults	div:Stdout
 17-stack-positivo	oxc-b-carril_a	known
 # profundidad (M16): el bug en la MISMA linea que la cuenta de pila pasaba `localizada`. Ahora B tambien corre
 # con mas pila y rige `veredicto`. Costo (decision abierta): una cuenta de marcos sin tope (18-profundidad-cuenta)
@@ -288,3 +291,126 @@
 20-p05-profundidad-catch-misma-linea	oxc-a-carril_a	div:Stdout
 20-p05-profundidad-catch-misma-linea	oxc-b-core_defaults	div:Stdout
 20-p05-profundidad-catch-misma-linea	oxc-b-carril_a	div:Stdout
+# n-principio (09-oct, noche): los re-chequeos que seguian con `veredicto` (extends, with, global_conocido,
+# violaciones, solo sloppy). El bug (`Math.cbrt(-8)` -> NaN, `delete (0/0)`, `substring`, `isInteger`) vive en la
+# rama que solo corre CON la violacion (el catch, la rama sin `window`, la del scope del `with`, la sloppy), o A'
+# da lo mismo que A por construccion (`-mismo-camino`). Con el binario de 5cc705f iban a known/ (MEDIDO,
+# noche2/n-principio/out-ataque-antes: 17 casos, 116 filas en 8 celdas). Ahora rige `veredicto_neutralizado`
+# (B == A'): div/. n15/n16/n38: la TDZ en un `return` (V8 la ubica en la sentencia; se neutraliza el unico
+# candidato): n15 (bug en el catch) div/, n16 (bug en la misma sentencia) div/, n38 positivo known/. n09, n20:
+# positivos (oxc borra lo que lanza, B == A'). n27: positivo con `with` en que B no es ni A ni A' (como terser
+# issue_1105): pasa de known/ a div/ (gana el principio). En B, `with` no parsea (descarte) y en modulo `this` es
+# undefined (n33/n34 no divergen: igual). n06 en B: `delete NaN` no parsea en estricto (ThrowNew).
+21-n01-extends-catch	oxc-a-core_defaults	div:Stdout
+21-n01-extends-catch	oxc-a-carril_a	div:Stdout
+21-n01-extends-catch	oxc-b-core_defaults	div:Stdout
+21-n01-extends-catch	oxc-b-carril_a	div:Stdout
+21-n02-extends-mismo-camino	oxc-a-core_defaults	div:Stdout
+21-n02-extends-mismo-camino	oxc-a-carril_a	div:Stdout
+21-n02-extends-mismo-camino	oxc-b-core_defaults	div:Stdout
+21-n02-extends-mismo-camino	oxc-b-carril_a	div:Stdout
+21-n04-extends-try-en-catch	oxc-a-core_defaults	div:Stdout
+21-n04-extends-try-en-catch	oxc-a-carril_a	div:Stdout
+21-n04-extends-try-en-catch	oxc-b-core_defaults	div:Stdout
+21-n04-extends-try-en-catch	oxc-b-carril_a	div:Stdout
+21-n06-xatr-catch	oxc-a-core_defaults	div:Stdout
+21-n06-xatr-catch	oxc-a-carril_a	div:Stdout
+21-n06-xatr-catch	oxc-b-core_defaults	div:ThrowNew
+21-n06-xatr-catch	oxc-b-carril_a	div:ThrowNew
+21-n07-xatr-mismo-camino	oxc-a-core_defaults	div:Stdout
+21-n07-xatr-mismo-camino	oxc-a-carril_a	div:Stdout
+21-n07-xatr-mismo-camino	oxc-b-core_defaults	div:Stdout
+21-n07-xatr-mismo-camino	oxc-b-carril_a	div:Stdout
+21-n09-xatr-positivo	oxc-a-core_defaults	known
+21-n09-xatr-positivo	oxc-a-carril_a	known
+21-n09-xatr-positivo	oxc-b-core_defaults	known
+21-n09-xatr-positivo	oxc-b-carril_a	known
+21-n10-tdz-catch	oxc-a-core_defaults	div:Stdout
+21-n10-tdz-catch	oxc-a-carril_a	div:Stdout
+21-n10-tdz-catch	oxc-b-core_defaults	div:Stdout
+21-n10-tdz-catch	oxc-b-carril_a	div:Stdout
+21-n11-tdz-mismo-camino	oxc-a-core_defaults	div:Stdout
+21-n11-tdz-mismo-camino	oxc-a-carril_a	div:Stdout
+21-n11-tdz-mismo-camino	oxc-b-core_defaults	div:Stdout
+21-n11-tdz-mismo-camino	oxc-b-carril_a	div:Stdout
+21-n12-tdz-isinteger-catch	oxc-a-core_defaults	div:Stdout
+21-n12-tdz-isinteger-catch	oxc-a-carril_a	div:Stdout
+21-n12-tdz-isinteger-catch	oxc-b-core_defaults	div:Stdout
+21-n12-tdz-isinteger-catch	oxc-b-carril_a	div:Stdout
+21-n15-tdz-return-catch	oxc-a-core_defaults	div:Stdout
+21-n15-tdz-return-catch	oxc-a-carril_a	div:Stdout
+21-n15-tdz-return-catch	oxc-b-core_defaults	div:Stdout
+21-n15-tdz-return-catch	oxc-b-carril_a	div:Stdout
+21-n16-tdz-return-misma-sentencia	oxc-a-core_defaults	div:Stdout
+21-n16-tdz-return-misma-sentencia	oxc-a-carril_a	div:Stdout
+21-n16-tdz-return-misma-sentencia	oxc-b-core_defaults	div:Stdout
+21-n16-tdz-return-misma-sentencia	oxc-b-carril_a	div:Stdout
+21-n17-sym-catch	oxc-a-core_defaults	div:Stdout
+21-n17-sym-catch	oxc-a-carril_a	div:Stdout
+21-n17-sym-catch	oxc-b-core_defaults	div:Stdout
+21-n17-sym-catch	oxc-b-carril_a	div:Stdout
+21-n18-sym-mismo-camino	oxc-a-core_defaults	div:Stdout
+21-n18-sym-mismo-camino	oxc-a-carril_a	div:Stdout
+21-n18-sym-mismo-camino	oxc-b-core_defaults	div:Stdout
+21-n18-sym-mismo-camino	oxc-b-carril_a	div:Stdout
+21-n20-sym-positivo	oxc-a-core_defaults	known
+21-n20-sym-positivo	oxc-a-carril_a	known
+21-n20-sym-positivo	oxc-b-core_defaults	known
+21-n20-sym-positivo	oxc-b-carril_a	known
+21-n23-with-rama	oxc-a-core_defaults	div:Stdout
+21-n23-with-rama	oxc-a-carril_a	div:Stdout
+21-n23-with-rama	oxc-b-core_defaults	descarte:parse_script
+21-n23-with-rama	oxc-b-carril_a	descarte:parse_script
+21-n24-with-mismo-camino	oxc-a-core_defaults	div:Stdout
+21-n24-with-mismo-camino	oxc-a-carril_a	div:Stdout
+21-n24-with-mismo-camino	oxc-b-core_defaults	descarte:parse_script
+21-n24-with-mismo-camino	oxc-b-carril_a	descarte:parse_script
+21-n27-with-positivo	oxc-a-core_defaults	div:Stdout
+21-n27-with-positivo	oxc-a-carril_a	div:Stdout
+21-n27-with-positivo	oxc-b-core_defaults	descarte:parse_script
+21-n27-with-positivo	oxc-b-carril_a	descarte:parse_script
+21-n28-global-catch	oxc-a-core_defaults	div:Stdout
+21-n28-global-catch	oxc-a-carril_a	div:Stdout
+21-n28-global-catch	oxc-b-core_defaults	div:Stdout
+21-n28-global-catch	oxc-b-carril_a	div:Stdout
+21-n29-global-rama	oxc-a-core_defaults	div:Stdout
+21-n29-global-rama	oxc-a-carril_a	div:Stdout
+21-n29-global-rama	oxc-b-core_defaults	div:Stdout
+21-n29-global-rama	oxc-b-carril_a	div:Stdout
+21-n30-global-mismo-camino	oxc-a-core_defaults	div:Stdout
+21-n30-global-mismo-camino	oxc-a-carril_a	div:Stdout
+21-n30-global-mismo-camino	oxc-b-core_defaults	div:Stdout
+21-n30-global-mismo-camino	oxc-b-carril_a	div:Stdout
+21-n33-sloppy-rama	oxc-a-core_defaults	div:Stdout
+21-n33-sloppy-rama	oxc-a-carril_a	div:Stdout
+21-n34-sloppy-mismo-camino	oxc-a-core_defaults	div:Stdout
+21-n34-sloppy-mismo-camino	oxc-a-carril_a	div:Stdout
+21-n38-tdz-return-positivo	oxc-a-core_defaults	known
+21-n38-tdz-return-positivo	oxc-a-carril_a	known
+21-n38-tdz-return-positivo	oxc-b-core_defaults	known
+21-n38-tdz-return-positivo	oxc-b-carril_a	known
+# n-principio, item de n-ruido (noche2/n-ruido/corpus-ruido-adv, bug O4 `delete (0/0)`): el bug cambia el nombre
+# (r03), la cuenta (r02) o el orden (r09) de los marcos de un `.stack` impreso. `localizada_con_marca` aceptaba
+# cualquier par de marcos donde A' tiene `    at dz`: known/ en las 4 celdas de carril A con el binario de 5cc705f
+# (MEDIDO, noche2/n-principio/out-stack-antes). Ahora un marco solo puede cambiar la posicion: div/. r01 (bug en la
+# cabecera) y r04 (stack en un string) son controles. En carril B `delete NaN` no parsea en estricto (ThrowNew).
+22-r01-stack-cabecera	oxc-a-core_defaults	div:Stdout
+22-r01-stack-cabecera	oxc-a-carril_a	div:Stdout
+22-r01-stack-cabecera	oxc-b-core_defaults	div:ThrowNew
+22-r01-stack-cabecera	oxc-b-carril_a	div:ThrowNew
+22-r02-stack-cuenta-marcos	oxc-a-core_defaults	div:Stdout
+22-r02-stack-cuenta-marcos	oxc-a-carril_a	div:Stdout
+22-r02-stack-cuenta-marcos	oxc-b-core_defaults	div:ThrowNew
+22-r02-stack-cuenta-marcos	oxc-b-carril_a	div:ThrowNew
+22-r03-stack-nombre-marco	oxc-a-core_defaults	div:Stdout
+22-r03-stack-nombre-marco	oxc-a-carril_a	div:Stdout
+22-r03-stack-nombre-marco	oxc-b-core_defaults	div:ThrowNew
+22-r03-stack-nombre-marco	oxc-b-carril_a	div:ThrowNew
+22-r04-stack-en-string	oxc-a-core_defaults	div:Stdout
+22-r04-stack-en-string	oxc-a-carril_a	div:Stdout
+22-r04-stack-en-string	oxc-b-core_defaults	div:ThrowNew
+22-r04-stack-en-string	oxc-b-carril_a	div:ThrowNew
+22-r09-stack-orden-marcos	oxc-a-core_defaults	div:Stdout
+22-r09-stack-orden-marcos	oxc-a-carril_a	div:Stdout
+22-r09-stack-orden-marcos	oxc-b-core_defaults	div:ThrowNew
+22-r09-stack-orden-marcos	oxc-b-carril_a	div:ThrowNew

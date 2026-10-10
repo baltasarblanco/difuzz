@@ -22,6 +22,14 @@
 //! original no termina, el original modificado toma otro camino) el flag se
 //! conservaba y un bug real podia terminar en known/. Ahora la duda va a div/
 //! con una nota en meta.txt (`Recheck::Inconcluso`).
+//!
+//! n-principio (09-oct, noche): `extends`, `with`, `global_conocido`, las violaciones y
+//! solo sloppy tambien rigen por `veredicto_neutralizado` (B == A'). `veredicto` (con
+//! `mismo_camino` y `localizada`) mandaba a known/ un bug real en la rama que solo corre
+//! con la violacion (el catch de la TDZ, la rama sin `window`, la rama sloppy, la rama
+//! que depende del scope del `with`): MEDIDO, 17 casos y 116 filas de 8 celdas de oxc
+//! (noche2/n-principio/corpus-ataque). Se borraron `veredicto`, `mismo_camino` y
+//! `localizada`: ya nadie los usa.
 
 use std::panic::{catch_unwind, AssertUnwindSafe};
 
@@ -45,84 +53,6 @@ pub enum Recheck {
     Inconcluso(String),
 }
 
-/// b1-b: `a`/`b` son el original y el minificado de verdad; `a2`/`b2`, los dos
-/// con la asuncion neutralizada (o satisfecha: stubs, "use strict"). Es
-/// concluyente que la asuncion explica la divergencia si:
-/// 1. `a2` termina solo y `b2` tambien (un Timeout no es evidencia),
-/// 2. `b2` da lo mismo que `a2` (la divergencia desaparece), y
-/// 3. el camino se sostiene: o `a2` da lo mismo que `a` (la modificacion no
-///    cambia lo que hace el original), o `b` da lo mismo que `a2` (el minificado
-///    de verdad ya se comporta como el original bajo la asuncion: es justo lo
-///    que el minifier asumio), o la divergencia esta confinada a las lineas que
-///    la asuncion cambia (`localizada`).
-///
-/// DESVIO de la propuesta de los revisores (exigir solo `a2 == a`): con eso los
-/// positivos reales de `global_conocido`, `with` y `extends` irian a div/, porque
-/// ahi la asuncion cambia el camino a proposito (con `window` definido el
-/// original imprime otra cosa). El punto 3 los conserva y sigue mandando a div/
-/// los `10-rt-*-miente` de sloppy y global (ahi `b` no es `a2`: el minifier no
-/// uso la asuncion, rompio otra rama).
-pub fn veredicto(a: &runner::Exec, b: &runner::Exec, a2: &runner::Exec, b2: &runner::Exec) -> Recheck {
-    if !a2.completed() {
-        return Recheck::Inconcluso(format!("el original modificado no termino ({:?})", a2.status));
-    }
-    if matches!(b2.status, runner::Status::Timeout | runner::Status::Failed(_)) {
-        return Recheck::Inconcluso(format!("el minificado modificado no termino ({:?})", b2.status));
-    }
-    if !matches!(oracle::compare(a2, b2), oracle::Verdict::Same) {
-        return Recheck::NoExplica;
-    }
-    if mismo_camino(a, a2) || matches!(oracle::compare(a2, b), oracle::Verdict::Same) || localizada(a, b, a2) {
-        return Recheck::Explica;
-    }
-    Recheck::Inconcluso(
-        "con la asuncion neutralizada el original toma otro camino (A' != A) y el minificado no se comporta como A'".into(),
-    )
-}
-
-/// b1-b: la divergencia esta confinada a lo que la asuncion cambia: B termina
-/// solo, A, B y A' tienen la misma cantidad de lineas y cada linea en que B
-/// difiere de A es una en que A' tambien difiere de A. Es el caso de `with`
-/// (corpus completo, issue_1105/assorted_Infinity_NaN_undefined_in_with_scope:
-/// oxc reescribe `undefined` y `0/0` suponiendo que no hay scope; dentro del
-/// `with` eso da otros valores, ni los de A ni los de A'). Un bug en una linea
-/// que la asuncion no toca, o una linea de mas o de menos, no pasa.
-/// Paso 7 (revision-tint B1): M16 (clasificar::depth_recheck) y los re-chequeos de
-/// `builtins`, `coercion` y contenido ya no la usan (`veredicto_neutralizado`).
-///
-/// I1 (revision-b456, r08-readonly-getter): un throw de A' no es "una linea que la
-/// asuncion cambia" sino otro camino: corta el programa justo donde B difiere y
-/// la tapa (`NaN = 1` lanza en estricto en la linea del bug). Por eso A y A' tienen
-/// que lanzar los dos o ninguno, y una linea `!dz throw` de A' no cubre la
-/// diferencia de B en esa linea.
-pub fn localizada(a: &runner::Exec, b: &runner::Exec, a2: &runner::Exec) -> bool {
-    let lines = |e: &runner::Exec| oracle::normalize_names(&e.stdout).lines().map(String::from).collect::<Vec<_>>();
-    let (la, lb, l2) = (lines(a), lines(b), lines(a2));
-    let throw = format!("{}throw ", runner::DZ);
-    b.completed()
-        && a.threw() == a2.threw()
-        && la.len() == lb.len()
-        && la.len() == l2.len()
-        && la.iter().zip(&lb).zip(&l2).all(|((x, y), z)| x == y || (x != z && !z.starts_with(&throw)))
-}
-
-/// b1-b: A y A' recorren el mismo camino: dicen lo mismo, o imprimen lo mismo y
-/// los dos lanzan en el mismo punto con otro tipo. Lo segundo es el caso tipico
-/// de sloppy contra estricto (funcion en bloque de Anexo B: `g()` da TypeError en
-/// sloppy y ReferenceError en estricto; corpus completo, dead_code_2_should_warn).
-fn mismo_camino(a: &runner::Exec, a2: &runner::Exec) -> bool {
-    let sin_tipo = |e: &runner::Exec| {
-        let n = oracle::normalize_names(&e.stdout);
-        let pre = format!("{}throw ", runner::DZ);
-        let mut lines: Vec<&str> = n.lines().collect();
-        if let Some(i) = lines.iter().rposition(|l| l.starts_with(&pre)) {
-            lines[i] = "throw";
-        }
-        lines.join("\n")
-    };
-    crate::same_exec(a, a2) || (a.threw() && a2.threw() && sin_tipo(a) == sin_tipo(a2))
-}
-
 /// Paso 7 (revision-tint B1): el veredicto de los re-chequeos que NEUTRALIZAN el codigo
 /// en el que vive la asuncion (`builtins`: los pisados quedan fijos y el codigo que los
 /// pisa no corre; `coercion`: los helpers renombrados no corren; contenido: toString y
@@ -130,7 +60,7 @@ fn mismo_camino(a: &runner::Exec, a2: &runner::Exec) -> bool {
 /// adentro de ese codigo, A' y B' lo saltean los dos: B' == A' no prueba nada, y
 /// `mismo_camino` ni `localizada` tampoco (MEDIDO: revision-tint/corpus-adv, 12 de 15 a
 /// known/ con `veredicto`). Es concluyente solo si:
-/// 1. A' y B' terminan y B' da lo mismo que A' (como en `veredicto`), y
+/// 1. A' y B' terminan y B' da lo mismo que A' (la divergencia desaparece), y
 /// 2. B da lo mismo que A': el minificado de verdad ya se comporta como el original con
 ///    la asuncion neutralizada. Si el codigo neutralizado tuviera un bug que B ejecuta,
 ///    B no se comportaria como un programa que no lo ejecuta, salvo coincidencia exacta.
@@ -140,6 +70,16 @@ fn mismo_camino(a: &runner::Exec, a2: &runner::Exec) -> bool {
 /// quedaba tapado (corpus de aceptacion, 20-p01-builtins-mismo-camino).
 /// `salada`: solo para contenido, la corrida de A con el contenido salado; habilita la
 /// variante con marca de `localizada` (`localizada_con_marca`).
+///
+/// n-principio: rige tambien para `extends`, `with`, `global_conocido`, las violaciones
+/// y solo sloppy. Ahi la neutralizacion no apaga el codigo de la asuncion pero cambia el
+/// camino: el codigo que solo corre CON la violacion (el catch de la TDZ, la rama sin
+/// `window`, la rama sloppy) no corre en A' ni en B'. Con `veredicto` (que aceptaba A' ==
+/// A, o B distinto de A solo en lineas que A' tambien cambia) un bug ahi iba a known/:
+/// n01 (`extends 1` y `Math.cbrt(-8)` en el catch: A=-2, B=NaN, A'=function), n24 (A' ==
+/// A por construccion). Positivos que pierde (van a div/, gana el principio): los que
+/// dan en B algo que no es ni A ni A' (issue_1105 con `with`: oxc pasa `0/0` a `NaN`, que
+/// dentro del `with` resuelve a `o.NaN`; dead_code de terser con funciones en bloque).
 pub fn veredicto_neutralizado(
     a: &runner::Exec,
     b: &runner::Exec,
@@ -177,7 +117,8 @@ pub const SAL_TOSTRING: &str = "/*dz*/";
 /// `localizada` (B termina, A y A' lanzan los dos o ninguno, mismas lineas, A' cambia en
 /// cada linea en que B difiere de A), cada una de esas lineas tiene que MOSTRAR contenido:
 /// - un marco fijo: A' es exactamente `FIJO_MARCO` y A y B tambien son lineas de marco
-///   con la forma de V8 (`es_marco`);
+///   con la forma de V8 (`es_marco`); n-principio: y el mismo marco salvo la posicion
+///   (`cabeza_marco`);
 /// - un toString fijo: A' contiene `FIJO_TOSTRING`, A y B coinciden con A' fuera de cada
 ///   aparicion (el resto de la linea es igual), y en A con el contenido salado esa misma
 ///   linea trae la sal (el contenido de A fluye a esa linea, no solo decide un camino).
@@ -195,7 +136,11 @@ pub fn localizada_con_marca(a: &runner::Exec, b: &runner::Exec, a2: &runner::Exe
             return false;
         }
         if z == FIJO_MARCO {
-            return es_marco(x) && es_marco(y);
+            // n-principio (n-ruido r02/r03/r09): el mismo marco salvo la posicion. Antes valia
+            // cualquier par de marcos, y un bug que cambia el nombre (`at pasa` -> `at falla`), el
+            // orden o la cuenta de marcos (con `stackTraceLimit` = 10 se ve como nombres
+            // corridos) iba a known/ en carril A.
+            return es_marco(x) && es_marco(y) && cabeza_marco(x) == cabeza_marco(y);
         }
         if !z.contains(FIJO_TOSTRING) {
             return false;
@@ -227,6 +172,22 @@ fn es_marco(l: &str) -> bool {
     digitos(p.next()) && digitos(p.next()) && p.next().is_some_and(|s| !s.is_empty())
 }
 
+/// n-principio: lo que dice un marco de V8 ademas de su posicion: el nombre (con `new`/
+/// `async`/receptor) de `    at f (archivo:3:15)`, vacio para `    at archivo:3:15`, y la linea
+/// entera para `    at Array.map (<anonymous>)`. Lo que el minificado cambia sin cambiar el camino
+/// es la posicion; un nombre distinto (sin keep_fnames, el mangling de core_defaults) ya no se
+/// acepta como contenido: puede ser otra funcion.
+fn cabeza_marco(l: &str) -> Option<&str> {
+    let resto = l.strip_prefix("    at ")?;
+    if resto.ends_with("(<anonymous>)") {
+        return Some(resto);
+    }
+    match resto.rfind(" (") {
+        Some(i) if resto.ends_with(')') => Some(&resto[..i]),
+        _ => Some(""),
+    }
+}
+
 /// Paso 7: `s` es `partes` unidas por cualquier texto (cada separador, un comodin).
 fn encaja(partes: &[&str], s: &str) -> bool {
     let (Some(primera), Some(ultima)) = (partes.first(), partes.last()) else {
@@ -247,6 +208,8 @@ fn encaja(partes: &[&str], s: &str) -> bool {
 
 /// b1-b: `Explica` solo si la divergencia desaparece con los globals definidos
 /// y el camino se sostiene (`veredicto`).
+/// n-principio (n28/n29/n30: el bug en la rama sin `window`, que con el stub no corre):
+/// rige `veredicto_neutralizado`, B tiene que dar lo mismo que A'.
 pub fn globals_matter(
     r: &runner::Runner,
     kind: SourceKind,
@@ -272,11 +235,13 @@ pub fn globals_matter(
         return Recheck::Inconcluso(format!("el original con stubs de {g} no termino ({:?})", a2.status));
     }
     let b2 = r.run_with_globals(minified, &g);
-    veredicto(a, b, &a2, &b2)
+    veredicto_neutralizado(a, b, &a2, &b2, None)
 }
 
 /// b1-b: `Explica` solo si la divergencia desaparece sin el scope del `with` y
 /// el camino se sostiene (`veredicto`).
+/// n-principio (n23/n24: el bug en la rama que depende del scope): rige
+/// `veredicto_neutralizado`. issue_1105 (B no es ni A ni A') pasa a div/.
 pub fn with_matters(
     r: &runner::Runner,
     recheck: (backend::Minifier, minify::Preset, SourceKind),
@@ -304,7 +269,7 @@ pub fn with_matters(
         return Recheck::Inconcluso(format!("la variante sin `with` no termino ({:?})", a2.status));
     }
     let b2 = r.run(&m2);
-    veredicto(a, b, &a2, &b2)
+    veredicto_neutralizado(a, b, &a2, &b2, None)
 }
 
 /// t-principio: `fn_tostring` y `stack` (paso `contenido` de clasificar). Si A con
@@ -520,6 +485,8 @@ pub fn violaciones(a: &runner::Exec) -> Vec<&str> {
 /// desaparece y el camino se sostiene (`veredicto`). Se neutralizan todas las
 /// ubicadas, de las tres clases a la vez: con una sola, la variante podria seguir
 /// divergiendo por otra y el veredicto dependeria del orden.
+/// n-principio (n06/n07/n10/n11/n12/n17/n18: el bug en el catch de la violacion, que en
+/// A' no corre): rige `veredicto_neutralizado`, B tiene que dar lo mismo que A'.
 pub fn violaciones_matter(
     r: &runner::Runner,
     recheck: (backend::Minifier, minify::Preset, SourceKind),
@@ -555,7 +522,7 @@ pub fn violaciones_matter(
         return Recheck::Inconcluso(format!("la variante sin violaciones no termino ({:?})", a2.status));
     }
     let b2 = r.run(&m2);
-    veredicto(a, b, &a2, &b2)
+    veredicto_neutralizado(a, b, &a2, &b2, None)
 }
 
 /// b4-a: el programa con cada violacion de `spec` (`<clase> <linea>:<columna>`,
@@ -567,7 +534,100 @@ pub fn violaciones_matter(
 ///
 /// `None` si no parsea o si alguna violacion no se ubica (V8 da 0:0 para un
 /// heredero literal, p. ej.): un re-chequeo a medias no es concluyente.
+///
+/// n-principio (MEJORAS, Fase R I2): V8 ubica una TDZ dentro de `return`/`throw` en la
+/// SENTENCIA, no en el identificador (`function g() { return x; }` da la columna de
+/// `return`). Si una `tdz` no cae en un identificador, se busca un `return`/`throw` que
+/// empiece justo ahi y se cuentan sus candidatos: identificadores de su argumento cuyo
+/// nombre esta ligado con `let`/`const`/`class` en alguna parte del programa (los unicos
+/// que tienen TDZ), sin entrar en funciones, flechas ni clases anidadas (su cuerpo no
+/// corre ahi). Con exactamente uno, ese identificador (solo el) pasa a `void 0`; el
+/// resto de la sentencia queda, asi que un bug en la misma sentencia sigue en A' y B'.
+/// Con cero o mas de uno (`return a + b`, o `x` dos veces), no se ubica: `None`.
+/// Un candidato equivocado no manda a known/ un bug: `veredicto_neutralizado` exige
+/// B == A' (si el identificador cambiado no era el de la TDZ, A' sigue lanzando como A).
 pub fn neutralize_violaciones(src: &str, kind: SourceKind, spec: &str) -> Option<String> {
+    use std::collections::HashSet;
+    use swc_ecma_ast::{ArrowExpr, ClassDecl, Function, VarDecl, VarDeclKind};
+    use swc_ecma_visit::{Visit, VisitWith};
+    /// n-principio: los nombres ligados con `let`/`const`/`class` en cualquier scope.
+    struct Lexicos(HashSet<String>);
+    impl Visit for Lexicos {
+        fn visit_var_decl(&mut self, v: &VarDecl) {
+            if v.kind != VarDeclKind::Var {
+                struct Ligados<'a>(&'a mut HashSet<String>);
+                impl Visit for Ligados<'_> {
+                    fn visit_binding_ident(&mut self, b: &swc_ecma_ast::BindingIdent) {
+                        self.0.insert(b.id.sym.to_string());
+                    }
+                    fn visit_assign_pat_prop(&mut self, p: &swc_ecma_ast::AssignPatProp) {
+                        self.0.insert(p.key.id.sym.to_string());
+                    }
+                    fn visit_expr(&mut self, _: &Expr) {}
+                }
+                for d in &v.decls {
+                    d.name.visit_with(&mut Ligados(&mut self.0));
+                }
+            }
+            v.visit_children_with(self);
+        }
+        fn visit_class_decl(&mut self, c: &ClassDecl) {
+            self.0.insert(c.ident.sym.to_string());
+            c.visit_children_with(self);
+        }
+    }
+    /// n-principio: cuenta los candidatos de un argumento (sin entrar en lo anidado).
+    struct Candidatos<'a>(&'a HashSet<String>, usize);
+    impl Visit for Candidatos<'_> {
+        fn visit_function(&mut self, _: &Function) {}
+        fn visit_arrow_expr(&mut self, _: &ArrowExpr) {}
+        fn visit_class(&mut self, _: &Class) {}
+        fn visit_expr(&mut self, e: &Expr) {
+            if let Expr::Ident(i) = e {
+                self.1 += usize::from(self.0.contains(&*i.sym));
+            }
+            e.visit_children_with(self);
+        }
+    }
+    /// n-principio: cambia el (unico) candidato por `void 0`.
+    struct Cambia<'a>(&'a HashSet<String>);
+    impl VisitMut for Cambia<'_> {
+        fn visit_mut_function(&mut self, _: &mut Function) {}
+        fn visit_mut_arrow_expr(&mut self, _: &mut ArrowExpr) {}
+        fn visit_mut_class(&mut self, _: &mut Class) {}
+        fn visit_mut_expr(&mut self, e: &mut Expr) {
+            if matches!(e, Expr::Ident(i) if self.0.contains(&*i.sym)) {
+                *e = *Expr::undefined(DUMMY_SP);
+                return;
+            }
+            e.visit_mut_children_with(self);
+        }
+    }
+    /// n-principio: las `tdz` que no cayeron en un identificador, por sentencia.
+    struct Sentencia<'a>(&'a HashSet<String>, Vec<(BytePos, bool)>);
+    impl VisitMut for Sentencia<'_> {
+        fn visit_mut_stmt(&mut self, s: &mut Stmt) {
+            s.visit_mut_children_with(self);
+            let (lo, arg) = match s {
+                Stmt::Return(r) => (r.span.lo, r.arg.as_deref_mut()),
+                Stmt::Throw(t) => (t.span.lo, Some(&mut *t.arg)),
+                _ => return,
+            };
+            let Some(arg) = arg else { return };
+            if !self.1.iter().any(|p| !p.1 && p.0 == lo) {
+                return;
+            }
+            let mut c = Candidatos(self.0, 0);
+            arg.visit_with(&mut c);
+            if c.1 != 1 {
+                return;
+            }
+            arg.visit_mut_with(&mut Cambia(self.0));
+            for p in self.1.iter_mut().filter(|p| p.0 == lo) {
+                p.1 = true;
+            }
+        }
+    }
     #[derive(PartialEq)]
     enum Clase {
         Tdz,
@@ -638,6 +698,17 @@ pub fn neutralize_violaciones(src: &str, kind: SourceKind, spec: &str) -> Option
             let mut program = backend::swc::parse_program(&fm, kind)?;
             let mut n = N(objetivos);
             program.visit_mut_with(&mut n);
+            // n-principio: las `tdz` que quedaron, en la sentencia (`return`/`throw`).
+            let pendientes: Vec<(BytePos, bool)> = n.0.iter().filter(|o| !o.2 && o.0 == Clase::Tdz).map(|o| (o.1, false)).collect();
+            if !pendientes.is_empty() && n.0.iter().all(|o| o.2 || o.0 == Clase::Tdz) {
+                let mut lex = Lexicos(HashSet::new());
+                program.visit_with(&mut lex);
+                let mut s = Sentencia(&lex.0, pendientes);
+                program.visit_mut_with(&mut s);
+                for o in n.0.iter_mut().filter(|o| !o.2) {
+                    o.2 = s.1.iter().any(|p| p.1 && p.0 == o.1);
+                }
+            }
             if !n.0.iter().all(|o| o.2) {
                 return None;
             }
@@ -870,7 +941,7 @@ fn emit(cm: Lrc<SourceMap>, program: &Program) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{globals_matter, neutralize_violaciones, neutralize_with, offset_utf16, veredicto, violaciones_matter, with_matters, Recheck};
+    use super::{globals_matter, neutralize_violaciones, neutralize_with, offset_utf16, violaciones_matter, with_matters, Recheck};
     use crate::backend::Minifier;
     use crate::minify::{Preset, SourceKind};
     use crate::runner::{Exec, Preload, Runner, Status, THROW_EXIT};
@@ -887,43 +958,38 @@ mod tests {
         }
     }
 
-    /// b1-b: solo es concluyente si A' termina, B' == A' y el camino se sostiene.
+    /// b1-b: solo es concluyente si A' termina y B' == A'; n-principio: y B == A' (los
+    /// escenarios del viejo `veredicto`, con lo que dan ahora).
     #[test]
     fn veredicto_concluyente() {
+        use super::veredicto_neutralizado as v;
         let ok = |s: &str| ex(Status::Exited(0), s);
         let th = |s: &str| ex(Status::Exited(THROW_EXIT), s);
-        // Mismo camino (A' == A) y la divergencia desaparece.
-        assert_eq!(veredicto(&ok("1\n"), &ok("2\n"), &ok("1\n"), &ok("1\n")), Recheck::Explica);
-        // Otro camino, pero B ya se comporta como A' (03-global-positivo).
-        assert_eq!(veredicto(&ok("no hay\n"), &ok("hay\n"), &ok("hay\n"), &ok("hay\n")), Recheck::Explica);
-        // Mismo punto, otro tipo de throw (sloppy: TypeError, estricto: ReferenceError).
+        let inconcluso = |r: Recheck| matches!(r, Recheck::Inconcluso(ref n) if n.contains("B != A'"));
+        // B ya se comporta como A' (03-global-positivo): Explica, como antes.
+        assert_eq!(v(&ok("no hay\n"), &ok("hay\n"), &ok("hay\n"), &ok("hay\n"), None), Recheck::Explica);
+        // n-principio: lo que antes era Explica y ahora es inconcluso (div/).
+        // - Mismo camino (A' == A): n24/n30/n34 (A' == A por construccion, el bug en la rama
+        //   que solo corre con la violacion).
+        assert!(inconcluso(v(&ok("1\n"), &ok("2\n"), &ok("1\n"), &ok("1\n"), None)));
+        // - Mismo punto, otro tipo de throw (sloppy: TypeError, estricto: ReferenceError;
+        //   dead_code_2_should_warn) con B que no es A'.
         let (a, a2) = (th("!dz throw TypeError\n"), th("!dz throw ReferenceError\n"));
-        assert_eq!(veredicto(&a, &th("!dz throw Error\n"), &a2, &th("!dz throw ReferenceError\n")), Recheck::Explica);
-        // `with` (issue_1105): B no es ni A ni A', pero solo difiere en las lineas
-        // que el scope cambia.
-        assert_eq!(veredicto(&ok("u\n3\n"), &ok("u\n4\n"), &ok("u\nu\n"), &ok("u\nu\n")), Recheck::Explica);
-        // ... y si B ademas difiere en una linea que la asuncion no toca, no.
-        let r = veredicto(&ok("u\n3\nx\n"), &ok("u\n4\ny\n"), &ok("u\nu\nx\n"), &ok("u\nu\nx\n"));
-        assert!(matches!(r, Recheck::Inconcluso(_)), "{r:?}");
+        assert!(inconcluso(v(&a, &th("!dz throw Error\n"), &a2, &th("!dz throw ReferenceError\n"), None)));
+        // - `with` (issue_1105): B no es ni A ni A' y solo difiere en las lineas que el scope
+        //   cambia (`localizada`). Con la misma forma pasaba n23 (el bug en la rama del scope).
+        assert!(inconcluso(v(&ok("u\n3\n"), &ok("u\n4\n"), &ok("u\nu\n"), &ok("u\nu\n"), None)));
+        assert!(inconcluso(v(&ok("-2\n"), &ok("NaN\n"), &ok("nok\n"), &ok("nok\n"), None)));
         // I1 (revision-b456, r08-readonly-getter): A' lanza en la linea donde B difiere.
-        // Antes la linea `!dz throw` de A' "cubria" esa diferencia (Explica, known/).
-        let r = veredicto(&ok("1 PASS\n"), &ok("1 FAIL\n"), &th("!dz throw TypeError\n"), &th("!dz throw TypeError\n"));
-        assert!(matches!(r, Recheck::Inconcluso(ref n) if n.contains("otro camino")), "{r:?}");
-        // ... y si A tambien lanza, la linea `!dz throw` de A' sigue sin cubrir la de B.
-        // (veredicto lo aceptaria por `mismo_camino`: mismo punto, otro tipo; aca solo `localizada`.)
-        assert!(!super::localizada(&th("k\n!dz throw Error\n"), &th("k\n!dz throw TypeError\n"), &th("k\n!dz throw RangeError\n")));
-        assert!(super::localizada(&ok("u\n3\n"), &ok("u\n4\n"), &ok("u\nu\n")));
-        // A lanza y A' no (otro camino), aunque las lineas "cubran" la de B: no.
-        assert!(!super::localizada(&th("1\n!dz throw Error\n"), &th("2\n!dz throw Error\n"), &ok("3\nfin\n")));
+        assert!(inconcluso(v(&ok("1 PASS\n"), &ok("1 FAIL\n"), &th("!dz throw TypeError\n"), &th("!dz throw TypeError\n"), None)));
         // La divergencia sigue con la asuncion neutralizada.
-        assert_eq!(veredicto(&ok("1\n"), &ok("2\n"), &ok("1\n"), &ok("2\n")), Recheck::NoExplica);
+        assert_eq!(v(&ok("1\n"), &ok("2\n"), &ok("1\n"), &ok("2\n"), None), Recheck::NoExplica);
         // 10-rt-*-miente: A' toma otra rama y B no es A': un bug real no se esconde.
-        let r = veredicto(&ok("rest\nfin\n"), &ok("fin\n"), &ok("navegador\nfin\n"), &ok("navegador\nfin\n"));
-        assert!(matches!(r, Recheck::Inconcluso(ref n) if n.contains("otro camino")), "{r:?}");
+        assert!(inconcluso(v(&ok("rest\nfin\n"), &ok("fin\n"), &ok("navegador\nfin\n"), &ok("navegador\nfin\n"), None)));
         // R2-H02: un Timeout en la variante no es evidencia.
-        let r = veredicto(&ok("1\n"), &ok("2\n"), &ex(Status::Timeout, ""), &ok("1\n"));
+        let r = v(&ok("1\n"), &ok("2\n"), &ex(Status::Timeout, ""), &ok("1\n"), None);
         assert!(matches!(r, Recheck::Inconcluso(ref n) if n.contains("Timeout")), "{r:?}");
-        let r = veredicto(&ok("1\n"), &ok("2\n"), &ok("1\n"), &ex(Status::Timeout, ""));
+        let r = v(&ok("1\n"), &ok("2\n"), &ok("1\n"), &ex(Status::Timeout, ""), None);
         assert!(matches!(r, Recheck::Inconcluso(_)), "{r:?}");
     }
 
@@ -939,12 +1005,10 @@ mod tests {
         // `mismo_camino`, Explica; ahora inconcluso.
         let r = veredicto_neutralizado(&ok("true\n"), &ok("false\n"), &ok("true\n"), &ok("true\n"), None);
         assert!(matches!(r, Recheck::Inconcluso(ref n) if n.contains("B != A'")), "{r:?}");
-        assert_eq!(veredicto(&ok("true\n"), &ok("false\n"), &ok("true\n"), &ok("true\n")), Recheck::Explica);
         // r05/r09: la linea del bug cambia en A' (no corre): antes `localizada`, ahora inconcluso.
         let r = veredicto_neutralizado(&ok("-2\n"), &ok("NaN\n"), &ok("none\n"), &ok("none\n"), None);
         assert!(matches!(r, Recheck::Inconcluso(_)), "{r:?}");
-        assert_eq!(veredicto(&ok("-2\n"), &ok("NaN\n"), &ok("none\n"), &ok("none\n")), Recheck::Explica);
-        // La divergencia sigue: NoExplica, como en `veredicto`.
+        // La divergencia sigue: NoExplica.
         assert_eq!(veredicto_neutralizado(&ok("1\n"), &ok("2\n"), &ok("3\n"), &ok("4\n"), None), Recheck::NoExplica);
         // Contenido con marca: el toString impreso (17-tostring-positivo) y los marcos del stack.
         let fuente = "function suma(a, b) { return a + b; }";
@@ -959,9 +1023,20 @@ mod tests {
         assert!(!localizada_con_marca(&a, &ok("g: function suma(n,r){return n+r}\nfin\n"), &a2, &salada));
         // r07/p03: la linea del bug no muestra contenido en A' (`none`): no.
         assert!(!localizada_con_marca(&ok("-2\n"), &ok("NaN\n"), &ok("none\n"), &ok("-2\n")));
-        let (a, b) = (ok("TypeError: x\n    at falla (/tmp/p.js:3:15)\n"), ok("TypeError: x\n    at r (/tmp/p.js:1:30)\n"));
+        let (a, b) = (ok("TypeError: x\n    at falla (/tmp/p.js:3:15)\n"), ok("TypeError: x\n    at falla (/tmp/p.js:1:30)\n"));
         let a2 = ok(&format!("TypeError: x\n{FIJO_MARCO}\n"));
         assert!(localizada_con_marca(&a, &b, &a2, &a));
+        assert!(localizada_con_marca(&ok("    at /tmp/p.js:3:15\n"), &ok("    at /tmp/p.js:1:9\n"), &ok(&format!("{FIJO_MARCO}\n")), &a));
+        // n-principio (n-ruido r03, r02/r09): otro nombre (otra funcion, o los marcos corridos
+        // porque cambio la cuenta o el orden) no es solo contenido. Antes Explica; tambien el
+        // mangling de core_defaults (`at falla` -> `at r`), que pasa a div/.
+        assert!(!localizada_con_marca(&a, &ok("TypeError: x\n    at r (/tmp/p.js:1:30)\n"), &a2, &a));
+        let a2 = ok(&format!("Error: x\n{FIJO_MARCO}\n{FIJO_MARCO}\n"));
+        let a = ok("Error: x\n    at r (/tmp/p.js:2:30)\n    at Object.<anonymous> (/tmp/p.js:3:13)\n");
+        let b = ok("Error: x\n    at r (/tmp/p.js:1:9)\n    at r (/tmp/p.js:1:20)\n");
+        assert!(!localizada_con_marca(&a, &b, &a2, &a));
+        assert_eq!(super::cabeza_marco("    at new Foo (/tmp/p.js:1:2)"), Some("new Foo"));
+        assert_eq!(super::cabeza_marco("    at /tmp/p.js:1:2"), Some(""));
         // 20-p04: una linea que empieza con `    at ` pero no es un marco de V8.
         assert!(!localizada_con_marca(&ok("    at -2\n"), &ok("    at NaN\n"), &ok(&format!("{FIJO_MARCO}\n")), &ok("    at -2\n")));
         assert!(super::es_marco("    at Array.map (<anonymous>)") && super::es_marco("    at /tmp/p.js:1:2"));
@@ -1045,7 +1120,15 @@ mod tests {
         let o = "if (typeof window === \"undefined\") { console.log(\"rama\"); } else { console.log(\"navegador\"); }\nconsole.log(\"fin\");\n";
         let m = "if (typeof window === \"undefined\") {} else { console.log(\"navegador\"); }\nconsole.log(\"fin\");\n";
         let g = globals_matter(&r, SourceKind::Script, o, m, &r.run(o), &r.run(m));
-        assert!(matches!(g, Recheck::Inconcluso(ref n) if n.contains("otro camino")), "{g:?}");
+        assert!(matches!(g, Recheck::Inconcluso(ref n) if n.contains("B != A'")), "{g:?}");
+        // n-principio (n29-global-rama): el bug en la rama sin `window` (A=-2, B=NaN, A'=nav).
+        // Con `veredicto` iba a known/ (`localizada`); ahora B != A': inconcluso.
+        let o = "var r = typeof window !== \"undefined\" ? \"nav\" : Math.cbrt(-8);\nconsole.log(r);\n";
+        let m = "console.log(typeof window<`u`?`nav`:NaN);\n";
+        let (ao, bm) = (r.run(o), r.run(m));
+        assert_eq!((ao.stdout.as_str(), bm.stdout.as_str()), ("-2\n", "NaN\n"));
+        let g = globals_matter(&r, SourceKind::Script, o, m, &ao, &bm);
+        assert!(matches!(g, Recheck::Inconcluso(ref n) if n.contains("B != A'")), "{g:?}");
         // Los globals definidos son stubs: se pueden leer y llamar.
         let e = r.run_with_globals("console.log(typeof window, String(window.location.href), typeof document);\n", "window");
         assert_eq!(e.stdout, "function [stub window.location.href] undefined\n");
@@ -1090,6 +1173,22 @@ mod tests {
         assert!(neutralize_violaciones("try { class A extends [] {} } catch (e) {}\n", k, "extends 0:0").is_none());
         assert!(neutralize_violaciones("try { x; } catch (e) {}\nlet x;\n", k, "tdz 0:6\nsymbol -").is_none());
         assert!(neutralize_violaciones("x;\n", k, "tdz 5:0").is_none());
+        // n-principio (Fase R I2): V8 da la columna del `return`/`throw`. Un solo candidato
+        // (ligado con let/const/class): solo el pasa a `void 0`; el resto de la sentencia queda.
+        let out = neutralize_violaciones("function g() { return x; }\nlet x = 1;\n", k, "tdz 0:15").unwrap();
+        assert!(out.contains("return void 0") && out.contains("let x = 1"), "{out}");
+        let out = neutralize_violaciones("function g() { throw x; }\nconst x = 1;\n", k, "tdz 0:15").unwrap();
+        assert!(out.contains("throw void 0"), "{out}");
+        // n16: el bug en la misma sentencia sigue (Math y log no son candidatos).
+        let out = neutralize_violaciones("function log(v) { return 0; }\nfunction g() { return log(Math.cbrt(-8)) + x; }\nlet x = 1;\n", k, "tdz 1:15").unwrap();
+        assert!(out.contains("log(Math.cbrt(-8)) + void 0"), "{out}");
+        // Dos candidatos (o el mismo dos veces), ninguno, o lo unico esta en una flecha: no se ubica.
+        assert!(neutralize_violaciones("function g() { return x + y; }\nlet x, y;\n", k, "tdz 0:15").is_none());
+        assert!(neutralize_violaciones("function g() { return x + x; }\nlet x;\n", k, "tdz 0:15").is_none());
+        assert!(neutralize_violaciones("function g() { return 1; }\nlet x;\n", k, "tdz 0:15").is_none());
+        assert!(neutralize_violaciones("function g() { return () => x; }\nlet x;\n", k, "tdz 0:15").is_none());
+        // Un `var` no tiene TDZ: no es candidato.
+        assert!(neutralize_violaciones("var y;\nfunction g() { return y; }\n", k, "tdz 1:15").is_none());
     }
 
     /// b4-a (R1-H04 / C3): el sensor ve las violaciones atrapadas, y el re-chequeo
@@ -1128,6 +1227,29 @@ mod tests {
             assert!(b.stdout.ends_with("false\n") && a.stdout.ends_with("true\n"), "oxc ya no tiene O4: {}", b.stdout);
             assert_eq!(rc, Recheck::NoExplica, "{prog}{bug}");
         }
+        // n-principio (n10, n17, n06): el bug en el catch de la violacion, que en A' no corre
+        // (A=-2, B=NaN, A'=undefined o "function"). Con `veredicto` (`localizada`) iban a known/.
+        for prog in [
+            "let r = \"none\";\ntry { r = String(x); } catch (e) { r = Math.cbrt(-8); }\nconsole.log(r);\nlet x = 1;\n",
+            "let r = \"none\";\nvar s = Symbol(\"s\");\ntry { r = Math.abs(s); } catch (e) { r = Math.cbrt(-8); }\nconsole.log(r);\n",
+            "let r = \"none\";\nvar v = [];\ntry { class A extends v {} r = typeof A; } catch (e) { r = Math.cbrt(-8); }\nconsole.log(r);\n",
+        ] {
+            let (a, b, rc) = caso(prog);
+            assert_eq!((a.stdout.as_str(), b.stdout.as_str()), ("-2\n", "NaN\n"), "oxc ya no pliega mal Math.cbrt(-8): {prog}");
+            assert!(matches!(rc, Recheck::Inconcluso(ref n) if n.contains("B != A'")), "{prog}: {rc:?}");
+        }
+        // n-principio (Fase R I2): la TDZ en un `return` (V8 la ubica en la sentencia). Antes
+        // inconcluso por "no pude ubicar"; ahora se neutraliza el unico candidato.
+        // - Positivo: oxc borra la llamada (asume que no hay TDZ) y B se comporta como A'.
+        // - n15 (el bug en el catch): B != A', inconcluso. n16 (el bug en la misma sentencia,
+        //   antes del identificador): el bug sigue en A' y B', NoExplica.
+        let (a, b, rc) = caso("function g() { return x; }\ntry { g(); console.log(\"sin tdz\"); } catch (e) { console.log(\"tdz\"); }\nlet x = 1;\n");
+        assert_ne!(a.stdout, b.stdout);
+        assert_eq!(rc, Recheck::Explica, "{} | {}", a.stdout, b.stdout);
+        let (_, _, rc) = caso("let r = \"none\";\nfunction g() { return x; }\ntry { r = g(); } catch (e) { r = Math.cbrt(-8); }\nconsole.log(r);\nlet x = 1;\n");
+        assert!(matches!(rc, Recheck::Inconcluso(ref n) if n.contains("B != A'")), "{rc:?}");
+        let (_, _, rc) = caso("let r = \"none\";\nfunction log(v) { console.log(v); return 0; }\nfunction g() { return log(Math.cbrt(-8)) + x; }\ntry { r = g(); } catch (e) { r = \"tdz\"; }\nconsole.log(r);\nlet x = 1;\n");
+        assert_eq!(rc, Recheck::NoExplica);
         // Sin violacion ubicada (coercion de Symbol no atrapada sin marcos) no hay
         // re-chequeo posible: inconcluso.
         let a = r.run("console.log(1);\n");
@@ -1182,7 +1304,8 @@ mod tests {
         assert!(e.stdout.contains("f() throws ReferenceError"), "{}", e.stdout);
         assert!(e.flags.iter().any(|f| f == "tdz") && !e.flags.iter().any(|f| f == "tdz_atrapada"), "{:?}", e.flags);
         // V8 ubica una TDZ dentro de `return`/`throw` en la sentencia (MEDIDO, node 24), no
-        // en el identificador: el re-chequeo no la puede neutralizar y queda inconcluso (div/).
+        // en el identificador. n-principio: el neutralizador la busca en la sentencia si hay
+        // un solo candidato (neutraliza_violaciones); si no, inconcluso (div/).
         assert_eq!(super::violaciones(&e), ["tdz 0:15"], "{}", e.ctl);
         // Carril B: el programa es el modulo que importa el envoltorio.
         let m = Runner::new(&preload, crate::test_util::id_runner(), std::time::Duration::from_secs(20)).with_kind(SourceKind::Module);
