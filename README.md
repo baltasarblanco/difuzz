@@ -159,7 +159,8 @@ confianza (paquetes de npm, código real) eso es un riesgo.
   el canal de control de difuzz, y `--allow-inspector` (con `--disable-sigusr1`) cuando corre el
   sensor de violaciones o la cobertura de un re-chequeo (ver abajo).
   Sin `--allow-child-process`, `--allow-worker`, `--allow-addons` ni `--allow-wasi`: no hay
-  procesos hijos, workers, addons nativos ni WASI (tampoco `process.binding`). Como el modelo de
+  procesos hijos, workers, addons nativos ni WASI (tampoco `process.binding`), y
+  `--no-experimental-sqlite`: `node:sqlite` no existe (ver "Límites"). Como el modelo de
   permisos no cubre las señales ni la prioridad de otros procesos, un filtro seccomp (sin root;
   solo Linux x86_64 y aarch64: en otra arquitectura `--sandbox` no arranca y difuzz sale con 1)
   deja que node se mande señales solo a sí mismo (su pid, 0 o su grupo de procesos):
@@ -226,7 +227,8 @@ por el programa); con `--sandbox`, además, el envoltorio de `process._kill` ano
 `_kill` de node (que no lanza: devuelve `-1`) y el de `process._debugProcess`, aunque el programa
 los atrape. Con el sandbox, `os.setPriority` y `process._debugProcess` con el pid ficticio dan
 `EPERM` (el filtro niega cualquier pid que no sea el real) y marcan. difuzz busca esos textos (y
-`kill EPERM` y `uv_os_setpriority returned EPERM`) en la salida. Un `EPERM` natural se ve igual: un
+`kill EPERM`, `uv_os_setpriority returned EPERM` y `No such built-in module: node:sqlite`) en la
+salida. Un `EPERM` natural se ve igual: un
 `kill`/`_kill` a un proceso de otro usuario (el pid 1, por ejemplo) da `EPERM` también sin el
 sandbox, y con `--sandbox` marca el caso: si el original y el minificado lo hacen, se compara con
 la nota de A y B (antes de 7.9 iba a descartes y un bug real al lado no se veía; MEDIDO en la
@@ -246,6 +248,14 @@ revisión de la integración del bloque 7).
 - Con `--sandbox-red` quedan alcanzables los sockets unix creados después de lanzar ese node
   y los que tengan espacios en la ruta; el resto del disco sigue a la vista del sistema
   operativo (lo frena el modelo de permisos de node, no el namespace).
+- `node:sqlite` **no pasa por el modelo de permisos** de node 24 (medido con 24.14.1: crea y
+  escribe una base fuera de los directorios permitidos, sin `ERR_ACCESS_DENIED`). Por eso, con el
+  sandbox va apagado con `--no-experimental-sqlite`: `require`/`import` dan
+  `ERR_UNKNOWN_BUILTIN_MODULE` y la ejecución queda marcada si ese mensaje sale (sin atrapar o
+  impreso); atrapado en silencio, o por `process.getBuiltinModule` (que da `undefined`), no se
+  marca. Web Storage (`localStorage`) viene apagado en node 24.14.1 y difuzz no lo prende.
+- **El resto de los módulos de node no se auditó** contra el modelo de permisos: que un módulo
+  no esté listado acá no quiere decir que respete los permisos.
 - Un permiso negado que el programa atrapa en silencio (sin imprimirlo) sin el sensor de
   violaciones (swc) o en un callback no se reconoce: A y B ven lo mismo y se comparan.
 - Un programa que imprime por su cuenta uno de los textos de la marca lleva la nota de más (y el

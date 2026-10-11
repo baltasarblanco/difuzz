@@ -1026,12 +1026,17 @@ fn marca_sandbox(s: &str, modo: Sandbox) -> bool {
     // 7.7: `os.setPriority` a otro proceso, negado por el mismo filtro (MEDIDO node 24.14.1:
     // `A system error occurred: uv_os_setpriority returned EPERM (operation not permitted)`;
     // subir la prioridad propia sin privilegios da EACCES, no EPERM).
+    // 7.10: `node:sqlite` apagado (`--no-experimental-sqlite`, ver `permisos_node`): `require` e
+    // `import` dan ERR_UNKNOWN_BUILTIN_MODULE con este mensaje (MEDIDO node 24.14.1); sin el
+    // sandbox el modulo existe y el mensaje no sale. El codigo solo no alcanza: tambien lo da
+    // un `node:` que no existe.
     const PERMISOS: &[&str] = &[
         "ERR_ACCESS_DENIED",
         "Access to this API has been restricted",
         "ERR_DLOPEN_DISABLED",
         "kill EPERM",
         "uv_os_setpriority returned EPERM",
+        "No such built-in module: node:sqlite",
     ];
     const RED: &[&str] = &["ENETUNREACH", "EHOSTUNREACH", "EAI_AGAIN", "ENOTFOUND", "ECONNREFUSED"];
     PERMISOS.iter().any(|m| s.contains(m)) || (modo == Sandbox::PermisosYRed && RED.iter().any(|m| s.contains(m)))
@@ -1047,13 +1052,22 @@ fn marca_sandbox(s: &str, modo: Sandbox) -> bool {
 /// cargar un `.cjs`/`.mjs` ni resolver un modulo que no existe (MEDIDO: MODULE_NOT_FOUND,
 /// no ERR_ACCESS_DENIED). `--allow-inspector` solo con el sensor de violaciones (sin el,
 /// el sensor no se prende: MEDIDO, sin lineas `viol`).
+///
+/// 7.10: `--no-experimental-sqlite` (`node --help`, v24.14.1). `node:sqlite` no pasa por el
+/// modelo de permisos: con `--permission` solo, `new DatabaseSync(ruta)` creaba y escribia
+/// una base fuera de lo permitido sin ERR_ACCESS_DENIED (MEDIDO, b7-9 y b7-10). Con la flag,
+/// `require`/`import` de `node:sqlite` dan ERR_UNKNOWN_BUILTIN_MODULE y no se crea nada
+/// (MEDIDO); `marca_sandbox` lo reconoce. Web Storage (`localStorage`, que con
+/// `--localstorage-file` persiste en disco) no necesita flag: en 24.14.1 viene apagado
+/// (MEDIDO: `typeof localStorage` es `undefined`) y `--no-experimental-webstorage` no figura
+/// en `node --help`.
 fn permisos_node(r: &Runner, sensor: bool) -> Vec<std::ffi::OsString> {
     let flag = |f: &str, p: &Path| {
         let mut s = std::ffi::OsString::from(f);
         s.push(p);
         s
     };
-    let mut v = vec![std::ffi::OsString::from("--permission")];
+    let mut v = vec![std::ffi::OsString::from("--permission"), "--no-experimental-sqlite".into()];
     for p in [&r.preload, &r.script, &r.wrapper, &r.cwd] {
         v.push(flag("--allow-fs-read=", p));
     }

@@ -817,10 +817,14 @@ fn main() {
         cache_parts.push("sin sensor");
     }
     // n-sandbox: con el sandbox, A no es la misma ejecucion (lo que niega, falla).
+    // 7.10: v2, `node:sqlite` apagado (runner::permisos_node): un A guardado con v1 lo tenia.
+    // Integracion del bloque 7: v2 cubre ademas lo que cambia A con el sandbox desde Rust y no
+    // entra por el preload (que ya es parte de la clave): el filtro de `setpriority` de 7.7
+    // (runner::encerrar_senales) y `--disable-sigusr1` de 7.1b (runner::permisos_node).
     match cli.sandbox {
         runner::Sandbox::Apagado => {}
-        runner::Sandbox::Permisos => cache_parts.push("sandbox v1"),
-        runner::Sandbox::PermisosYRed => cache_parts.push("sandbox red v1"),
+        runner::Sandbox::Permisos => cache_parts.push("sandbox v2"),
+        runner::Sandbox::PermisosYRed => cache_parts.push("sandbox red v2"),
     }
     let cache = cache::CacheA::new(cli.cache.clone(), &cache_parts);
     // M27 (a): si --out no se puede escribir, no hay hallazgos que guardar.

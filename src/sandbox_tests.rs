@@ -12,6 +12,8 @@
 //! - La red (`--sandbox-red`, solo Linux con user namespaces): sin salida (ENETUNREACH), el
 //!   loopback propio anda, los sockets unix del sistema quedan tapados; con `--sandbox`
 //!   solo, un socket unix de afuera se alcanza (limite documentado del modelo de node).
+//! - `node:sqlite` (7.10): con el sandbox va apagado; una base senuelo fuera del directorio
+//!   de trabajo no se crea.
 //!
 //! Nada lee secretos: `/etc/passwd` y `~/.ssh` solo se tocan CON el sandbox (se verifica el
 //! bloqueo, no el contenido), y en `~/.ssh` con un nombre que no existe.
@@ -336,6 +338,53 @@ fn sandbox_senales() {
     assert!(senuelo.try_wait().unwrap().is_none(), "sin sandbox: el senuelo recibio la senal");
     let _ = senuelo.kill();
     let _ = senuelo.wait();
+}
+
+/// 7.10: `node:sqlite` se saltea el modelo de permisos (MEDIDO, b7-9: crea una base fuera de lo
+/// permitido). Con el sandbox va apagado (`--no-experimental-sqlite`): `require` da
+/// ERR_UNKNOWN_BUILTIN_MODULE, el senuelo (una base en el directorio del test, fuera del de
+/// trabajo) no se crea y, si el mensaje sale (sin atrapar, o impreso), la ejecucion queda
+/// marcada. El codigo solo no marca: tambien lo da un `node:` que no existe. Sin el sandbox,
+/// lo de siempre: el modulo esta y nada marca.
+#[test]
+fn sandbox_sqlite_apagado() {
+    if !crate::test_util::requiere_node() {
+        return;
+    }
+    let (b, _) = base("sqlite");
+    let db = b.join("senuelo.db");
+    let preload = Preload::write_tagged("sandbox-sqlite").unwrap();
+    let t = Duration::from_secs(20);
+    let mut modos = vec![Sandbox::Permisos];
+    match crate::runner::probar_sandbox(Sandbox::PermisosYRed) {
+        Ok(()) => modos.push(Sandbox::PermisosYRed),
+        Err(e) => eprintln!("DIFUZZ_SALTEADO_SIN_USERNS: sandbox_sqlite_apagado con la red: {e}"),
+    }
+    let crear = format!("new (require('node:sqlite').DatabaseSync)({}).exec('CREATE TABLE t (x)')", js_str(&db));
+    for modo in modos {
+        let r = Runner::new(&preload, crate::test_util::id_runner(), t).with_sandbox(modo);
+        let (out, _, st) = intento(&r, &crear);
+        assert_eq!((out.as_str(), st), ("err ERR_UNKNOWN_BUILTIN_MODULE", Status::Exited(0)), "{modo:?}");
+        assert!(!db.exists(), "{modo:?}: el sandbox dejo crear la base sqlite");
+        // Impreso: marca por el mensaje.
+        let e = r.run("try { require('node:sqlite'); } catch (e) { console.log(e.message); }\n");
+        assert!(e.toco_sandbox(), "{modo:?}: {}", e.stdout);
+        // Sin atrapar (el mensaje en la linea `exc` del canal) y por `import`, igual.
+        let e = r.run(&format!("{crear};\n"));
+        assert!(e.threw() && e.toco_sandbox(), "{modo:?}: {:?} {}", e.status, e.ctl);
+        let e = r.run("import('node:sqlite').catch((e) => console.log(e.message));\n");
+        assert!(e.toco_sandbox(), "{modo:?}: {}", e.stdout);
+        assert!(!db.exists(), "{modo:?}");
+        // Otro `node:` que no existe da el mismo codigo y no marca.
+        let (out, toco, _) = intento(&r, "require('node:difuzz-no-existe')");
+        assert_eq!((out.as_str(), toco), ("err ERR_UNKNOWN_BUILTIN_MODULE", false), "{modo:?}");
+    }
+    // Sin el sandbox: el modulo esta (la base va al directorio de trabajo del runner) y no marca.
+    let sin = Runner::new(&preload, crate::test_util::id_runner(), t);
+    let (out, toco, _) = intento(&sin, "new (require('node:sqlite').DatabaseSync)('adentro.db').exec('CREATE TABLE t (x)')");
+    assert_eq!((out.as_str(), toco), ("ok", false));
+    drop(sin);
+    let _ = std::fs::remove_dir_all(&b);
 }
 
 /// La celda y la cache: `--sandbox` y `--sandbox-red` cambian el nombre de la celda; sin
