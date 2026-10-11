@@ -150,7 +150,12 @@ Opciones principales (la lista completa, con defaults, está en `difuzz --help`)
 
 Por defecto node corre **sin sandbox**: el programa del corpus puede leer y escribir lo que
 pueda el usuario que corre difuzz, lanzar procesos y usar la red. Con un corpus que no es de
-confianza (paquetes de npm, código real) eso es un riesgo.
+confianza (paquetes de npm, código real) eso es un riesgo: para ese código está
+`scripts/barrido-real.sh` (ver [Corpus](#corpus)), que fija `--sandbox-red` sin opción para
+apagarlo. El default sigue apagado por comparabilidad (decisión del 10-oct-2026): el sandbox
+cambia el nombre de la celda (`+sandbox`, `+sandbox_red`) y la caché de A no se comparte con las
+corridas sin él, así que prenderlo por defecto rompería la comparación con las corridas y los
+índices anteriores.
 
 - **`--sandbox`**: cada ejecución de node (original, minificado, confirmaciones, re-chequeos,
   `--invocar`, envoltorio de módulos, stubs) corre con el modelo de permisos de node 24:
@@ -571,7 +576,12 @@ La sección `clasificacion:` de `meta.txt` muestra cada re-chequeo y su resultad
 de `Symbol`, `extends` que lanza) con el inspector de V8, que pausa en cada excepción atrapada. A
 y B se comparan los dos sin ese sensor (paso `sensor:` de `clasificacion:`) en dos casos:
 
-- node muere o no termina con el sensor: se repite sin él (`sensor_caido`);
+- node muere o no termina con el sensor: se repite sin él (`sensor_caido`), con el timeout
+  entero. Límite conocido (decisión del 10-oct-2026): un programa que cuelga de verdad paga dos
+  timeouts enteros en cada ejecución de node que corre con el sensor (A, B, la confirmación y
+  cada re-chequeo), porque antes no se puede saber si la demora es del sensor. Un timeout más
+  corto para la repetición (un cuarto, mínimo 1 s) perdía un `div/` real: una recursión que
+  atrapa, lenta con el sensor, seguida de un bucle largo y del bug;
 - de entrada, si el original del carril A es sloppy (sin un `"use strict"` en el prólogo), tiene
   una llamada directa a `eval` y alguna clase (`sensor_omitido`; resumen:
   `sensor (b7-8): omitido_por_riesgo_v8=N`). Es el patrón de un bug de V8 13.6 (node 24.14.1):

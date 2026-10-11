@@ -192,8 +192,9 @@
 17-stack-positivo	oxc-a-core_defaults	div:Stdout
 17-stack-positivo	oxc-b-core_defaults	div:Stdout
 # profundidad (M16): el bug en la MISMA linea que la cuenta de pila pasaba `localizada`. Ahora B tambien corre
-# con mas pila y rige `veredicto`. Costo (decision abierta): una cuenta de marcos sin tope (18-profundidad-cuenta)
-# ya no es concluyente y va a div/ (antes known/, MEDIDO).
+# con mas pila y rige `veredicto`. Costo: una cuenta de marcos sin tope (18-profundidad-cuenta) ya no es
+# concluyente y va a div/ (antes known/, MEDIDO). Decidido 10-oct: (a) queda en div/ (localizar por tokens se
+# engana; volver atras viola el principio).
 18-a07-profundidad-linea-getter	oxc-a-core_defaults	div:Stdout
 18-a07-profundidad-linea-getter	oxc-a-carril_a	div:Stdout
 18-a07-profundidad-linea-getter	oxc-b-core_defaults	div:Stdout
