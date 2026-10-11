@@ -419,6 +419,11 @@
 # decide: t01 (la TDZ en el loop) y t02 (la TDZ antes del ruido) son positivos, known/. t03 (bug del getter al lado)
 # y t04 (21-n10 en un loop: el bug en el catch de la TDZ) siguen en div/. t05: la TDZ despues del tope no la ve el
 # sensor, div/ (limite documentado en el README).
+# Integracion 7.1 + 7.4 (b7-int, 10-oct; H3 de rev-7.1, H1 de rev-int): Explica exige ademas el camino de B (7.1).
+# Como A y B se comparan sin el sensor, el re-chequeo corre B otra vez con el sensor (tope 4096) y sin el, con
+# cobertura (`recheck::camino_sensor_i3`): la corrida con el sensor tiene que ser entera, dar lo mismo que B y tener la
+# misma cobertura de V8. t01 (B sin excepciones) y t02 (B tambien pasa el tope de 256): entera, misma cobertura, sin la
+# violacion: known/.
 23-t01-tope-tdz-loop-positivo	oxc-a-core_defaults	known
 23-t01-tope-tdz-loop-positivo	oxc-a-carril_a	known
 23-t01-tope-tdz-loop-positivo	oxc-b-core_defaults	known
@@ -439,3 +444,80 @@
 23-t05-tope-tdz-despues	oxc-a-carril_a	div:Stdout
 23-t05-tope-tdz-despues	oxc-b-core_defaults	div:Stdout
 23-t05-tope-tdz-despues	oxc-b-carril_a	div:Stdout
+# b7-1 (revision n2, IMPORTANTE 1): B == A' por el valor por defecto. El bug de oxc (substring, isInteger, cbrt,
+# `delete (0/0)`) deja justo el valor que la variable tiene cuando la rama de la violacion no corre (`""`, `0`,
+# `false`, un `+=` que no suma): B corre la rama con el bug y da lo mismo que A', que no la corre. Con el binario de
+# fe0cd86 iban a known/ en todas las filas de abajo salvo r08 en B (MEDIDO, trabajo-10oct/b7-1). Ahora el re-chequeo
+# mira el camino de B (el sensor en B para TDZ/Symbol/extends; la cobertura de V8 de B con y sin la neutralizacion
+# para el resto): div/. Programas de revision-n2/at2-at3 (qNN/rNN) y una variante (tdz-suma, un acumulador). r02:
+# positivo, oxc borra la clase (B no corre el catch): sigue en known/. En B, `with` no parsea (descarte) y
+# `arguments`/`this` sloppy no divergen (igual); r08 en B: `delete NaN` lanza en estricto (ThrowNew).
+23-b71-q03-global-vacio	oxc-a-core_defaults	div:Stdout
+23-b71-q03-global-vacio	oxc-a-carril_a	div:Stdout
+23-b71-q03-global-vacio	oxc-b-core_defaults	div:Stdout
+23-b71-q03-global-vacio	oxc-b-carril_a	div:Stdout
+23-b71-q04-with-vacio	oxc-a-core_defaults	div:Stdout
+23-b71-q04-with-vacio	oxc-a-carril_a	div:Stdout
+23-b71-q04-with-vacio	oxc-b-core_defaults	descarte:parse_script
+23-b71-q04-with-vacio	oxc-b-carril_a	descarte:parse_script
+23-b71-q05-sloppy-vacio	oxc-a-core_defaults	div:Stdout
+23-b71-q05-sloppy-vacio	oxc-a-carril_a	div:Stdout
+23-b71-q06-builtins-vacio	oxc-a-core_defaults	div:Stdout
+23-b71-q06-builtins-vacio	oxc-a-carril_a	div:Stdout
+23-b71-q06-builtins-vacio	oxc-b-core_defaults	div:Stdout
+23-b71-q06-builtins-vacio	oxc-b-carril_a	div:Stdout
+23-b71-q12-arguments-vacio	oxc-a-core_defaults	div:Stdout
+23-b71-q12-arguments-vacio	oxc-a-carril_a	div:Stdout
+23-b71-r01-tdz-vacio	oxc-a-core_defaults	div:Stdout
+23-b71-r01-tdz-vacio	oxc-a-carril_a	div:Stdout
+23-b71-r01-tdz-vacio	oxc-b-core_defaults	div:Stdout
+23-b71-r01-tdz-vacio	oxc-b-carril_a	div:Stdout
+23-b71-r02-extends-positivo	oxc-a-core_defaults	known
+23-b71-r02-extends-positivo	oxc-a-carril_a	known
+23-b71-r02-extends-positivo	oxc-b-core_defaults	known
+23-b71-r02-extends-positivo	oxc-b-carril_a	known
+23-b71-r03-symbol-vacio	oxc-a-core_defaults	div:Stdout
+23-b71-r03-symbol-vacio	oxc-a-carril_a	div:Stdout
+23-b71-r03-symbol-vacio	oxc-b-core_defaults	div:Stdout
+23-b71-r03-symbol-vacio	oxc-b-carril_a	div:Stdout
+23-b71-r04-profundidad-vacio	oxc-a-core_defaults	div:Stdout
+23-b71-r04-profundidad-vacio	oxc-a-carril_a	div:Stdout
+23-b71-r04-profundidad-vacio	oxc-b-core_defaults	div:Stdout
+23-b71-r04-profundidad-vacio	oxc-b-carril_a	div:Stdout
+23-b71-r07-coercion-vacio	oxc-a-core_defaults	div:Stdout
+23-b71-r07-coercion-vacio	oxc-a-carril_a	div:Stdout
+23-b71-r07-coercion-vacio	oxc-b-core_defaults	div:Stdout
+23-b71-r07-coercion-vacio	oxc-b-carril_a	div:Stdout
+23-b71-r08-global-falso	oxc-a-core_defaults	div:Stdout
+23-b71-r08-global-falso	oxc-a-carril_a	div:Stdout
+23-b71-r08-global-falso	oxc-b-core_defaults	div:ThrowNew
+23-b71-r08-global-falso	oxc-b-carril_a	div:ThrowNew
+23-b71-r09-tdz-contador	oxc-a-core_defaults	div:Stdout
+23-b71-r09-tdz-contador	oxc-a-carril_a	div:Stdout
+23-b71-r09-tdz-contador	oxc-b-core_defaults	div:Stdout
+23-b71-r09-tdz-contador	oxc-b-carril_a	div:Stdout
+23-b71-tdz-suma	oxc-a-core_defaults	div:Stdout
+23-b71-tdz-suma	oxc-a-carril_a	div:Stdout
+23-b71-tdz-suma	oxc-b-core_defaults	div:Stdout
+23-b71-tdz-suma	oxc-b-carril_a	div:Stdout
+# b7-3 (revision n2, MENOR 4; repro noche2/revision-n2/ruido/t02-timer-repeat): oxc pliega `Number.isInteger(5e-324)`
+# a true y el timer pasa de setTimeout a setInterval; se cancela, asi que solo se ve en `_repeat` (null vs 50). Con los
+# timers opacos de n-ruido (fe0cd86): igual en las 4 celdas; con 5cc705f: no_determinista o div/ segun la corrida
+# (el reloj `_idleStart` tambien se imprimia). Ahora se oculta solo el reloj: div/ (MEDIDO, b7-3).
+23-b01-timer-repeat	oxc-a-core_defaults	div:Stdout
+23-b01-timer-repeat	oxc-a-carril_a	div:Stdout
+23-b01-timer-repeat	oxc-b-core_defaults	div:Stdout
+23-b01-timer-repeat	oxc-b-carril_a	div:Stdout
+# Integracion 7.1 + 7.4 (rev-int H1, repro rev-int/H3a h01/h02): el programa nota el sensor (cada pausa llama a su
+# `Error.prepareStackTrace`) y solo sin el corre la TDZ con el bug F en el catch. A pasa el tope (I3); en i01 B tambien,
+# en i02 B corre entero con el sensor. Sin la cobertura, la corrida de B con el sensor le prestaba a B un camino sin la
+# violacion y el bug iba a known/ (MEDIDO con paso-E: known en las 4 celdas; fe0cd86 y 7.1+7.4 crudo: div/). Ahora la
+# corrida con el sensor tiene que tener la misma cobertura de V8 que B sin el: div/.
+23-i01-sensor-detectado-tope-b	oxc-a-core_defaults	div:Stdout
+23-i01-sensor-detectado-tope-b	oxc-a-carril_a	div:Stdout
+23-i01-sensor-detectado-tope-b	oxc-b-core_defaults	div:Stdout
+23-i01-sensor-detectado-tope-b	oxc-b-carril_a	div:Stdout
+23-i02-sensor-detectado-b-entero	oxc-a-core_defaults	div:Stdout
+23-i02-sensor-detectado-b-entero	oxc-a-carril_a	div:Stdout
+23-i02-sensor-detectado-b-entero	oxc-b-core_defaults	div:Stdout
+23-i02-sensor-detectado-b-entero	oxc-b-carril_a	div:Stdout

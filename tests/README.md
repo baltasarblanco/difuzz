@@ -16,12 +16,15 @@ cargo build --release && cargo build --profile oraculo   # los dos binarios
 - `tests/salida_usuario.rs`: códigos de salida 0, 1 y 2 de difuzz, y que `descartes.tsv` reconstruya el total.
 - `tests/verificaciones.rs`: sus dos tests (golden y aceptación) quedan ignorados; ver "Como tests de cargo".
 
-Cada binario de integración incluye `src/test_util.rs` (con `#[path]`) y corre también sus 3 tests. Ignorados en
+Cada binario de integración incluye `src/test_util.rs` (con `#[path]`) y corre también sus 4 tests. Ignorados en
 total: 3, los dos de `tests/verificaciones.rs` y C1 de la muestra (`c1_igual_a_oxc_minify_de_npm`, en `src/`).
 
 Sin `node` en `PATH`, los tests que lo necesitan **fallan** con un mensaje claro (R1-H17). Con
 `DIFUZZ_SIN_NODE=1` se saltean y cada uno deja una línea `DIFUZZ_SALTEADO_SIN_NODE` en stderr (contarlas con
 `cargo test --no-fail-fast 2>&1 | rg -c '^DIFUZZ_SALTEADO_SIN_NODE'`). Ver `src/test_util.rs`.
+Lo mismo con los tests de `--sandbox-red` (`src/sandbox_tests.rs`), que necesitan *user namespaces*: si la
+máquina no los arma, **fallan** (7.5; antes pasaban sin probar nada); `DIFUZZ_SIN_USERNS=1` los saltea y cada uno
+deja una línea `DIFUZZ_SALTEADO_SIN_USERNS` en stderr.
 
 ## Golden de detección — `tests/golden/`
 
@@ -38,19 +41,25 @@ tests/golden/verificar.sh [--jobs N] [BINARIO] [DIR_SALIDA]
 
 ## Aceptación de los re-chequeos — `tests/aceptacion/rechequeos/`
 
-95 casos que combinan un bug real de oxc con un flag de asunción, en las 4 celdas de oxc (95 × 4 = 380
+111 casos que combinan un bug real de oxc con un flag de asunción, en las 4 celdas de oxc (111 × 4 = 444
 comparaciones): 21 de la revisión 1 (C4, `00-` a `10-`), 9 adversariales del revisor de la fase R (`r01` a
 `r10`, sin `r05`), `14-tdz-positivo`, 11 de los flags que antes no tenían re-chequeo (`15-` coerción, `16-`
 built-ins, `17-` contenido de `toString`/`.stack`, `18-` profundidad: positivos y adversariales con el Issue A),
 15 de la revisión de t-int (`19-`: el bug adentro del código que el re-chequeo neutraliza; r03, r06 y r13 son
 controles), 5 del paso 7 (`20-`), 23 de n-principio (`21-`: `extends`, `with`, `global_conocido`,
 violaciones y solo sloppy con el bug en la rama que solo corre con la violación; la TDZ en un `return`; y sus
-positivos), 5 de `.stack` (`22-`, de n-ruido: el bug cambia nombre, cuenta u orden de los marcos) y 5 del
-tope del sensor (`23-`, ítem 7.4: 1000 excepciones atrapadas y una TDZ atrapada). Los `19-`, `20-` y `22-`
-esperan `div/` en todas las celdas; los `21-` y `23-`, `div/` salvo los positivos.
+positivos), 5 de `.stack` (`22-`, de n-ruido: el bug cambia nombre, cuenta u orden de los marcos), 5 del
+tope del sensor (`23-t`, ítem 7.4: 1000 excepciones atrapadas y una TDZ atrapada), 13 del valor por defecto
+(`23-b71-`, ítem 7.1: B == A' porque el bug deja justo el valor que la variable tiene cuando la rama de la
+violación no corre; el re-chequeo mira además el camino de B), 1 de los timers opacos (`23-b01-timer-repeat`,
+ítem 7.3: el bug solo se ve en `_repeat` de un timer cancelado) y 2 de la revisión de la integración (`23-i01`,
+`23-i02`: el programa nota el sensor por su `Error.prepareStackTrace` y solo sin él corre el bug). Los `19-`,
+`20-` y `22-` esperan `div/` en todas
+las celdas; los `21-` y `23-`, `div/` salvo los positivos.
 Destino esperado en `esperado.tsv` (mismo formato que el golden). Reutiliza `tests/golden/verificar.sh`.
-Lo que la aceptación no cubre: un programa armado para que la salida con el bug coincida con la del original
-neutralizado va a `known/` (ver "Límites conocidos" en el README principal).
+Lo que la aceptación no cubre: un programa en que oxc pliega mal la condición y borra la rama entera de la
+violación (B no depende de la asunción y no se distingue de un minificado que la aprovechó; ver "Límites
+conocidos" en el README principal).
 
 ```sh
 tests/aceptacion/rechequeos/verificar.sh [--jobs N] [BINARIO] [DIR_SALIDA]

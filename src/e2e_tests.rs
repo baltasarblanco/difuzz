@@ -207,6 +207,29 @@ fn tabla() -> Vec<Fila> {
             destino: Destino::Ninguno,
             meta: &[],
         },
+        // b7-3 (revision n2, MENOR 4): lo que es reloj sigue oculto. El minificado gasta
+        // ~30 ms antes de armar los timers (sin salida ni globals): `_idleStart`, la
+        // TimersList (`expiry`) y los vecinos cambian, y A y B dan lo mismo, con los timers
+        // vivos (los observa el epilogo) y cancelados (los globals, al salir).
+        Fila {
+            caso: "timer-reloj",
+            programa: "var t = setTimeout(function () {}, 50), u = setInterval(function () {}, 20), w = setTimeout(function () {}, 50);\nvar i = setImmediate(function () {}, 1);\nsetTimeout(function () { clearTimeout(t); clearInterval(u); clearTimeout(w); clearImmediate(i); }, 1);\n",
+            back: Back::Rompe("var t=", "(function(){for(var q=0;q<3e7;q++);})();var t="),
+            args: &[],
+            destino: Destino::Ninguno,
+            meta: &[],
+        },
+        // b7-3: un timer que pasa de setTimeout a setInterval solo se ve en `_repeat` (el
+        // callback no corre: se cancela). Con los timers opacos de n-ruido no divergia; ahora
+        // el preload imprime `_repeat`.
+        Fila {
+            caso: "timer-repeat",
+            programa: "var t = setTimeout(function () {}, 50);\nclearTimeout(t);\n",
+            back: Back::Rompe("setTimeout(function", "setInterval(function"),
+            args: &[],
+            destino: Destino::Div,
+            meta: &["kind: Stdout\n", "\nobserved: true\n", "\nknown: no\n", TRAZA_DIV],
+        },
         // n-ruido: antes el minificado solo corria una columna; ahora `compare` no ve las
         // posiciones de los marcos (eso es `Ninguno`, igual).
         // n-int: el programa de n-ruido (el minificado cambia `function h` por `function k`)

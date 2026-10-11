@@ -231,7 +231,8 @@ fn sandbox_destino_del_caso() {
     let _ = std::fs::remove_dir_all(&b);
 }
 
-/// 2b: con `--sandbox` (y con `--sandbox-red`, si esta maquina lo arma), node no le manda
+/// 2b: con `--sandbox` y con `--sandbox-red` (7.5: sin user namespaces falla, salvo
+/// `DIFUZZ_SIN_USERNS=1`, que saltea solo `--sandbox-red`), node no le manda
 /// senales a otro proceso: EPERM, y la ejecucion queda marcada. El senuelo (un `sleep`
 /// propio) recibe SIGTERM solo si el filtro falla; a este test (el padre de node) y a todo el
 /// usuario (`-1`) se les manda la senal 0, que no hace nada aunque llegue. A si mismo (el pid
@@ -247,9 +248,9 @@ fn sandbox_senales() {
     let preload = Preload::write_tagged("sandbox-senales").unwrap();
     let t = Duration::from_secs(20);
     let mut modos = vec![Sandbox::Permisos];
-    match crate::runner::probar_sandbox(Sandbox::PermisosYRed) {
-        Ok(()) => modos.push(Sandbox::PermisosYRed),
-        Err(e) => eprintln!("DIFUZZ_SALTEADO_SIN_USERNS: sandbox_senales con la red: {e}"),
+    // 7.5: sin user namespaces falla (salvo DIFUZZ_SIN_USERNS=1, test_util.rs).
+    if crate::test_util::requiere_userns(crate::runner::probar_sandbox(Sandbox::PermisosYRed)) {
+        modos.push(Sandbox::PermisosYRed);
     }
     let mut senuelo = std::process::Command::new("sleep").arg("60").spawn().unwrap();
     let (pid, padre) = (senuelo.id(), std::process::id());
@@ -313,15 +314,16 @@ fn sandbox_en_la_celda() {
     assert_eq!(cli(&["--stubs", "--sandbox"]).cell(), "oxc+carril_a+tal_cual+stubs+sandbox");
 }
 
-/// `--sandbox-red`: solo si esta maquina puede armar los namespaces (si no, se saltea con
-/// una linea en stderr; `probar_sandbox` es lo que corta la corrida en ese caso).
+/// `--sandbox-red`: necesita que esta maquina arme los namespaces (si no, falla; con
+/// `DIFUZZ_SIN_USERNS=1` se saltea con una linea en stderr, 7.5; `probar_sandbox` es lo que
+/// corta la corrida en ese caso).
 #[test]
 fn sandbox_red() {
     if !crate::test_util::requiere_node() {
         return;
     }
-    if let Err(e) = crate::runner::probar_sandbox(Sandbox::PermisosYRed) {
-        eprintln!("DIFUZZ_SALTEADO_SIN_USERNS: sandbox_red: {e}");
+    // 7.5: sin user namespaces falla (salvo DIFUZZ_SIN_USERNS=1, test_util.rs).
+    if !crate::test_util::requiere_userns(crate::runner::probar_sandbox(Sandbox::PermisosYRed)) {
         return;
     }
     let (b, _) = base("red");
@@ -479,9 +481,9 @@ fn sandbox_prioridad_y_senales_sin_lanzar() {
     let preload = Preload::write_tagged("sandbox-prioridad").unwrap();
     let t = Duration::from_secs(20);
     let mut modos = vec![Sandbox::Permisos];
-    match crate::runner::probar_sandbox(Sandbox::PermisosYRed) {
-        Ok(()) => modos.push(Sandbox::PermisosYRed),
-        Err(e) => eprintln!("DIFUZZ_SALTEADO_SIN_USERNS: sandbox_prioridad_y_senales_sin_lanzar con la red: {e}"),
+    // 7.5: sin user namespaces falla (salvo DIFUZZ_SIN_USERNS=1, test_util.rs).
+    if crate::test_util::requiere_userns(crate::runner::probar_sandbox(Sandbox::PermisosYRed)) {
+        modos.push(Sandbox::PermisosYRed);
     }
     let mut senuelo = std::process::Command::new("sleep").arg("60").spawn().unwrap();
     let pid = senuelo.id();

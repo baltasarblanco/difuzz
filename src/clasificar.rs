@@ -131,7 +131,11 @@ pub fn clasificar<'a>(
     static_flags: &[&'static str],
     names_cfg: Option<&minify::Config>,
     nota_pasada: Option<&str>,
+    // Integracion 7.1 + 7.4: el runner con el sensor si A y B se compararon sin el (I3); el
+    // camino de B sale de ahi (`recheck::camino_de_b`).
+    i3_con: Option<&runner::Runner>,
 ) -> Clasificacion<'a> {
+    let i3 = i3_con.map(|c| (c, minified));
     let mut traza = Traza::default();
     let mut flags: Vec<&str> = a.flags.iter().map(String::as_str).collect();
     flags.extend_from_slice(static_flags);
@@ -188,7 +192,10 @@ pub fn clasificar<'a>(
     // b1-b (R2-H02): solo un M16 concluyente pone el flag (depth_recheck).
     let par = ("profundidad_irrelevante", "profundidad_inconcluso");
     let a_otra_vez = || runner.run(original);
-    match depth_recheck(a, b, &deep, a_otra_vez, || runner.run_with_args(minified, &[runner::DEEP_STACK])) {
+    // b7-1 (r04: B todavia llega al limite de la pila y corre el catch con el bug): B con la
+    // pila de siempre y con mas pila, con cobertura.
+    let camino = |b2: &runner::Exec| recheck::camino_entorno(runner, minified, b, b2, (&[runner::DEEP_STACK], &[]));
+    match depth_recheck(a, b, &deep, a_otra_vez, || runner.run_with_args(minified, &[runner::DEEP_STACK]), camino) {
         None => traza.paso("profundidad", "no aplica (A con mas pila da lo mismo, o la corrida honda fallo)"),
         Some(recheck::Recheck::Explica) => {
             traza.recheck("profundidad", &recheck::Recheck::Explica, par);
@@ -211,7 +218,7 @@ pub fn clasificar<'a>(
     let rc = ctx.medido.filter(|m| m.rechequea(Rechequeo::Extends));
     if flags.contains(&"extends") {
         if let Some(rc) = rc {
-            let r = extends_matters(runner, rc, original, a, b);
+            let r = extends_matters(runner, rc, original, a, b, || recheck::camino_de_b(runner, i3, b, Some(&["extends"])));
             rechequear(&mut flags, &mut notes, &mut traza, "extends", ("extends_irrelevante", "extends_inconcluso"), r);
         }
     }
@@ -230,7 +237,7 @@ pub fn clasificar<'a>(
             );
         }
         if flags.contains(&"with") && rc.rechequea(Rechequeo::With) {
-            let r = recheck::with_matters(runner, (rc.minifier, rc.preset, rc.kind), original, a, b);
+            let r = recheck::with_matters(runner, (rc.minifier, rc.preset, rc.kind), original, minified, a, b);
             rechequear(&mut flags, &mut notes, &mut traza, "with", ("with_irrelevante", "with_inconcluso"), r);
         }
         // b4-a (R1-H04 / C3): un re-chequeo para todas las violaciones ubicadas; su
@@ -238,7 +245,7 @@ pub fn clasificar<'a>(
         let nombres: Vec<&'static str> =
             recheck::FLAGS_VIOLACION.iter().map(|(f, _)| *f).filter(|f| flags.contains(f)).collect();
         if !nombres.is_empty() && rc.rechequea(Rechequeo::Violaciones) {
-            let r = recheck::violaciones_matter(runner, (rc.minifier, rc.preset, rc.kind), original, a, b);
+            let r = recheck::violaciones_matter(runner, (rc.minifier, rc.preset, rc.kind), original, a, b, i3);
             let t = match &r {
                 recheck::Recheck::Explica => format!("Explica (quedan {})", nombres.join(", ")),
                 recheck::Recheck::NoExplica => format!("NoExplica -> {}_irrelevante", nombres.join("_irrelevante, ")),
@@ -272,7 +279,7 @@ pub fn clasificar<'a>(
             rechequear(&mut flags, &mut notes, &mut traza, "builtins", ("builtins_irrelevante", "builtins_inconcluso"), r);
         }
         if flags.contains(&"coercion") && rc.rechequea(Rechequeo::Coercion) {
-            let r = recheck::coercion_matters(runner, (rc.minifier, rc.preset, rc.kind), original, a, b);
+            let r = recheck::coercion_matters(runner, (rc.minifier, rc.preset, rc.kind), original, minified, a, b);
             rechequear(&mut flags, &mut notes, &mut traza, "coercion", ("coercion_irrelevante", "coercion_inconcluso"), r);
         }
     }
@@ -283,7 +290,7 @@ pub fn clasificar<'a>(
     // M17: solo si la politica del backend lo pide y en el carril A (sloppy).
     let sloppy = ctx.medido.filter(|m| m.kind == minify::SourceKind::Script).and_then(|m| Some((m, m.minifier.politica().solo_sloppy?)));
     if let (None, Some((m, razon))) = (&why, sloppy) {
-        match sloppy_only(runner, (m.minifier, m.preset), original, a, b) {
+        match sloppy_only(runner, (m.minifier, m.preset), original, minified, a, b) {
             Ok(Sloppy::Si) => {
                 flags.push("solo_sloppy");
                 why = Some(razon.into());
@@ -428,12 +435,15 @@ fn names_only(runner: &runner::Runner, cfg: &minify::Config, original: &str, a: 
 /// El veredicto es el de recheck::veredicto (camino incluido).
 /// n-principio (n01/n02/n04: `extends 1` atrapado y el bug en el catch, que con
 /// `extends null` no corre): rige `recheck::veredicto_neutralizado` (B == A').
+/// b7-1: con `camino` (el sensor no tiene que ver en B un `extends` que lanza; si el bug deja
+/// el valor por defecto, B == A' es coincidencia).
 fn extends_matters(
     runner: &runner::Runner,
     recheck: Medido,
     original: &str,
     a: &runner::Exec,
     b: &runner::Exec,
+    camino: impl FnOnce() -> recheck::Camino,
 ) -> recheck::Recheck {
     let Medido { minifier, preset, kind } = recheck;
     let neutral = match analisis::sin_extends(original, kind) {
@@ -455,7 +465,7 @@ fn extends_matters(
         return recheck::Recheck::Inconcluso(format!("la variante con `extends null` no termino ({:?})", a2.status));
     }
     let b2 = runner.run(&m2);
-    recheck::veredicto_neutralizado(a, b, &a2, &b2, None)
+    recheck::veredicto_neutralizado(a, b, &a2, &b2, None, camino)
 }
 
 /// b1-b: aplica a `flags` el resultado del re-chequeo de `flag`. Solo `Explica`
@@ -502,12 +512,15 @@ fn apply_recheck(
 /// corrida honda difiere): si difiere de A, la causa no es la pila y el re-chequeo es
 /// Inconcluso (no clasifica; el destino lo deciden los demas). Una cuenta de pila
 /// determinista no cambia de camino.
+/// b7-1: `camino` recibe B con mas pila (B') y dice si B cambia de camino con mas pila
+/// (`recheck::veredicto_neutralizado`).
 fn depth_recheck(
     a: &runner::Exec,
     b: &runner::Exec,
     deep: &runner::Exec,
     a_otra_vez: impl FnOnce() -> runner::Exec,
     deep_b: impl FnOnce() -> runner::Exec,
+    camino: impl FnOnce(&runner::Exec) -> recheck::Camino,
 ) -> Option<recheck::Recheck> {
     if matches!(deep.status, Status::Failed(_)) || same_exec(deep, a) {
         return None;
@@ -525,7 +538,8 @@ fn depth_recheck(
             "A tal cual, sin cambiar la pila, tampoco da lo mismo: la salida no es determinista (reloj real u otra fuente) y la diferencia con mas pila no se puede atribuir a la pila".into(),
         ));
     }
-    Some(recheck::veredicto_neutralizado(a, b, deep, &deep_b(), None))
+    let b2 = deep_b();
+    Some(recheck::veredicto_neutralizado(a, b, deep, &b2, None, || camino(&b2)))
 }
 
 /// M17: oxc no soporta sloppy (D1 del CLAUDE.md). Ante una divergencia de oxc
@@ -555,10 +569,14 @@ fn depth_recheck(
 /// confunde el `arguments` propio de `inner` con el binding de afuera). Un bug que no
 /// depende del nombre sigue en el minificado del renombrado (NoExplica por ese lado) y
 /// cae al estricto con B == A'.
+/// b7-1 (q05/q12: la rama que solo corre en sloppy, con el bug, y el valor por defecto en
+/// B == A'): el estricto ademas exige que B no cambie de camino en estricto
+/// (`recheck::camino_estricto`). `Renombrando` no compara contra A', no cambia.
 fn sloppy_only(
     runner: &runner::Runner,
     (minifier, preset): (backend::Minifier, minify::Preset),
     original: &str,
+    minified: &str,
     a: &runner::Exec,
     b: &runner::Exec,
 ) -> Result<Sloppy, String> {
@@ -613,7 +631,7 @@ fn sloppy_only(
         return Err(format!("re-chequeo sloppy inconcluso: la variante estricta no termino ({:?})", a2.status));
     }
     let b2 = runner.run(&m2);
-    match recheck::veredicto_neutralizado(a, b, &a2, &b2, None) {
+    match recheck::veredicto_neutralizado(a, b, &a2, &b2, None, || recheck::camino_estricto(runner, minified, b)) {
         recheck::Recheck::Explica => Ok(si),
         recheck::Recheck::NoExplica => Ok(Sloppy::No),
         recheck::Recheck::Inconcluso(n) => Err(format!("re-chequeo sloppy inconcluso: {n}")),
@@ -725,16 +743,16 @@ mod tests {
                 panic!("no minifica: {src}");
             };
             let (a, b) = (r.run(&original), r.run(&minified));
-            (original, a, b)
+            (original, minified, a, b)
         };
         // terser/compress/dead_code/dead_code_2_should_warn (corpus completo): `g`
         // es una funcion en bloque (Anexo B, solo sloppy). En sloppy `g()` da
         // TypeError, en estricto ReferenceError: mismo punto. Se aceptaba como sloppy
         // (`mismo_camino`). n-principio: B (`throw Error`) no es A' (`throw ReferenceError`)
         // y con la misma forma pasaba n34 (A' == A, el bug en la rama sloppy): inconcluso.
-        let (o, a, b) = ab("function f(){g();x=10;throw new Error(`foo`);if(x){y();var x;function g(){}(function(){var q;function y(){}})()}}f();\n");
+        let (o, m, a, b) = ab("function f(){g();x=10;throw new Error(`foo`);if(x){y();var x;function g(){}(function(){var q;function y(){}})()}}f();\n");
         assert_eq!(a.stdout, "!dz throw TypeError\n");
-        let s = sloppy_only(&r, (Minifier::Oxc, Preset::CoreDefaults), &o, &a, &b);
+        let s = sloppy_only(&r, (Minifier::Oxc, Preset::CoreDefaults), &o, &m, &a, &b);
         assert!(s.as_ref().is_err_and(|n| n.contains("B != A'")), "{s:?}");
         // n-principio (n33, n34): el bug en la rama que solo corre en sloppy. Con `veredicto`
         // iban a known/ (`localizada` y `mismo_camino`); ahora inconcluso.
@@ -742,22 +760,22 @@ mod tests {
             "function f() { return this; }\nvar r = f() === undefined ? \"estricto\" : Math.cbrt(-8);\nconsole.log(r);\n",
             "function f() { return this; }\nvar r = f() === undefined ? \"s\" : (Math.cbrt(-8) < 0 ? \"s\" : \"x\");\nconsole.log(r);\n",
         ] {
-            let (o, a, b) = ab(src);
+            let (o, m, a, b) = ab(src);
             assert_ne!(b.stdout, a.stdout, "oxc ya no pliega mal Math.cbrt(-8): buscar otro bug");
-            let s = sloppy_only(&r, (Minifier::Oxc, Preset::CoreDefaults), &o, &a, &b);
+            let s = sloppy_only(&r, (Minifier::Oxc, Preset::CoreDefaults), &o, &m, &a, &b);
             assert!(s.as_ref().is_err_and(|n| n.contains("B != A'")), "{src}: {s:?}");
         }
         let with = "with ({}) { console.log(1); }\n";
-        assert!(sloppy_only(&r, (Minifier::Oxc, Preset::CarrilA), with, &r.run(with), &r.run(with)).is_err());
-        let (o, a, b) = ab("const __proto__ = 0;\nconsole.log(Object.keys({ __proto__ }));\n");
-        assert_eq!(sloppy_only(&r, (Minifier::Oxc, Preset::CoreDefaults), &o, &a, &b), Ok(super::Sloppy::No));
+        assert!(sloppy_only(&r, (Minifier::Oxc, Preset::CarrilA), with, with, &r.run(with), &r.run(with)).is_err());
+        let (o, m, a, b) = ab("const __proto__ = 0;\nconsole.log(Object.keys({ __proto__ }));\n");
+        assert_eq!(sloppy_only(&r, (Minifier::Oxc, Preset::CoreDefaults), &o, &m, &a, &b), Ok(super::Sloppy::No));
         // b1-b (R1-H01, c4 10-rt-sloppy-miente): el bug de oxc (borra la IIFE con
         // rest y default con efecto) esta en la rama sloppy. En estricto el
         // original toma la otra rama: antes `Ok(true)` (known/), ahora inconcluso.
-        let (o, a, b) = ab("function rec(v) { console.log(v); }\nfunction f() { return this; }\nif (f() === undefined) {\n  console.log(\"estricto\");\n} else {\n  (function (...[value = rec(\"rest\")]) {})();\n}\nconsole.log(\"fin\");\n");
+        let (o, m, a, b) = ab("function rec(v) { console.log(v); }\nfunction f() { return this; }\nif (f() === undefined) {\n  console.log(\"estricto\");\n} else {\n  (function (...[value = rec(\"rest\")]) {})();\n}\nconsole.log(\"fin\");\n");
         assert_eq!(a.stdout, "rest\nfin\n");
         assert_ne!(b.stdout, a.stdout, "oxc ya no tiene el bug de 9460: buscar otro");
-        let s = sloppy_only(&r, (Minifier::Oxc, Preset::CoreDefaults), &o, &a, &b);
+        let s = sloppy_only(&r, (Minifier::Oxc, Preset::CoreDefaults), &o, &m, &a, &b);
         assert!(s.as_ref().is_err_and(|n| n.contains("B != A'")), "{s:?}");
     }
 
@@ -780,48 +798,48 @@ mod tests {
                 panic!("no minifica: {src}");
             };
             let (a, b) = (r.run(&original), r.run(&minified));
-            (original, a, b)
+            (original, minified, a, b)
         };
         // terser/compress/collapse_vars/collapse_vars_arguments (corpus completo).
         let cva = "var outer = function () {\n    var k = 7,\n        arguments = 5,\n        inner = function () {\n            console.log(arguments);\n        };\n    inner(k, 1);\n};\nouter();\n";
         for preset in [Preset::CoreDefaults, Preset::CarrilA] {
-            let (o, a, b) = ab(cva, preset);
+            let (o, m, a, b) = ab(cva, preset);
             assert_eq!(a.stdout, "[Arguments] { '0': 7, '1': 1 }\n");
             assert_ne!(b.stdout, a.stdout, "oxc ya no tiene el bug de collapse_vars_arguments: buscar otro");
             // n-principio: con el renombre solo (sin "use strict") el minificado ya da lo mismo.
             // Antes SiRenombrando (estricto + `mismo_camino`, que ya no rige).
-            assert_eq!(sloppy_only(&r, (Minifier::Oxc, preset), &o, &a, &b), Ok(Sloppy::Renombrando), "{preset:?}");
+            assert_eq!(sloppy_only(&r, (Minifier::Oxc, preset), &o, &m, &a, &b), Ok(Sloppy::Renombrando), "{preset:?}");
         }
         // Miente: `var arguments` inofensivo y el bug de 9460 (IIFE con rest y
         // default con efecto) en otra sentencia. Renombrado y en estricto, el bug sigue.
-        let (o, a, b) = ab("function rec(v) { console.log(v); }\nfunction g() { var arguments = 1; return arguments; }\nconsole.log(g());\n(function (...[value = rec(\"rest\")]) {})();\nconsole.log(\"fin\");\n", Preset::CoreDefaults);
+        let (o, m, a, b) = ab("function rec(v) { console.log(v); }\nfunction g() { var arguments = 1; return arguments; }\nconsole.log(g());\n(function (...[value = rec(\"rest\")]) {})();\nconsole.log(\"fin\");\n", Preset::CoreDefaults);
         assert_eq!(a.stdout, "1\nrest\nfin\n");
         assert_ne!(b.stdout, a.stdout, "oxc ya no tiene el bug de 9460: buscar otro");
-        assert_eq!(sloppy_only(&r, (Minifier::Oxc, Preset::CoreDefaults), &o, &a, &b), Ok(Sloppy::No));
+        assert_eq!(sloppy_only(&r, (Minifier::Oxc, Preset::CoreDefaults), &o, &m, &a, &b), Ok(Sloppy::No));
         // B1 (revision-b456, r01-args-getter): `var arguments;` sin inicializador conserva
         // el objeto `arguments`; renombrado vale `undefined` y A' lanza en la linea del
         // bug (Issue A de ENVIAR.md: el spread con getter se mueve). Antes: SiRenombrando
         // (known/). Ahora el renombre solo ya cambia A: inconcluso (div/).
         let r01 = "function f() {\n  var arguments;\n  let result = \"FAIL\";\n  const o = { ...{ get prop() { result = \"PASS\"; } } };\n  console.log(arguments.length, result);\n  return o;\n}\nf(1, 2);\n";
         for preset in [Preset::CoreDefaults, Preset::CarrilA] {
-            let (o, a, b) = ab(r01, preset);
+            let (o, m, a, b) = ab(r01, preset);
             assert_ne!(b.stdout, a.stdout, "oxc ya no tiene el Issue A: buscar otro");
-            let s = sloppy_only(&r, (Minifier::Oxc, preset), &o, &a, &b);
+            let s = sloppy_only(&r, (Minifier::Oxc, preset), &o, &m, &a, &b);
             assert!(s.as_ref().is_err_and(|n| n.contains("ya cambia")), "{preset:?}: {s:?}");
         }
         // Miente (como c4 10-rt-sloppy-miente): el bug esta en la rama que el
         // estricto apaga. Con `arguments` renombrado sigue siendo inconcluso.
-        let (o, a, b) = ab("function rec(v) { console.log(v); }\nfunction g() { var arguments = 1; return arguments; }\ng();\nfunction f() { return this; }\nif (f() === undefined) {\n  console.log(\"estricto\");\n} else {\n  (function (...[value = rec(\"rest\")]) {})();\n}\nconsole.log(\"fin\");\n", Preset::CoreDefaults);
+        let (o, m, a, b) = ab("function rec(v) { console.log(v); }\nfunction g() { var arguments = 1; return arguments; }\ng();\nfunction f() { return this; }\nif (f() === undefined) {\n  console.log(\"estricto\");\n} else {\n  (function (...[value = rec(\"rest\")]) {})();\n}\nconsole.log(\"fin\");\n", Preset::CoreDefaults);
         assert_eq!(a.stdout, "rest\nfin\n");
         assert_ne!(b.stdout, a.stdout);
-        let s = sloppy_only(&r, (Minifier::Oxc, Preset::CoreDefaults), &o, &a, &b);
+        let s = sloppy_only(&r, (Minifier::Oxc, Preset::CoreDefaults), &o, &m, &a, &b);
         assert!(s.as_ref().is_err_and(|n| n.contains("B != A'")), "{s:?}");
         // n-principio: n34 con un `var arguments` inofensivo (para tomar el camino del
         // renombre). El renombre solo no apaga el bug (sigue en la rama sloppy) y en estricto
         // B != A': inconcluso. Con `veredicto` (`mismo_camino`) era SiRenombrando, known/.
-        let (o, a, b) = ab("function g() { var arguments = 1; return arguments; }\ng();\nfunction f() { return this; }\nvar r = f() === undefined ? \"s\" : (Math.cbrt(-8) < 0 ? \"s\" : \"x\");\nconsole.log(r);\n", Preset::CoreDefaults);
+        let (o, m, a, b) = ab("function g() { var arguments = 1; return arguments; }\ng();\nfunction f() { return this; }\nvar r = f() === undefined ? \"s\" : (Math.cbrt(-8) < 0 ? \"s\" : \"x\");\nconsole.log(r);\n", Preset::CoreDefaults);
         assert_eq!((a.stdout.as_str(), b.stdout.as_str()), ("s\n", "x\n"));
-        let s = sloppy_only(&r, (Minifier::Oxc, Preset::CoreDefaults), &o, &a, &b);
+        let s = sloppy_only(&r, (Minifier::Oxc, Preset::CoreDefaults), &o, &m, &a, &b);
         assert!(s.as_ref().is_err_and(|n| n.contains("B != A'")), "{s:?}");
     }
 
@@ -851,7 +869,9 @@ mod tests {
     #[test]
     fn profundidad_concluyente() {
         use super::depth_recheck;
-        use crate::{recheck::Recheck, runner::{Exec, Status}};
+        use crate::{recheck::{Camino, Recheck}, runner::{Exec, Status}};
+        // b7-1: B no cambia de camino con mas pila (lo de antes); `distinto`, abajo.
+        let igual = |_: &Exec| Camino::Igual;
         let ex = |status: Status, s: &str| Exec {
             status,
             stdout: s.into(),
@@ -866,40 +886,45 @@ mod tests {
         // n-ruido: A tal cual otra vez solo se corre si la corrida honda difiere de A y termino.
         let nunca_a = || -> Exec { panic!("no hacia falta correr A otra vez") };
         // A no depende de la pila: no hay flag.
-        assert_eq!(depth_recheck(&ok("1\nx\n"), &ok("2\nx\n"), &ok("1\nx\n"), nunca_a, nunca), None);
+        assert_eq!(depth_recheck(&ok("1\nx\n"), &ok("2\nx\n"), &ok("1\nx\n"), nunca_a, nunca, igual), None);
         // Solo cambia la linea que depende de la pila y con mas pila A y B dan lo mismo. Paso 7
         // (revision-tint B1): antes concluyente por `localizada`; ahora inconcluso (div/),
         // porque con la misma forma pasaba r09 (el bug en el catch del RangeError, que con mas
         // pila no corre). Gana el principio; no hay un positivo asi en el golden, la aceptacion
         // ni los known/ del corpus de SWC en oxc (MEDIDO).
-        let r = depth_recheck(&ok("1200\nx\n"), &ok("1500\nx\n"), &ok("2400\nx\n"), || ok("1200\nx\n"), || ok("2400\nx\n"));
+        let r = depth_recheck(&ok("1200\nx\n"), &ok("1500\nx\n"), &ok("2400\nx\n"), || ok("1200\nx\n"), || ok("2400\nx\n"), igual);
         assert!(matches!(r, Some(Recheck::Inconcluso(_))), "{r:?}");
-        let r = depth_recheck(&ok("-2\n"), &ok("NaN\n"), &ok("none\n"), || ok("-2\n"), || ok("none\n"));
+        let r = depth_recheck(&ok("-2\n"), &ok("NaN\n"), &ok("none\n"), || ok("-2\n"), || ok("none\n"), igual);
         assert!(matches!(r, Some(Recheck::Inconcluso(_))), "{r:?}");
         // t-principio: una cuenta de marcos sin tope (A y B con mas pila tampoco dan lo
         // mismo) ya no es concluyente.
-        assert_eq!(depth_recheck(&ok("1200\nx\n"), &ok("1500\nx\n"), &ok("2400\nx\n"), || ok("1200\nx\n"), || ok("3000\nx\n")), Some(Recheck::NoExplica));
+        assert_eq!(depth_recheck(&ok("1200\nx\n"), &ok("1500\nx\n"), &ok("2400\nx\n"), || ok("1200\nx\n"), || ok("3000\nx\n"), igual), Some(Recheck::NoExplica));
         // B da lo mismo que A con mas pila (A se quedo sin pila, B no).
-        assert_eq!(depth_recheck(&ok("corto\n"), &ok("largo\n"), &ok("largo\n"), || ok("corto\n"), || ok("largo\n")), Some(Recheck::Explica));
+        assert_eq!(depth_recheck(&ok("corto\n"), &ok("largo\n"), &ok("largo\n"), || ok("corto\n"), || ok("largo\n"), igual), Some(Recheck::Explica));
+        // b7-1 (revision n2, r04): lo mismo, pero B cambia de camino con mas pila (corre el catch
+        // del RangeError con el bug y deja el valor por defecto): la coincidencia no explica.
+        let distinto = |_: &Exec| Camino::Distinto("cobertura".into());
+        let r = depth_recheck(&ok("corto\n"), &ok("largo\n"), &ok("largo\n"), || ok("corto\n"), || ok("largo\n"), distinto);
+        assert!(matches!(r, Some(Recheck::Inconcluso(ref n)) if n.contains("todavia pasa por la violacion")), "{r:?}");
         // 07-profundidad-miente: ademas de la linea de la pila, B pierde otra (y con mas pila tambien).
-        let r = depth_recheck(&ok("playo 3\n[ '__proto__' ]\n"), &ok("playo 5\n[]\n"), &ok("hondo 1\n[ '__proto__' ]\n"), || ok("playo 3\n[ '__proto__' ]\n"), || ok("hondo 1\n[]\n"));
+        let r = depth_recheck(&ok("playo 3\n[ '__proto__' ]\n"), &ok("playo 5\n[]\n"), &ok("hondo 1\n[ '__proto__' ]\n"), || ok("playo 3\n[ '__proto__' ]\n"), || ok("hondo 1\n[]\n"), igual);
         assert_eq!(r, Some(Recheck::NoExplica));
         // t-principio (a07-profundidad-linea): el bug en la misma linea que la cuenta de pila.
         // Antes `localizada` lo aceptaba (Explica, known/).
-        let r = depth_recheck(&ok("9000 PASS\n"), &ok("9500 FAIL\n"), &ok("18000 PASS\n"), || ok("9000 PASS\n"), || ok("18000 FAIL\n"));
+        let r = depth_recheck(&ok("9000 PASS\n"), &ok("9500 FAIL\n"), &ok("18000 PASS\n"), || ok("9000 PASS\n"), || ok("18000 FAIL\n"), igual);
         assert_eq!(r, Some(Recheck::NoExplica));
         // R2-H02: la corrida honda en Timeout no es evidencia de profundidad.
-        let r = depth_recheck(&ok("1\n"), &ok("2\n"), &ex(Status::Timeout, ""), nunca_a, nunca);
+        let r = depth_recheck(&ok("1\n"), &ok("2\n"), &ex(Status::Timeout, ""), nunca_a, nunca, igual);
         assert!(matches!(r, Some(Recheck::Inconcluso(ref n)) if n.contains("Timeout")), "{r:?}");
         // Un Failed del fuzzer sigue sin opinar.
-        assert_eq!(depth_recheck(&ok("1\n"), &ok("2\n"), &ex(Status::Failed("x".into()), ""), nunca_a, nunca), None);
+        assert_eq!(depth_recheck(&ok("1\n"), &ok("2\n"), &ex(Status::Failed("x".into()), ""), nunca_a, nunca, igual), None);
         // n-ruido (t-real, Timeout con `expiry` de reloj real): A con mas pila da otra salida,
         // pero A tal cual tambien. Antes: B con mas pila coincidia por azar con A con mas pila
         // y la pila "explicaba" (known/). Ahora inconcluso, sin correr B con mas pila.
-        let r = depth_recheck(&ok("expiry 45\n"), &ok("expiry 46\n"), &ok("expiry 47\n"), || ok("expiry 44\n"), nunca);
+        let r = depth_recheck(&ok("expiry 45\n"), &ok("expiry 46\n"), &ok("expiry 47\n"), || ok("expiry 44\n"), nunca, igual);
         assert!(matches!(r, Some(Recheck::Inconcluso(ref n)) if n.contains("no es determinista")), "{r:?}");
         // Si A tal cual falla por el fuzzer, sigue el camino de siempre.
-        let r = depth_recheck(&ok("corto\n"), &ok("largo\n"), &ok("largo\n"), || ex(Status::Failed("x".into()), ""), || ok("largo\n"));
+        let r = depth_recheck(&ok("corto\n"), &ok("largo\n"), &ok("largo\n"), || ex(Status::Failed("x".into()), ""), || ok("largo\n"), igual);
         assert_eq!(r, Some(Recheck::Explica));
     }
 
@@ -962,7 +987,10 @@ mod tests {
     /// (sin el sensor no hay `tdz_atrapada`); ahora A hereda lo que el sensor vio antes del
     /// tope y el re-chequeo de violaciones (sin el sensor, B == A') decide. Los negativos
     /// (bug real al lado, o en el catch de la TDZ) siguen en div/, y una TDZ despues del
-    /// tope tambien (el sensor no la vio: limite documentado).
+    /// tope tambien (el sensor no la vio: limite documentado). Integracion 7.1 + 7.4: Explica
+    /// exige ademas el camino de B (7.1): una corrida de B con el sensor (tope 4096) entera, que
+    /// da lo mismo que B y tiene su misma cobertura de V8 sin el sensor, sin la violacion
+    /// (`recheck::camino_sensor_i3`; `tope_y_camino_de_b` prueba los casos que no pasan).
     #[test]
     fn tdz_atrapada_pasado_el_tope() {
         use super::Medido;
@@ -988,6 +1016,8 @@ mod tests {
         let tdz = "try { x; } catch (e) { n++; }\n";
         let getter = "const o = { ...{ get prop() { n = \"PASS\"; } } };\nconsole.log(n);\nconsole.log(o);\n";
         for (rel, src, known_div, paso) in [
+            // Integracion 7.1 + 7.4: B tambien pasa el tope (el ruido sigue en el minificado); su
+            // camino (7.1) sale de B con el sensor y tope 4096: entera, misma cobertura, sin la violacion.
             ("pos-antes", format!("let n = 0;\n{tdz}{ruido}console.log(n);\nlet x = 1;\n"), (1, 0), "  violaciones: Explica"),
             ("pos-loop", "let n = 0;\nfor (let i = 0; i < 300; i++) { try { x; } catch (e) { n++; } }\nconsole.log(n);\nlet x = 1;\n".into(), (1, 0), "  violaciones: Explica"),
             ("neg-getter", format!("let n = 0;\n{tdz}{ruido}let x = 1;\n{getter}"), (0, 1), "  violaciones: NoExplica"),
@@ -1006,6 +1036,65 @@ mod tests {
             assert!(meta.contains(paso), "{rel}: {meta}");
             let heredo = meta.contains("-> A y B comparados sin el sensor (I3); violaciones que vio el sensor (7.4): A tdz ");
             assert_eq!(heredo, rel != "lim-despues", "{rel}: {meta}");
+        }
+        drop(r);
+        std::fs::remove_dir_all(&d).unwrap();
+    }
+
+    /// Integracion 7.1 + 7.4 (H3 de rev-7.1; rev-int H1), de punta a punta con oxc: casos de
+    /// aceptacion de 7.4 (`23-t01`, `23-t02`), de 7.1 (`23-b71-r01`, con el ruido de 7.4 para que
+    /// A y B pasen el tope) y de rev-int (`23-i01`, `23-i02`: el programa nota el sensor). A y B
+    /// se comparan sin el sensor (I3) y el camino de B (7.1) sale de una corrida de B con el sensor
+    /// (tope 4096) que tiene que correr entera, dar lo mismo que B y tener la misma cobertura de
+    /// V8 que B sin el sensor (`recheck::camino_sensor_i3`): t01/t02 known/; r01 div/ (B todavia
+    /// pasa por la TDZ con el bug); t02 con 5000 excepciones div/ (tampoco entera); i01/i02 div/
+    /// (con el sensor B toma otro camino). Ningun bug real a known/; algun positivo se pierde.
+    #[test]
+    fn tope_y_camino_de_b() {
+        use super::Medido;
+        use crate::{backend::Minifier, cache, compare_and_report, known, minify, oracle, runner, triage, Ctx, Stats};
+        use std::path::Path;
+        if !crate::test_util::requiere_node() {
+            return;
+        }
+        let d = std::env::temp_dir().join(format!("difuzz-test-tope-camino-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        let reporter = oracle::Reporter::new(&d, "test".into(), runner::PRELOAD);
+        let known = known::Known::load(&d, &d, 0, Minifier::Oxc);
+        let cache = cache::CacheA::new(None, &[]);
+        let triage = triage::Triage::load(&d);
+        let (preset, kind) = (minify::Preset::CoreDefaults, minify::SourceKind::Script);
+        let medido = Some(Medido { minifier: Minifier::Oxc, preset, kind });
+        let ctx = Ctx { reporter: &reporter, known: &known, cache: &cache, triage: &triage, medido };
+        let preload = runner::Preload::write_tagged("tope-camino").unwrap();
+        let r = runner::Runner::new(&preload, crate::test_util::id_runner(), std::time::Duration::from_secs(20));
+        let cfg = preset.build(Minifier::Oxc, kind);
+        let leer = |c: &str| std::fs::read_to_string(format!("{}/tests/aceptacion/rechequeos/corpus/{c}/input.js", env!("CARGO_MANIFEST_DIR"))).unwrap();
+        let ruido = |n: u32| format!("for (let i = 0; i < {n}; i++) {{ try {{ null.x; }} catch (e) {{}} }}\n");
+        let r01 = leer("23-b71-r01-tdz-vacio");
+        let r01_tope = r01.replacen("console.log", &format!("{}console.log", ruido(300)), 1);
+        let t02_5000 = leer("23-t02-tope-tdz-antes-positivo").replace("i < 1000", "i < 5000");
+        assert_ne!(r01, r01_tope);
+        // (caso, programa, known/div, texto que tiene que estar en meta.txt)
+        for (rel, src, known_div, paso) in [
+            ("t01", leer("23-t01-tope-tdz-loop-positivo"), (1, 0), "  violaciones: Explica"),
+            ("t02", leer("23-t02-tope-tdz-antes-positivo"), (1, 0), "  violaciones: Explica"),
+            ("r01-tope", r01_tope, (0, 1), "el sensor ve en B la violacion tdz"),
+            ("t02-5000", t02_5000, (0, 1), "tampoco corrio entero (sensor_tope)"),
+            ("i01", leer("23-i01-sensor-detectado-tope-b"), (0, 1), "con el sensor B toma otro camino que sin el"),
+            ("i02", leer("23-i02-sensor-detectado-b-entero"), (0, 1), "con el sensor B toma otro camino que sin el"),
+        ] {
+            let minify::Outcome::Ok { original, minified, .. } = minify::prepare(&src, &cfg) else { panic!("no minifica") };
+            let a = r.run(&original);
+            assert_eq!(a.sensor_degradado(), Some(runner::SENSOR_TOPE), "{rel}: sin esto el test no prueba nada");
+            let mut st = Stats::default();
+            let p = format!("{rel}/input.js");
+            assert!(compare_and_report(&ctx, &r, &mut st, Path::new(&p), &original, &minified, a, false, None, false, &[], None), "{rel}");
+            assert_eq!((st.known, st.divergences, st.sensor_repetidos), (known_div.0, known_div.1, 1), "{rel}");
+            let dir = if known_div.0 == 1 { "known" } else { "div" };
+            let meta = std::fs::read_to_string(d.join(format!("{dir}/{rel}/meta.txt"))).unwrap();
+            assert!(meta.contains(paso), "{rel}: {meta}");
         }
         drop(r);
         std::fs::remove_dir_all(&d).unwrap();

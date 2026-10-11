@@ -220,6 +220,32 @@ mod tests {
         assert_eq!(Minifier::parse("terser"), None);
     }
 
+    /// 7.5: `TODOS`, `ALL` y la linea `--minifier` del USAGE (main.rs) dicen los mismos
+    /// backends, a mano en tres lugares. `TODOS` tiene cada backend de produccion y no el de
+    /// prueba (el match es exhaustivo: un backend nuevo no compila sin decidir aca si es de
+    /// produccion; agregarlo tambien a la lista); `ALL` son sus nombres en ese orden, y el
+    /// USAGE muestra `ALL` y el default (`POR_DEFECTO`).
+    #[test]
+    fn todos_all_y_usage_coinciden() {
+        let de_produccion = |m: Minifier| match m {
+            Minifier::Swc | Minifier::Oxc => true,
+            Minifier::Identidad => false,
+        };
+        for m in [Minifier::Swc, Minifier::Oxc, Minifier::Identidad] {
+            assert_eq!(Minifier::TODOS.contains(&m), de_produccion(m), "{m:?} en TODOS");
+            assert_eq!(Minifier::parse(m.name()), Some(m));
+        }
+        let nombres: Vec<&str> = Minifier::TODOS.iter().map(|m| m.name()).collect();
+        assert_eq!(Minifier::ALL, nombres.join(" | "));
+        let linea = crate::USAGE
+            .lines()
+            .find_map(|l| l.trim_start().strip_prefix("--minifier M "))
+            .expect("el USAGE no tiene la linea de --minifier");
+        let (lista, def) = linea.split_once("(default:").expect("la linea de --minifier sin default");
+        assert_eq!(lista.trim(), Minifier::ALL, "USAGE: {linea}");
+        assert_eq!(def.trim().trim_end_matches(')').trim(), Minifier::POR_DEFECTO.name(), "USAGE: {linea}");
+    }
+
     /// 7b: cada backend declara lo suyo: abreviaturas distintas, y ninguno
     /// comparte con otro la tabla de asunciones, las rutas o el backlog (un
     /// `..swc::POLITICA` copiaria las referencias y este test lo ve).

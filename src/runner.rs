@@ -48,6 +48,12 @@ pub const SENSOR_TOPE: &str = "sensor_tope";
 /// atrapada solo los ve el sensor; `coercion_symbol` tambien sale de un Symbol no atrapado.
 pub const FLAGS_DEL_SENSOR: [&str; 3] = ["tdz_atrapada", "coercion_symbol", "extends_atrapado"];
 
+/// Integracion 7.1 + 7.4 (H3 de rev-7.1): el tope de pausas del sensor (`DIFUZZ_MAX_PAUSAS`,
+/// preload.js) de la corrida de B con el sensor que da su camino cuando A y B se compararon sin
+/// el (`recheck::camino_sensor_i3`). 0,5-1,4 ms por pausa (MEDIDO por 7.4): 2-6 s; con muchos
+/// marcos puede llegar al timeout (rev-int H2), y entonces el camino no se sabe.
+pub const MAX_PAUSAS_MAYOR: &str = "4096";
+
 /// n-sandbox: linea del canal de control cuando la ejecucion toco el sandbox (un permiso
 /// denegado: la escribe el preload, `notarSandbox`, o `run_file` si la salida lo muestra).
 pub const SANDBOX: &str = "sandbox";
@@ -170,6 +176,12 @@ impl Exec {
     /// sandbox prendido; main pregunta por `Runner::toco_sandbox`, que exige el sandbox.
     pub fn toco_sandbox(&self) -> bool {
         self.ctl.lines().any(|l| l == SANDBOX)
+    }
+
+    /// b7-1: la cobertura de bloques que dejo el preload (`cobertura <hash> <rangos>`),
+    /// solo si corrio con `Runner::run_con_cobertura`. La ultima linea, si hay varias.
+    pub fn cobertura(&self) -> Option<&str> {
+        self.ctl.lines().rev().find_map(|l| l.strip_prefix("cobertura "))
     }
 
     /// M21: mensaje y stack del throw no atrapado (linea `exc` del canal, con
@@ -541,6 +553,14 @@ impl Runner {
         self.run_inner(js, Opts { env, ..Opts::default() })
     }
 
+    /// b7-1: igual que `run`, con argumentos extra para node, variables de entorno extra
+    /// para el preload y la cobertura de bloques de V8 (DIFUZZ_COBERTURA=1,
+    /// `Exec::cobertura`). Con el sandbox prendido, el inspector se permite aunque no
+    /// haya sensor: la cobertura lo usa.
+    pub fn run_con_cobertura(&self, js: &str, node_args: &[&str], env: &[(&str, &str)]) -> Exec {
+        self.run_inner(js, Opts { node_args, env, cobertura: true, ..Opts::default() })
+    }
+
     /// El timeout de este runner (`--timeout-ms`).
     pub fn timeout(&self) -> Duration {
         self.timeout
@@ -662,6 +682,8 @@ struct Opts<'a> {
     /// t-sensor: el sensor no se prende al arrancar (DIFUZZ_SENSOR=perezoso), ver
     /// `puede_atrapar`. Lo pone `run_inner`; `sin_sensor` manda sobre esto.
     perezoso: bool,
+    /// b7-1: con la cobertura de bloques del preload (`run_con_cobertura`).
+    cobertura: bool,
 }
 
 /// t-sensor: si el programa puede atrapar una excepcion, directa o indirectamente,
@@ -806,7 +828,7 @@ fn run_file(r: &Runner, script: &Path, start: Instant, timeout: Duration, opts: 
     cmd.arg("--no-warnings").args(opts.node_args);
     // n-sandbox: A y B (y todo lo demas) con las mismas flags; el sensor necesita el inspector.
     if r.sandbox.activo() {
-        cmd.args(permisos_node(r, !opts.sin_sensor));
+        cmd.args(permisos_node(r, !opts.sin_sensor || opts.cobertura));
     }
     if r.sandbox.activo() {
         let aislar = (r.sandbox == Sandbox::PermisosYRed).then(Aislar::armar);
@@ -832,6 +854,9 @@ fn run_file(r: &Runner, script: &Path, start: Instant, timeout: Duration, opts: 
         cmd.env("DIFUZZ_SENSOR", "0");
     } else if opts.perezoso {
         cmd.env("DIFUZZ_SENSOR", "perezoso");
+    }
+    if opts.cobertura {
+        cmd.env("DIFUZZ_COBERTURA", "1");
     }
     for (k, v) in opts.env {
         cmd.env(k, v);
@@ -1723,7 +1748,59 @@ mod tests {
         let js = "const t = setTimeout(() => {}, 5), v = setInterval(() => {}, 7), i = setImmediate(() => {});\nv.resultado = \"PASS\";\nclass Timeout { constructor() { this.x = 1; } }\n__difuzzObserve([\"t\", t], [\"v\", v], [\"i\", i], [\"o\", { t, d: { i } }], [\"c\", new Timeout()]);\nclearTimeout(t); clearInterval(v); clearImmediate(i);\n";
         let a = r.run(js);
         assert_eq!(a.status, Status::Exited(0), "{}", a.stderr);
-        assert_eq!(a.stdout, "t = [Timeout]\nv = [Timeout]{\"resultado\": \"PASS\"}\ni = [Immediate]\no = {\"t\": [Timeout], \"d\": {\"i\": [Immediate]}}\nc = inst{\"x\": 1}\n");
+        // b7-3: se ocultan el reloj, la lista enlazada y los ids de async_hooks; el resto
+        // (delay, `_repeat`, `_destroyed`, refed, lo agregado) se imprime.
+        let t = "[Timeout]{\"_idleTimeout\": 5, \"_onTimeout\": fn, \"_timerArgs\": undefined, \"_repeat\": null, \"_destroyed\": false, [Symbol(refed)]: true, [Symbol(kHasPrimitive)]: false, [Symbol(kAsyncContextFrame)]: undefined}";
+        let v = "[Timeout]{\"_idleTimeout\": 7, \"_onTimeout\": fn, \"_timerArgs\": undefined, \"_repeat\": 7, \"_destroyed\": false, \"resultado\": \"PASS\", [Symbol(refed)]: true, [Symbol(kHasPrimitive)]: false, [Symbol(kAsyncContextFrame)]: undefined}";
+        let i = "[Immediate]{\"_onImmediate\": fn, \"_argv\": undefined, \"_destroyed\": false, [Symbol(refed)]: true, [Symbol(kAsyncContextFrame)]: undefined}";
+        assert_eq!(a.stdout, format!("t = {t}\nv = {v}\ni = {i}\no = {{\"t\": {t}, \"d\": {{\"i\": {i}}}}}\nc = inst{{\"x\": 1}}\n"));
+    }
+
+    /// b7-3 (revision n2, MENOR 4): lo que el programa hace con un timer se ve (setInterval o
+    /// setTimeout, delay, cancelado o no, unref, argumentos, `+t`); el reloj no (la misma
+    /// fuente con mas o menos espera antes de armar los timers da la misma salida).
+    #[test]
+    fn timers_de_node_muestran_el_comportamiento() {
+        use super::{Preload, Runner, Status};
+        use std::time::Duration;
+        if !crate::test_util::requiere_node() {
+            return;
+        }
+        let preload = Preload::write_tagged("timers-comp").unwrap();
+        let r = Runner::new(&preload, crate::test_util::id_runner(), Duration::from_secs(20));
+        let correr = |js: &str| {
+            let e = r.run(js);
+            assert_eq!(e.status, Status::Exited(0), "{js}: {}", e.stderr);
+            e.stdout
+        };
+        // Cada variante cambia una cosa del programa: todas las salidas son distintas.
+        let base = "var t = setTimeout(function () {}, 50, 1);\nvar i = setImmediate(function () {});\n";
+        let variantes = [
+            base.to_string(),
+            base.replace("setTimeout", "setInterval"),
+            base.replace("50", "60"),
+            base.replace(", 1)", ", 2)"),
+            format!("{base}clearTimeout(t);\n"),
+            format!("{base}t.unref();\n"),
+            format!("{base}+t;\n"),
+            format!("{base}clearImmediate(i);\n"),
+            format!("{base}i.unref();\n"),
+        ];
+        let obs = "__difuzzObserve([\"t\", t], [\"i\", i]);\nclearTimeout(t); clearImmediate(i);\n";
+        let salidas: Vec<String> = variantes.iter().map(|v| correr(&format!("{v}{obs}"))).collect();
+        for (k, s) in salidas.iter().enumerate() {
+            assert!(!s.contains("_idleStart") && !s.contains("expiry") && !s.contains("asyncId"), "{s}");
+            for (j, o) in salidas.iter().enumerate().skip(k + 1) {
+                assert_ne!(s, o, "variantes {k} y {j}:\n{}\n{}", variantes[k], variantes[j]);
+            }
+        }
+        assert!(salidas[1].contains("\"_repeat\": 50"), "{}", salidas[1]);
+        // El reloj: la misma fuente, con una espera de ~30 ms antes (sin salida ni bindings
+        // observados) y con dos timers del mismo delay en la lista, da lo mismo.
+        let espera = "(function () { for (var q = 0; q < 3e7; q++); })();\n";
+        let par = "var a = setTimeout(function () {}, 70), b = setTimeout(function () {}, 70);\n__difuzzObserve([\"a\", a], [\"b\", b]);\nclearTimeout(a); clearTimeout(b);\n";
+        assert_eq!(correr(&format!("{espera}{base}{obs}")), salidas[0]);
+        assert_eq!(correr(&format!("{espera}{par}")), correr(par));
     }
 
     /// M21: el mensaje y el stack del throw llegan por el canal, sin prender el

@@ -48,7 +48,9 @@ pub fn compare(a: &Exec, b: &Exec) -> Verdict {
     // n-ruido: sin las posiciones de los marcos de stack (normalize_stack_positions).
     // Solo aca: los re-chequeos que miran lineas (recheck::localizada*) ven el marco
     // entero, con su posicion, para reconocerlo como marco.
-    let n = |s: &str| normalize_stack_positions(&normalize_names(s));
+    // 7.5: solo de los archivos de marcos que V8 formateo en A o en B (y los de difuzz).
+    let archivos = archivos_de_marco(a, b);
+    let n = |s: &str| normalize_stack_positions(&normalize_names(s), &archivos);
     let (na, nb) = (n(&a.stdout), n(&b.stdout));
     if na == nb {
         Verdict::Same
@@ -125,10 +127,16 @@ pub fn normalize_names(s: &str) -> String {
 /// Un marco empieza en `at ` precedido por uno o mas espacios y, antes de ellos, el
 /// comienzo de la linea o un `\n` escapado (un stack guardado en un string sale en
 /// JSON, en una sola linea). Termina en el fin de la linea, en otro `\n` escapado o en
-/// una comilla. Solo se toca un `:L:C` seguido del fin del marco, `)` o `,`. Limite: un
-/// programa que imprime a proposito una linea con esa forma (`  at 10:12:30`) pierde
-/// la posicion en la comparacion.
-pub fn normalize_stack_positions(s: &str) -> String {
+/// una comilla. Solo se toca un `:L:C` seguido del fin del marco, `)` o `,`.
+///
+/// 7.5 (revision n2, MENOR 5): y solo si el archivo es de un marco real (`es_archivo_de_marco`):
+/// uno de `reales` (los que el preload anoto al formatear un stack en la corrida, lineas
+/// `marco` del canal: el programa, `node:...`, `<anonymous>`, un `//# sourceURL`) o uno de
+/// difuzz (`difuzz-<pid>-...`, el programa aunque el stack no pase por el preload). Una
+/// linea impresa con forma de marco y otro archivo (`    at main (input.js:3:4)`) conserva
+/// su posicion. Limite: una linea impresa a proposito con el archivo de un marco real
+/// (`__filename`, o el mismo nombre que un `sourceURL` del programa) la pierde igual.
+pub fn normalize_stack_positions(s: &str, reales: &[&str]) -> String {
     let mut out = String::with_capacity(s.len());
     for line in s.split_inclusive('\n') {
         let (mut copied, mut i) = (0, 0);
@@ -147,7 +155,7 @@ pub fn normalize_stack_positions(s: &str) -> String {
                 .min()
                 .map_or(line.len(), |j| cuerpo + j);
             out.push_str(&line[copied..cuerpo]);
-            out.push_str(&sin_posiciones(&line[cuerpo..fin]));
+            out.push_str(&sin_posiciones(&line[cuerpo..fin], reales));
             (copied, i) = (fin, fin);
         }
         out.push_str(&line[copied..]);
@@ -156,11 +164,13 @@ pub fn normalize_stack_positions(s: &str) -> String {
 }
 
 /// El cuerpo de un marco con cada `archivo:L:C` cambiado por `<pos>` (el archivo va
-/// desde el ultimo espacio o `(` anterior).
-fn sin_posiciones(f: &str) -> String {
+/// desde el ultimo espacio o `(` anterior, sin pasar del fin de la posicion anterior). 7.5:
+/// solo si `es_archivo_de_marco(archivo, reales)`. El preload anota los archivos con el
+/// mismo recorrido (`anotarArchivosDeMarco`, preload.js).
+fn sin_posiciones(f: &str, reales: &[&str]) -> String {
     let b = f.as_bytes();
     let digitos = |k: usize| b[k..].iter().take_while(|c| c.is_ascii_digit()).count();
-    let (mut out, mut copied, mut i) = (String::with_capacity(f.len()), 0, 0);
+    let (mut out, mut copied, mut desde, mut i) = (String::with_capacity(f.len()), 0, 0, 0);
     while i < b.len() {
         if b[i] == b':' {
             let n1 = digitos(i + 1);
@@ -168,10 +178,13 @@ fn sin_posiciones(f: &str) -> String {
                 let k = i + 2 + n1;
                 let j = k + digitos(k);
                 if j > k && (j == b.len() || matches!(b[j], b')' | b',')) {
-                    let start = f[copied..i].rfind([' ', '(']).map_or(copied, |s| copied + s + 1);
-                    out.push_str(&f[copied..start]);
-                    out.push_str("<pos>");
-                    (copied, i) = (j, j);
+                    let start = f[desde..i].rfind([' ', '(']).map_or(desde, |s| desde + s + 1);
+                    if es_archivo_de_marco(&f[start..i], reales) {
+                        out.push_str(&f[copied..start]);
+                        out.push_str("<pos>");
+                        copied = j;
+                    }
+                    (desde, i) = (j, j);
                     continue;
                 }
             }
@@ -180,6 +193,36 @@ fn sin_posiciones(f: &str) -> String {
     }
     out.push_str(&f[copied..]);
     out
+}
+
+/// 7.5: prefijo de las lineas del canal con los archivos de los marcos que formateo el
+/// preload (`marco <archivo>`, una por archivo).
+pub const MARCO: &str = "marco ";
+
+/// 7.5: los archivos de marco anotados en el canal de A y de B (sin repetir).
+fn archivos_de_marco<'a>(a: &'a Exec, b: &'a Exec) -> Vec<&'a str> {
+    let mut v: Vec<&str> = a.ctl.lines().chain(b.ctl.lines()).filter_map(|l| l.strip_prefix(MARCO)).collect();
+    v.sort_unstable();
+    v.dedup();
+    v
+}
+
+/// 7.5: `archivo` es el de un marco real: uno que el preload vio en un stack formateado
+/// (`reales`) o un archivo de difuzz (`difuzz-<pid>-...`, como en `normalize_paths`: el
+/// programa, su envoltorio, el preload), que cubre los stacks que no pasan por el preload
+/// (`Error.prepareStackTrace = undefined`, como hace React, o uno propio del programa).
+fn es_archivo_de_marco(archivo: &str, reales: &[&str]) -> bool {
+    if archivo.is_empty() {
+        return false;
+    }
+    if reales.contains(&archivo) {
+        return true;
+    }
+    let base = archivo.rsplit('/').next().unwrap_or(archivo);
+    base.strip_prefix("difuzz-").is_some_and(|r| {
+        let p = r.bytes().take_while(u8::is_ascii_digit).count();
+        p > 0 && r[p..].starts_with('-')
+    })
 }
 
 /// M4: `difuzz-<pid>-w<n>...` (rutas del script, el preload y el cwd por worker,
@@ -650,8 +693,9 @@ mod tests {
     /// el orden de los marcos no.
     #[test]
     fn stack_sin_posiciones() {
-        // Como en `compare`.
-        let n = |s: &str| super::normalize_stack_positions(&n(s));
+        // Como en `compare`, con los archivos que el preload habria anotado (7.5).
+        const REALES: [&str; 6] = ["node:internal/x", "file:///tmp/d-w0.mjs", "/a.js", "<anonymous>", "/tmp/w2.cjs", "/a"];
+        let n = |s: &str| super::normalize_stack_positions(&n(s), &REALES);
         let a ="TypeError: x\n    at cli (/tmp/difuzz-1-tmp/difuzz-1-w0.cjs:2:1016)\n    at /tmp/difuzz-1-tmp/difuzz-1-w0.cjs:2:929\n    at new A (node:internal/x:12:3)\n    at async Promise.all (index 0)\n";
         let b = "TypeError: x\n    at cli (/tmp/difuzz-1-tmp/difuzz-1-w0.cjs:2:658)\n    at /tmp/difuzz-1-tmp/difuzz-1-w0.cjs:2:835\n    at new A (node:internal/x:12:3)\n    at async Promise.all (index 0)\n";
         assert_eq!(n(a), n(b));
@@ -672,6 +716,102 @@ mod tests {
         assert_eq!(n("look at /a.js:1:2"), "look at /a.js:1:2");
         assert_eq!(n("    at x:1:2b"), "    at x:1:2b");
         assert_eq!(n("    at 10:20"), "    at 10:20");
+    }
+
+    /// 7.5 (revision n2, MENOR 5, repro `revision-n2/ruido/t03-stack-pos`): una linea
+    /// impresa con forma de marco conserva la posicion si su archivo no es el de un marco
+    /// real (anotado por el preload, o de difuzz); un marco real la pierde igual que antes.
+    #[test]
+    fn marco_impreso_conserva_la_posicion() {
+        use super::{compare, normalize_stack_positions as nsp, Verdict, MARCO};
+        use crate::runner::{Exec, Status};
+        // El repro: `pos` sale de un `substring` que el bug cambia (2 -> 3).
+        let fake = |p: u32| format!("    at main (input.js:{p}:{})\n", p + 1);
+        assert_eq!(nsp(&fake(2), &[]), fake(2));
+        assert_ne!(nsp(&fake(2), &["/tmp/difuzz-1-tmp/difuzz-1-w0.cjs"]), nsp(&fake(3), &["/tmp/difuzz-1-tmp/difuzz-1-w0.cjs"]));
+        // Los archivos de difuzz no necesitan anotacion (un stack que no paso por el preload):
+        // el programa en los dos carriles, el envoltorio y el preload. Otro `difuzz-` no.
+        for f in ["/tmp/difuzz-1-tmp/difuzz-1-w0.cjs", "file:///tmp/difuzz-1-tmp/difuzz-1-w0.mjs", "/tmp/x/difuzz-9-w3-observar.mjs", "/tmp/difuzz-9-preload.cjs"] {
+            assert_eq!(nsp(&format!("    at f ({f}:1:2)"), &[]), "    at f (<pos>)", "{f}");
+        }
+        assert_eq!(nsp("    at f (/a/difuzz-x-w0.cjs:1:2)", &[]), "    at f (/a/difuzz-x-w0.cjs:1:2)");
+        assert_eq!(nsp("    at f (difuzz-12:1:2)", &[]), "    at f (difuzz-12:1:2)");
+        // Anotado por el preload (un `//# sourceURL=foo.js`, MEDIDO node 24: los marcos del
+        // programa salen con ese nombre), si.
+        assert_eq!(nsp("    at f (foo.js:1:22)", &["foo.js"]), "    at f (<pos>)");
+        // El limite de antes (`  at 10:12:30`): el archivo seria `10`, que no es de un marco.
+        assert_eq!(nsp("  at 10:12:30", &[]), "  at 10:12:30");
+        // Uno si y otro no en el mismo marco; el archivo no se extiende sobre la posicion
+        // anterior aunque esa no se haya borrado.
+        assert_eq!(nsp("    at eval (eval at g (/no.js:1:2), <anonymous>:1:5)", &["<anonymous>"]), "    at eval (eval at g (/no.js:1:2), <pos>)");
+        assert_eq!(nsp("    at f (x:1:2,y:3:4)", &["y"]), "    at f (x:1:2,y:3:4)");
+        assert_eq!(nsp("    at f (x:1:2, y:3:4)", &["y"]), "    at f (x:1:2, <pos>)");
+        // En un string JSON, igual.
+        assert_eq!(nsp("\"E\\n    at main (input.js:2:3)\"", &[]), "\"E\\n    at main (input.js:2:3)\"");
+        // De punta a punta en `compare`: los archivos salen del canal de A o de B.
+        let ex = |out: &str, ctl: &str| Exec {
+            status: Status::Exited(0),
+            stdout: out.into(),
+            stderr: String::new(),
+            flags: Vec::new(),
+            elapsed: std::time::Duration::ZERO,
+            ctl: ctl.into(),
+        };
+        let same = |a: &Exec, b: &Exec| matches!(compare(a, b), Verdict::Same);
+        assert!(!same(&ex(&fake(2), "dz\n"), &ex(&fake(3), "dz\n")), "t03: el bug en la posicion impresa diverge");
+        let src = |c: u32| format!("Error: e\n    at f (foo.js:1:{c})\n");
+        let canal = format!("{MARCO}foo.js\n{MARCO}node:internal/x\nflags stack\n");
+        assert!(!same(&ex(&src(22), ""), &ex(&src(9), "")));
+        assert!(same(&ex(&src(22), &canal), &ex(&src(9), "")), "anotado en A");
+        assert!(same(&ex(&src(22), ""), &ex(&src(9), &canal)), "anotado en B");
+        // El programa (de difuzz) sin anotar: un stack que no paso por el preload.
+        let prog = |c: u32| format!("Error: e\n    at f (/tmp/difuzz-7-tmp/difuzz-7-w1.cjs:1:{c})\n");
+        assert!(same(&ex(&prog(22), ""), &ex(&prog(9), "")));
+    }
+
+    /// 7.5 con node: el preload anota los archivos de los marcos que formatea (el programa,
+    /// `node:...`, un `//# sourceURL`, un `vm` con `filename`, el `eval`) y `compare` borra
+    /// sus posiciones; el repro t03 (una linea impresa con forma de marco) diverge.
+    #[test]
+    fn marcos_reales_con_node() {
+        use super::{compare, Verdict, MARCO};
+        use crate::runner::{Preload, Runner};
+        if !crate::test_util::requiere_node() {
+            return;
+        }
+        let preload = Preload::write_tagged("marcos").unwrap();
+        let r = Runner::new(&preload, crate::test_util::id_runner(), std::time::Duration::from_secs(20));
+        let same = |x: &str, y: &str| {
+            let (a, b) = (r.run(x), r.run(y));
+            (matches!(compare(&a, &b), Verdict::Same), a)
+        };
+        // Solo cambian columnas (un espacio de mas, como un minificado que corre el codigo).
+        let pila = |pad: &str| {
+            format!(
+                "function f() {{{pad}return new Error('e').stack; }}\nconsole.log(f());\neval(\"console.log(new Error('x').stack)\");\n\
+                 console.log(require('vm').runInThisContext(\"new Error('v').stack\", {{ filename: 'vm-propio.js' }}));\n"
+            )
+        };
+        // `//# sourceURL` (MEDIDO node 24: los marcos del programa salen con ese nombre).
+        let (igual, a) = same(&format!("{}//# sourceURL=propio.js\n", pila("")), &format!("{}//# sourceURL=propio.js\n", pila("   ")));
+        assert!(igual && a.stdout.contains("(propio.js:1:"), "{}", a.stdout);
+        let (igual, a) = same(&pila(""), &pila("   "));
+        assert!(igual, "{}", a.stdout);
+        let anotados: Vec<&str> = a.ctl.lines().filter_map(|l| l.strip_prefix(MARCO)).collect();
+        assert!(anotados.iter().any(|f| f.ends_with(".cjs") && f.contains("difuzz-")), "{anotados:?}");
+        for f in ["<anonymous>", "vm-propio.js"] {
+            assert!(anotados.contains(&f), "{f}: {anotados:?}");
+        }
+        assert!(anotados.iter().any(|f| f.starts_with("node:")), "{anotados:?}");
+        // El repro t03: el bug cambia el numero impreso.
+        let t03 = |fin: &str| format!("var pos = \"abc\".substring(1, {fin}).length;\nconsole.log(\"    at main (input.js:\" + pos + \":\" + (pos + 1) + \")\");\n");
+        let (igual, a) = same(&t03("undefined"), &t03("2"));
+        assert!(!igual, "t03: {}", a.stdout);
+        assert_eq!(a.stdout, "    at main (input.js:2:3)\n");
+        // El mismo programa leyendo de verdad un stack (anota el archivo del programa, no
+        // `input.js`): la linea impresa sigue divergiendo.
+        let (igual, _) = same(&format!("void new Error().stack;\n{}", t03("undefined")), &format!("void new Error().stack;\n{}", t03("2")));
+        assert!(!igual);
     }
 
     #[test]

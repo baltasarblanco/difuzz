@@ -1734,6 +1734,8 @@ fn compare_and_report(
     // son sin el) se guardan para heredar sus violaciones despues de confirmar.
     let (mut a, mut b, mut a_cached) = (a, b, a_cached);
     let sin_sensor;
+    // Integracion 7.1 + 7.4: el runner con el sensor, para el camino de B tras I3 (abajo).
+    let runner_con = runner;
     let mut runner = runner;
     let mut paso_sensor = None;
     let (mut con_sensor_a, mut con_sensor_b) = (None, None);
@@ -1794,6 +1796,13 @@ fn compare_and_report(
             ));
         }
     }
+    // Integracion 7.1 + 7.4 (H3 de rev-7.1; rev-int H1/H2): si A y B se compararon sin el
+    // sensor (I3), el camino de B que pide 7.1 no sale de las corridas con el sensor ya hechas
+    // (un programa puede notar el sensor y tomar otro camino con el): el re-chequeo, solo si
+    // todo lo demas ya daba Explica, corre B otra vez con el sensor (tope mayor) y sin el, con
+    // cobertura, y exige el mismo camino (`recheck::camino_sensor_i3`). Aca solo se pasa el
+    // runner con el sensor.
+    let i3 = paso_sensor.is_some().then_some(runner_con);
     match oracle::compare(&a, &b) {
         oracle::Verdict::Same => false,
         oracle::Verdict::Divergence(kind) => {
@@ -1815,6 +1824,7 @@ fn compare_and_report(
                 static_flags,
                 names_cfg,
                 stats.nota_pasada.as_deref(),
+                i3,
             );
             if c.drift {
                 stats.known_drift += 1;

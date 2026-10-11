@@ -108,10 +108,12 @@
             }
           }
           const r = aplicar(real, this, [p, sig]);
-          // 7.7 (MENOR 4): con --permission, un EPERM del `_kill` nativo es el filtro seccomp
-          // que nego la senal (runner::encerrar_senales): marca el caso aunque el programa no
-          // lance (`_kill` directo) o atrape el `kill EPERM` sin el sensor. `conPermisos` y
-          // `ctl` se definen mas abajo; aca solo se leen en la llamada, despues del preload.
+          // 7.7 (MENOR 4): con --permission, un EPERM del `_kill` nativo casi siempre es el
+          // filtro seccomp que nego la senal (runner::encerrar_senales): marca el caso aunque
+          // el programa no lance (`_kill` directo) o atrape el `kill EPERM` sin el sensor. No
+          // se distingue de un EPERM natural (un proceso de otro usuario, p. ej. el pid 1):
+          // ese tambien marca y descarta el caso (rev-int H5, MEDIDO; README, sandbox).
+          // `conPermisos` y `ctl` se definen mas abajo; aca solo se leen en la llamada.
           if (r === eperm && conPermisos) ctl('sandbox');
           return r;
         },
@@ -329,6 +331,46 @@
   // programa no lo lea; no se descuenta a proposito (despues del formateo, una lectura del
   // programa ya no pasa por aca): el re-chequeo de contenido (A salado) decide.
   const marcos = new WeakMap();
+  // 7.5 (revision n2, MENOR 5): los archivos de los marcos que se formatean en esta corrida
+  // van al canal al salir (`marco <archivo>`, una vez cada uno, hasta MAX_ARCHIVOS_MARCO).
+  // oracle::compare borra la posicion de un marco solo si su archivo es uno de estos (o de
+  // difuzz): una linea que el programa imprime con forma de marco y otro archivo la conserva.
+  // Mismo recorrido que oracle::sin_posiciones, sin metodos que el programa pueda pisar.
+  // prepareStackTrace (que corre tambien en las pausas del sensor) solo guarda los marcos
+  // formateados (los primeros MAX_STACKS_MARCO stacks); se recorren al salir. Recorrerlos
+  // (o escribir el canal) adentro cambiaba un SIGSEGV de node con el sensor
+  // (fixture/issues/9460/side-effects, MEDIDO en 12 corridas del original y 12 del minificado:
+  // SIGSEGV 12 y 12 con el preload de fe0cd86 y con solo guardar; 5 y 5 escribiendo el canal
+  // adentro; 6 y 4 recorriendo adentro sin escribir).
+  const MAX_ARCHIVOS_MARCO = 256;
+  const MAX_STACKS_MARCO = 1024;
+  const stacksDeMarco = [];
+  let nStacksDeMarco = 0;
+  const archivosDeMarco = Object.create(null);
+  let nArchivosDeMarco = 0;
+  const esDigito = (c) => c >= '0' && c <= '9';
+  const anotarArchivosDeMarco = (f) => {
+    let desde = 0;
+    for (let i = 0; i < f.length; i++) {
+      if (f[i] !== ':') continue;
+      let k = i + 1;
+      while (k < f.length && esDigito(f[k])) k++;
+      if (k === i + 1 || f[k] !== ':') continue;
+      let j = k + 1;
+      while (j < f.length && esDigito(f[j])) j++;
+      if (j === k + 1 || !(j === f.length || f[j] === ')' || f[j] === ',')) continue;
+      let ini = i;
+      while (ini > desde && f[ini - 1] !== ' ' && f[ini - 1] !== '(') ini--;
+      let a = '';
+      for (let p = ini; p < i; p++) a += f[p];
+      if (a !== '' && archivosDeMarco[a] !== true && nArchivosDeMarco < MAX_ARCHIVOS_MARCO) {
+        archivosDeMarco[a] = true;
+        nArchivosDeMarco++;
+      }
+      desde = j;
+      i = j - 1;
+    }
+  };
   Error.prepareStackTrace = (err, frames) => {
     if (!quiet) flags.add('stack');
     let head;
@@ -343,7 +385,9 @@
     // t-principio: con contenido fijo, la cabecera y una linea constante por marco (sin
     // posiciones ni nombres): A' conserva las lineas de A y `localizada` puede compararlas.
     if (FIJO) return head + frames.map(() => '\n    at dz').join('');
-    return head + frames.map((f) => `\n    at ${f}`).join('') + (SALT ? '\n    at dz' : '');
+    const lineas = frames.map((f) => `${f}`);
+    if (nStacksDeMarco < MAX_STACKS_MARCO) stacksDeMarco[nStacksDeMarco++] = lineas;
+    return head + lineas.map((l) => `\n    at ${l}`).join('') + (SALT ? '\n    at dz' : '');
   };
 
   const RealProxy = Proxy;
@@ -383,16 +427,28 @@
   // (Definido antes de `ser`, que lo usa para los Error: M6.)
 
   // n-ruido (t-real): los handles de timers de node (`Timeout` de setTimeout/setInterval,
-  // `Immediate` de setImmediate) guardan estado del reloj real del event loop
-  // (`_idleStart`, `expiry` de su TimersList): serializados campo por campo, A y B dan
-  // numeros distintos sin que el programa cambie. Se imprimen opacos. Los prototipos se
-  // toman aca de un timer propio (creado y cancelado antes de que corra el programa): un
+  // `Immediate` de setImmediate) guardan estado del reloj real del event loop: serializados
+  // campo por campo, A y B dan numeros distintos sin que el programa cambie. Los prototipos
+  // se toman aca de un timer propio (creado y cancelado antes de que corra el programa): un
   // objeto del programa no puede compartirlos, y una clase propia llamada Timeout (cuyo
-  // nombre el minifier puede cambiar) no los usa. Lo que el programa le agrego al handle
-  // (claves string que el de referencia no tiene: `t.resultado = x`) si se imprime: si no,
-  // un bug guardado ahi quedaria oculto.
+  // nombre el minifier puede cambiar) no los usa.
+  // b7-3 (revision n2, MENOR 4): se ocultan solo los campos que no son del programa
+  // (MEDIDO con node 24.14.1, b7-3/medir): `_idleStart` (reloj del loop al armar o
+  // refrescar), `_idlePrev`/`_idleNext` (la lista enlazada de node: la TimersList trae
+  // `expiry` del reloj, y su `id`, su `priorityQueuePosition` y los vecinos dependen de
+  // cuando disparo cada timer) y los ids de async_hooks (`asyncId`, `triggerId`: cuentan
+  // todos los recursos asincronos del proceso, y una escritura a un pipe lleno crea uno).
+  // El resto se imprime como cualquier objeto: `_idleTimeout` (el delay; -1 cancelado),
+  // `_repeat` (setInterval o setTimeout), `_destroyed`, `_onTimeout`/`_onImmediate` (fn o
+  // null), los argumentos, `refed` (unref/ref), `kHasPrimitive` y lo que el programa le
+  // agrego. Las claves ocultas son las del timer de referencia (los symbols de node son
+  // unicos: un symbol del programa con la misma descripcion se imprime).
+  const OCULTAS = new Set(['_idleStart', '_idlePrev', '_idleNext', 'asyncId', 'triggerId']);
   const OPACOS = new Map();
-  const opacar = (h, nombre) => OPACOS.set(Object.getPrototypeOf(h), [nombre, new Set(Reflect.ownKeys(h))]);
+  const opacar = (h, nombre) => {
+    const ocultas = Reflect.ownKeys(h).filter((k) => OCULTAS.has(typeof k === 'symbol' ? k.description : k));
+    OPACOS.set(Object.getPrototypeOf(h), [nombre, new Set(ocultas)]);
+  };
   try {
     const t = setTimeout(() => {}, 0);
     opacar(t, '[Timeout]');
@@ -425,14 +481,15 @@
       if (v instanceof RegExp) return String(v);
       const opaco = OPACOS.get(Object.getPrototypeOf(v));
       if (opaco) {
-        const [nombre, propias] = opaco;
-        const extra = Reflect.ownKeys(v).filter((k) => typeof k === 'string' && !propias.has(k));
-        if (!extra.length) return nombre;
-        const out = extra.slice(0, MAX_ITEMS).map((k) => {
+        // Mismo formato que un objeto (abajo), sin las claves ocultas.
+        const [nombre, ocultas] = opaco;
+        const keys = Reflect.ownKeys(v).filter((k) => !ocultas.has(k));
+        const out = keys.slice(0, MAX_ITEMS).map((k) => {
           const d = Object.getOwnPropertyDescriptor(v, k);
-          return `${JSON.stringify(k)}: ${d && 'value' in d ? ser(d.value, depth + 1, ancestors) : '[accessor]'}`;
+          const clave = typeof k === 'symbol' ? `[${String(k)}]` : JSON.stringify(k);
+          return `${d && !d.enumerable ? '~' : ''}${clave}: ${d && 'value' in d ? ser(d.value, depth + 1, ancestors) : '[accessor]'}`;
         });
-        if (extra.length > MAX_ITEMS) out.push(`...${extra.length}`);
+        if (keys.length > MAX_ITEMS) out.push(`...${keys.length}`);
         return `${nombre}{${out.join(', ')}}`;
       }
       // M6: ni name ni message (traen nombres locales que el minifier renombra,
@@ -712,6 +769,25 @@
       }
     }
   }
+  // b7-1 (revision n2, IMPORTANTE 1): los interruptores del camino de B (recheck::camino_*).
+  // DIFUZZ_NEUTRO=0|1 define dos funciones que el minificado instrumentado llama
+  // (recheck::interruptores_with/_coercion): con 0 son la identidad (B tal cual) y con 1
+  // neutralizan como el re-chequeo neutraliza el original: el objeto de un `with` pasa a
+  // uno sin propiedades (cada nombre resuelve afuera, como `{ o; S; }`) y la clave de un
+  // helper de coercion pasa a `__dz_<nombre>` (como neutralize_coercion). Antes de la foto
+  // de globals: no son globals del programa. Sin la variable no se define nada.
+  {
+    const neutro = process.env.DIFUZZ_NEUTRO;
+    delete process.env.DIFUZZ_NEUTRO;
+    if (neutro === '0' || neutro === '1') {
+      const n = neutro === '1';
+      const def = (k, v) => Object.defineProperty(globalThis, k, { value: v, writable: false, configurable: false, enumerable: false });
+      try {
+        def('__difuzzNeutroWith', (o) => (n ? Object.create(null) : o));
+        def('__difuzzNeutroClave', (k) => (n ? `__dz_${typeof k === 'symbol' ? 'toPrimitive' : k}` : k));
+      } catch {}
+    }
+  }
 
   // Globals que crea el programa (asignaciones implicitas en sloppy): el minifier no
   // puede renombrarlos, y observarlos al salir no agrega usos al fuente.
@@ -875,6 +951,14 @@
       ctl(`viol ${k} ${pos}`);
     }
     if (sensorTope) ctl('sensor_tope');
+    // 7.5: los archivos de los marcos que guardo prepareStackTrace.
+    try {
+      for (let s = 0; s < nStacksDeMarco; s++) {
+        const lineas = stacksDeMarco[s];
+        for (let i = 0; i < lineas.length; i++) anotarArchivosDeMarco(lineas[i]);
+      }
+    } catch {}
+    for (const a in archivosDeMarco) ctl(`marco ${a}`);
     ctl(`flags ${[...flags].sort().join(',')}`);
   });
 
@@ -1185,12 +1269,18 @@
   // el sensor se prende solo si el preload va a atrapar algo del programa (`invocar`).
   const modoSensor = process.env.DIFUZZ_SENSOR;
   delete process.env.DIFUZZ_SENSOR;
+  // Integracion 7.1 + 7.4: DIFUZZ_MAX_PAUSAS (solo la pone recheck::camino_sensor_i3, para correr
+  // B con el sensor cuando hace falta su camino tras I3) cambia MAX_PAUSAS. Se lee aca, antes
+  // del programa (el sensor perezoso se prende despues).
+  const maxPausasEnv = process.env.DIFUZZ_MAX_PAUSAS;
+  delete process.env.DIFUZZ_MAX_PAUSAS;
+  const MAX_PAUSAS_ENV = typeof maxPausasEnv === 'string' && /^[1-9][0-9]{0,6}$/.test(maxPausasEnv) ? +maxPausasEnv : 256;
   const prenderSensor = () => { try {
     const PRELOAD_URL = require('url').pathToFileURL(__filename).href;
     const inspector = require('inspector');
     const sesion = new inspector.Session();
     sesion.connect();
-    const MAX_PAUSAS = 256;
+    const MAX_PAUSAS = MAX_PAUSAS_ENV;
     let pausas = 0;
     const DESC = [
       ['tdz', /^ReferenceError: [^\n]* before initialization/],
@@ -1250,4 +1340,58 @@
   } catch {} };
   if (modoSensor === 'perezoso') sensorPerezoso = prenderSensor;
   else if (modoSensor !== '0') prenderSensor();
+
+  // --- b7-1 (revision n2, IMPORTANTE 1): cobertura de bloques -----------------------
+  // DIFUZZ_COBERTURA=1: cobertura precisa de V8 (por bloque y con cuentas) desde antes de
+  // compilar el programa; al salir, `cobertura <hash> <rangos>` en el canal. El hash es de
+  // los scripts del programa (file: menos este preload, y los de eval, sin url), cada uno
+  // con sus funciones y sus rangos (inicio, fin, cuenta) en el orden de V8: dos corridas
+  // del MISMO texto dan el mismo hash si y solo si (salvo colision) pasaron por los mismos
+  // bloques la misma cantidad de veces. Lo usan los re-chequeos para ver si B cambia de
+  // camino con la asuncion neutralizada (recheck::comparar_caminos). Va al final: el
+  // listener de `exit` corre despues de los del preload (observar al salir puede llamar
+  // codigo del programa); los que registre el programa corren despues y no cuentan.
+  // `takePreciseCoverage` contesta sincronico en el hilo principal (MEDIDO, node 24.14.1,
+  // con salida normal, process.exit y throw no atrapado).
+  const conCobertura = process.env.DIFUZZ_COBERTURA === '1';
+  delete process.env.DIFUZZ_COBERTURA;
+  if (conCobertura) {
+    try {
+      const PRELOAD_URL = require('url').pathToFileURL(__filename).href;
+      const sesion = new (require('inspector').Session)();
+      sesion.connect();
+      sesion.post('Profiler.enable');
+      sesion.post('Profiler.startPreciseCoverage', { callCount: true, detailed: true });
+      process.on('exit', () => {
+        try {
+          sesion.post('Profiler.takePreciseCoverage', (err, res) => {
+            if (err || !res || !Array.isArray(res.result)) return;
+            // Dos FNV-1a de 32 bits con distinta semilla (64 bits en total).
+            let h1 = 0x811c9dc5, h2 = 0x01000193 ^ 0x5bd1e995, rangos = 0;
+            const mezclar = (s) => {
+              for (let i = 0; i < s.length; i++) {
+                const c = s.charCodeAt(i);
+                h1 = Math.imul(h1 ^ c, 0x01000193);
+                h2 = Math.imul(h2 ^ c, 0x01000193 + 2);
+              }
+            };
+            for (const sc of res.result) {
+              const url = typeof sc.url === 'string' ? sc.url : '';
+              if (url === PRELOAD_URL || (url !== '' && !url.startsWith('file:'))) continue;
+              mezclar(`s${url}|`);
+              for (const f of sc.functions || []) {
+                mezclar('f');
+                for (const r of f.ranges || []) {
+                  rangos++;
+                  mezclar(`${r.startOffset},${r.endOffset},${r.count};`);
+                }
+              }
+            }
+            const hex = (x) => (x >>> 0).toString(16).padStart(8, '0');
+            ctl(`cobertura ${hex(h1)}${hex(h2)} ${rangos}`);
+          });
+        } catch {}
+      });
+    } catch {}
+  }
 })();

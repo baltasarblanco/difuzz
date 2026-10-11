@@ -354,6 +354,17 @@ pub fn sin_coercion(src: &str, kind: SourceKind) -> Result<Option<String>, Strin
     correr("coercion", kind, &[src]).map(|v| v.and_then(|mut v| v.pop()))
 }
 
+/// b7-1: `recheck::interruptores_with` (sobre el minificado). `Ok(Some(None))`: nada que
+/// cambiar (`ok 0` del hijo); `Ok(None)`: no se pudo.
+pub fn interruptores_with(src: &str, kind: SourceKind) -> Result<Option<Option<String>>, String> {
+    correr("int_with", kind, &[src]).map(|v| v.map(|mut v| v.pop()))
+}
+
+/// b7-1: `recheck::interruptores_coercion` (sobre el minificado), como `interruptores_with`.
+pub fn interruptores_coercion(src: &str, kind: SourceKind) -> Result<Option<Option<String>>, String> {
+    correr("int_coercion", kind, &[src]).map(|v| v.map(|mut v| v.pop()))
+}
+
 /// b4-a: `recheck::neutralize_violaciones` (`spec`: una violacion por linea).
 pub fn sin_violaciones(src: &str, kind: SourceKind, spec: &str) -> Result<Option<String>, String> {
     correr("violaciones", kind, &[src, spec]).map(|v| v.and_then(|mut v| v.pop()))
@@ -409,6 +420,8 @@ fn ejecutar(op: &str, kind: SourceKind, p: &[&str]) -> Option<Vec<String>> {
         ("arguments", [src]) => crate::recheck::rename_arguments(src).map(|s| vec![s]),
         ("extends", [src]) => crate::backend::swc::neutralize_extends(src, kind).map(|s| vec![s]),
         ("coercion", [src]) => crate::recheck::neutralize_coercion(src, kind).map(|s| vec![s]),
+        ("int_with", [src]) => crate::recheck::interruptores_with(src, kind).map(|s| s.into_iter().collect()),
+        ("int_coercion", [src]) => crate::recheck::interruptores_coercion(src, kind).map(|s| s.into_iter().collect()),
         ("violaciones", [src, spec]) => crate::recheck::neutralize_violaciones(src, kind, spec).map(|s| vec![s]),
         ("checks", [src, o, m, minifier]) => {
             let minifier = Minifier::parse(minifier)?;
@@ -723,6 +736,12 @@ mod tests {
         assert_eq!(checks(rec, rec, "x = {", k, Minifier::Oxc).unwrap(), crate::backend::swc::checks_on_text(rec, rec, "x = {", k, Minifier::Oxc));
         // 09-oct: el backend cruza el pipe; swc no calcula los flags estaticos de oxc.
         assert_eq!(checks(src, src, src, k, Minifier::Swc).unwrap().0, ["coercion"]);
+        // b7-1: las tres respuestas de los interruptores (instrumentado, nada que cambiar, no
+        // se pudo) cruzan el pipe distintas.
+        assert_eq!(interruptores_with(src, k).unwrap(), Some(crate::recheck::interruptores_with(src, k).unwrap()));
+        assert!(interruptores_with(src, k).unwrap().unwrap().is_some());
+        assert_eq!(interruptores_coercion("console.log(1);\n", k).unwrap(), Some(None));
+        assert_eq!(interruptores_coercion("let = ;", k).unwrap(), None);
         sin_hijo_de_test();
         assert!(tomar_notas().is_empty());
     }

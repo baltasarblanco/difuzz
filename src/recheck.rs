@@ -80,12 +80,25 @@ pub enum Recheck {
 /// A por construccion). Positivos que pierde (van a div/, gana el principio): los que
 /// dan en B algo que no es ni A ni A' (issue_1105 con `with`: oxc pasa `0/0` a `NaN`, que
 /// dentro del `with` resuelve a `o.NaN`; dead_code de terser con funciones en bloque).
+///
+/// b7-1 (revision n2, IMPORTANTE 1): B == A' tambien puede ser una coincidencia. Si el bug
+/// deja justo el valor que la variable tiene cuando la rama de la violacion no corre (`""`,
+/// `false`, `0`, un acumulador sin cambios), B corre esa rama con el bug y da lo mismo que A',
+/// que no la corre (MEDIDO con oxc 0.153.0: 11 programas, 72 filas de 8 celdas en known/).
+/// Comparar salidas no lo distingue: hace falta saber si B paso por la violacion. Por eso,
+/// ademas, `camino` (que solo se llama si todo lo anterior da Explica) tiene que dar
+/// `Camino::Igual`: B no pasa por la violacion (el sensor no la ve en B) o B no cambia de
+/// camino cuando se neutraliza la asuncion EN B (`comparar_caminos`: cobertura de bloques de
+/// V8 de B con y sin la neutralizacion). Si el minifier aprovecho la asuncion, en B ya no hay
+/// nada que dependa de ella y el camino no cambia; si B todavia depende y la salida coincide,
+/// la coincidencia no prueba nada: Inconcluso (div/).
 pub fn veredicto_neutralizado(
     a: &runner::Exec,
     b: &runner::Exec,
     a2: &runner::Exec,
     b2: &runner::Exec,
     salada: Option<&runner::Exec>,
+    camino: impl FnOnce() -> Camino,
 ) -> Recheck {
     if !a2.completed() {
         return Recheck::Inconcluso(format!("el original modificado no termino ({:?})", a2.status));
@@ -96,16 +109,180 @@ pub fn veredicto_neutralizado(
     if !matches!(oracle::compare(a2, b2), oracle::Verdict::Same) {
         return Recheck::NoExplica;
     }
-    if matches!(oracle::compare(a2, b), oracle::Verdict::Same) {
-        return Recheck::Explica;
+    let explica = matches!(oracle::compare(a2, b), oracle::Verdict::Same) || salada.is_some_and(|s| localizada_con_marca(a, b, a2, s));
+    if !explica {
+        return Recheck::Inconcluso(
+            "con la asuncion neutralizada la divergencia desaparece, pero el minificado no se comporta como el original neutralizado (B != A'): el codigo neutralizado puede tener el bug".into(),
+        );
     }
-    if salada.is_some_and(|s| localizada_con_marca(a, b, a2, s)) {
-        return Recheck::Explica;
+    match camino() {
+        Camino::Igual => Recheck::Explica,
+        Camino::Distinto(n) => Recheck::Inconcluso(format!(
+            "con la asuncion neutralizada la divergencia desaparece y B se comporta como el original neutralizado, pero B todavia pasa por la violacion ({n}): la coincidencia no prueba nada, el codigo que solo corre con la violacion puede tener el bug"
+        )),
+        Camino::NoSe(n) => Recheck::Inconcluso(format!(
+            "con la asuncion neutralizada la divergencia desaparece y B se comporta como el original neutralizado, pero no pude ver si B pasa por la violacion ({n})"
+        )),
     }
-    Recheck::Inconcluso(
-        "con la asuncion neutralizada la divergencia desaparece, pero el minificado no se comporta como el original neutralizado (B != A'): el codigo neutralizado puede tener el bug".into(),
-    )
 }
+
+/// b7-1: si B pasa por la violacion que el re-chequeo neutraliza (`veredicto_neutralizado`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Camino {
+    /// B no pasa por la violacion: el sensor no la ve en B, o B no cambia de camino con la
+    /// asuncion neutralizada.
+    Igual,
+    /// B pasa por la violacion (el detalle va a la nota).
+    Distinto(String),
+    /// No se pudo saber (el detalle va a la nota).
+    NoSe(String),
+}
+
+/// b7-1: compara el camino de dos corridas del MISMO texto con cobertura (`run_con_cobertura`):
+/// `con` (B con la asuncion como en B) y `neutro` (B con la asuncion neutralizada). Antes se
+/// pide que `con` se comporte como `b` (la corrida de B que se clasifica) y, si hay, que
+/// `neutro` se comporte como `b2` (B'): si no, la cobertura no es la de esas corridas
+/// (no determinismo, o la instrumentacion cambio el programa) y no se sabe.
+pub fn comparar_caminos(b: &runner::Exec, con: &runner::Exec, b2: Option<&runner::Exec>, neutro: &runner::Exec) -> Camino {
+    if !matches!(oracle::compare(b, con), oracle::Verdict::Same) {
+        return Camino::NoSe(format!("con la cobertura prendida B no da lo mismo ({:?})", con.status));
+    }
+    if b2.is_some_and(|b2| !matches!(oracle::compare(b2, neutro), oracle::Verdict::Same)) {
+        return Camino::NoSe(format!("con la cobertura prendida B' no da lo mismo ({:?})", neutro.status));
+    }
+    match (con.cobertura(), neutro.cobertura()) {
+        (Some(x), Some(y)) if x == y => Camino::Igual,
+        (Some(x), Some(y)) => Camino::Distinto(format!(
+            "la cobertura de bloques de V8 de B cambia con la asuncion neutralizada en B: {x} contra {y}"
+        )),
+        _ => Camino::NoSe("una corrida de B no dejo cobertura de V8".into()),
+    }
+}
+
+/// b7-1: el camino de B cuando la neutralizacion es del entorno (stubs de globals, built-ins
+/// fijos, contenido fijo, mas pila): B y B' corren el mismo texto, asi que se corre B dos
+/// veces con cobertura, sin y con la neutralizacion (`args`/`env`), y se comparan. 2 node.
+pub fn camino_entorno(
+    r: &runner::Runner,
+    minified: &str,
+    b: &runner::Exec,
+    b2: &runner::Exec,
+    (args, env): (&[&str], &[(&str, &str)]),
+) -> Camino {
+    let con = r.run_con_cobertura(minified, &[], &[]);
+    let neutro = r.run_con_cobertura(minified, args, env);
+    comparar_caminos(b, &con, Some(b2), &neutro)
+}
+
+/// b7-1: el camino de B cuando la neutralizacion cambia el texto (`with`, coercion): B
+/// instrumentado (`instrumentado`, de `interruptores_with`/`interruptores_coercion`) corre
+/// con los interruptores apagados (DIFUZZ_NEUTRO=0: se comporta como B) y prendidos (=1:
+/// neutralizan EN B lo mismo que el re-chequeo en el original). Mismo texto: se comparan
+/// las coberturas. 2 node.
+pub fn camino_interruptores(r: &runner::Runner, b: &runner::Exec, instrumentado: Result<Option<Option<String>>, String>) -> Camino {
+    let texto = match instrumentado {
+        Ok(Some(Some(t))) => t,
+        // B ya no tiene nada que neutralizar (el minifier lo saco): nada en B depende de eso.
+        Ok(Some(None)) => return Camino::Igual,
+        Ok(None) => return Camino::NoSe("no pude instrumentar el minificado (no parsea con SWC)".into()),
+        Err(e) => {
+            crate::analisis::registrar("re-chequeo (instrumentar el minificado)", &e);
+            return Camino::NoSe(format!("fallo el analisis de difuzz: {}", e.lines().next().unwrap_or_default()));
+        }
+    };
+    let con = r.run_con_cobertura(&texto, &[], &[("DIFUZZ_NEUTRO", "0")]);
+    let neutro = r.run_con_cobertura(&texto, &[], &[("DIFUZZ_NEUTRO", "1")]);
+    comparar_caminos(b, &con, None, &neutro)
+}
+
+/// b7-1: el camino de B para las violaciones que ubica el sensor (TDZ, Symbol, `extends`):
+/// las ve el sensor en B (lineas `viol` del canal de B). `clases`: las que cuentan (`None`,
+/// todas). Sin el sensor entero en B (`con_sensor` falso o `sensor_degradado`) no se sabe.
+pub fn camino_sensor(b: &runner::Exec, con_sensor: bool, clases: Option<&[&str]>) -> Camino {
+    if !con_sensor {
+        return Camino::NoSe("B corrio sin el sensor de violaciones".into());
+    }
+    if let Some(d) = b.sensor_degradado() {
+        return Camino::NoSe(format!("el sensor de violaciones no corrio entero en B ({d})"));
+    }
+    let en_b: Vec<&str> = violaciones(b)
+        .into_iter()
+        .filter(|s| clases.is_none_or(|c| c.iter().any(|k| s.split(' ').next() == Some(*k))))
+        .collect();
+    if en_b.is_empty() {
+        Camino::Igual
+    } else {
+        Camino::Distinto(format!("el sensor ve en B la violacion {}", en_b.join(", ")))
+    }
+}
+
+/// Integracion 7.1 + 7.4 (H3 de rev-7.1, H1/H2 de rev-int): el camino de B cuando A y B se
+/// compararon sin el sensor (I3: alguno paso el tope o se cayo con el). B (`b`, sin el sensor)
+/// no tiene sensor que mirar, asi que se corre B otra vez CON el sensor (tope
+/// `runner::MAX_PAUSAS_MAYOR`) y cobertura, y otra SIN el sensor con cobertura. La corrida con el
+/// sensor da el camino solo si: corrio entera (sin `sensor_tope` ni `sensor_caido`), se comporta
+/// como `b` (salida y estado, `oracle::compare`), la de sin sensor tambien, y las dos tienen la
+/// MISMA cobertura de bloques de V8. Si no, no se sabe (div/): un programa que nota el sensor
+/// (cada pausa llama a su `Error.prepareStackTrace`) y toma otro camino con el no puede
+/// prestarle a B un camino que B sin el sensor no toma (rev-int H1, MEDIDO). 2 node, y solo
+/// cuando todo lo demas ya daba Explica (closure de `veredicto_neutralizado`).
+pub fn camino_sensor_i3(sin: &runner::Runner, con: &runner::Runner, minified: &str, b: &runner::Exec, clases: Option<&[&str]>) -> Camino {
+    let c = con.run_con_cobertura(minified, &[], &[("DIFUZZ_MAX_PAUSAS", runner::MAX_PAUSAS_MAYOR)]);
+    if let Some(d) = c.sensor_degradado() {
+        return Camino::NoSe(format!(
+            "A y B se compararon sin el sensor (I3) y B con el sensor (tope {}) tampoco corrio entero ({d})",
+            runner::MAX_PAUSAS_MAYOR
+        ));
+    }
+    if !matches!(oracle::compare(b, &c), oracle::Verdict::Same) {
+        return Camino::NoSe(format!("con el sensor B no da lo mismo que sin el ({:?})", c.status));
+    }
+    let s = sin.run_con_cobertura(minified, &[], &[]);
+    if !matches!(oracle::compare(b, &s), oracle::Verdict::Same) {
+        return Camino::NoSe(format!("con la cobertura prendida B no da lo mismo ({:?})", s.status));
+    }
+    match (s.cobertura(), c.cobertura()) {
+        (Some(x), Some(y)) if x == y => camino_sensor(&c, true, clases),
+        (Some(x), Some(y)) => Camino::NoSe(format!(
+            "con el sensor B toma otro camino que sin el (cobertura de bloques de V8: {y} contra {x})"
+        )),
+        _ => Camino::NoSe("una corrida de B no dejo cobertura de V8".into()),
+    }
+}
+
+/// Integracion 7.1 + 7.4: el camino de B por el sensor. `i3`: el runner con el sensor y el
+/// minificado, si A y B se compararon sin el sensor (I3); `r` es entonces el runner sin el.
+pub fn camino_de_b(r: &runner::Runner, i3: Option<(&runner::Runner, &str)>, b: &runner::Exec, clases: Option<&[&str]>) -> Camino {
+    match i3 {
+        Some((con, minified)) if !r.con_sensor() => camino_sensor_i3(r, con, minified, b, clases),
+        _ => camino_sensor(b, r.con_sensor(), clases),
+    }
+}
+
+/// b7-1: el camino de B para solo sloppy: B corre en sloppy y en estricto con prefijos del
+/// mismo largo (`PREFIJO_SLOPPY`, una directiva desconocida, y `PREFIJO_ESTRICTO`), asi los
+/// offsets de la cobertura coinciden. Si B no compila en estricto se prueba con el binding
+/// `arguments` renombrado (como el original); si tampoco, no se sabe. 2 node (+ `node --check`).
+pub fn camino_estricto(r: &runner::Runner, minified: &str, b: &runner::Exec) -> Camino {
+    let mut base = std::borrow::Cow::Borrowed(minified);
+    if !r.node_accepts(&format!("{PREFIJO_ESTRICTO}{minified}")) {
+        match crate::analisis::sin_arguments(minified) {
+            Ok(Some(ren)) if r.node_accepts(&format!("{PREFIJO_ESTRICTO}{ren}")) => base = std::borrow::Cow::Owned(ren),
+            Err(e) => {
+                crate::analisis::registrar("re-chequeo sloppy (camino de B)", &e);
+                return Camino::NoSe(format!("fallo el analisis de difuzz: {}", e.lines().next().unwrap_or_default()));
+            }
+            _ => return Camino::NoSe("el minificado no compila en estricto".into()),
+        }
+    }
+    let con = r.run_con_cobertura(&format!("{PREFIJO_SLOPPY}{base}"), &[], &[]);
+    let neutro = r.run_con_cobertura(&format!("{PREFIJO_ESTRICTO}{base}"), &[], &[]);
+    comparar_caminos(b, &con, None, &neutro)
+}
+
+/// b7-1: prefijos de `camino_estricto`, del mismo largo.
+pub const PREFIJO_SLOPPY: &str = "\"use sloppy\";\n";
+pub const PREFIJO_ESTRICTO: &str = "\"use strict\";\n";
 
 /// Paso 7: lo que el preload pone con DIFUZZ_SALT=fijo (preload.js, toString y
 /// prepareStackTrace) y con DIFUZZ_SALT=1 (la sal). `localizada_con_marca` los busca.
@@ -235,7 +412,8 @@ pub fn globals_matter(
         return Recheck::Inconcluso(format!("el original con stubs de {g} no termino ({:?})", a2.status));
     }
     let b2 = r.run_with_globals(minified, &g);
-    veredicto_neutralizado(a, b, &a2, &b2, None)
+    // b7-1: B sin y con los stubs, con cobertura (q03/r08: la rama sin `window` con el bug).
+    veredicto_neutralizado(a, b, &a2, &b2, None, || camino_entorno(r, minified, b, &b2, (&[], &[("DIFUZZ_GLOBALS", g.as_str())])))
 }
 
 /// b1-b: `Explica` solo si la divergencia desaparece sin el scope del `with` y
@@ -246,6 +424,7 @@ pub fn with_matters(
     r: &runner::Runner,
     recheck: (backend::Minifier, minify::Preset, SourceKind),
     original: &str,
+    minified: &str,
     a: &runner::Exec,
     b: &runner::Exec,
 ) -> Recheck {
@@ -269,7 +448,9 @@ pub fn with_matters(
         return Recheck::Inconcluso(format!("la variante sin `with` no termino ({:?})", a2.status));
     }
     let b2 = r.run(&m2);
-    veredicto_neutralizado(a, b, &a2, &b2, None)
+    // b7-1 (q04: la rama que depende del scope, con el bug): B con cada `with (o)` como
+    // `with (__difuzzNeutroWith(o))`, con el interruptor apagado y prendido.
+    veredicto_neutralizado(a, b, &a2, &b2, None, || camino_interruptores(r, b, crate::analisis::interruptores_with(minified, kind)))
 }
 
 /// t-principio: `fn_tostring` y `stack` (paso `contenido` de clasificar). Si A con
@@ -295,7 +476,9 @@ pub fn contenido_matters(
         return Recheck::Inconcluso(format!("el original con contenido fijo no termino ({:?})", a2.status));
     }
     let b2 = r.run_with_env(minified, &env);
-    veredicto_neutralizado(a, b, &a2, &b2, Some(salada))
+    // b7-1: B con el contenido de verdad y con el fijo, con cobertura (r05: la rama que
+    // depende del texto de la funcion, con el bug).
+    veredicto_neutralizado(a, b, &a2, &b2, Some(salada), || camino_entorno(r, minified, b, &b2, (&[], &env)))
 }
 
 /// t-principio: lo que el preload vio pisado en `a` (lineas `builtin <objeto>
@@ -336,7 +519,9 @@ pub fn builtins_matter(r: &runner::Runner, original: &str, minified: &str, a: &r
         return Recheck::Inconcluso(format!("el original con los built-ins fijos no termino ({:?})", a2.status));
     }
     let b2 = r.run_with_env(minified, &env);
-    veredicto_neutralizado(a, b, &a2, &b2, None)
+    // b7-1 (q06: el built-in pisado que B todavia llama, con el bug): B con lo pisado libre y
+    // fijo, con cobertura.
+    veredicto_neutralizado(a, b, &a2, &b2, None, || camino_entorno(r, minified, b, &b2, (&[], &env)))
 }
 
 /// t-principio: `coercion` (estatico; oxc: "Coercion Methods Are Pure"; antes iba a
@@ -349,6 +534,7 @@ pub fn coercion_matters(
     r: &runner::Runner,
     recheck: (backend::Minifier, minify::Preset, SourceKind),
     original: &str,
+    minified: &str,
     a: &runner::Exec,
     b: &runner::Exec,
 ) -> Recheck {
@@ -372,7 +558,9 @@ pub fn coercion_matters(
         return Recheck::Inconcluso(format!("la variante sin helpers de coercion no termino ({:?})", a2.status));
     }
     let b2 = r.run(&m2);
-    veredicto_neutralizado(a, b, &a2, &b2, None)
+    // b7-1 (r07: el `valueOf` que B todavia llama, con el bug): B con cada definicion de
+    // helper como clave `[__difuzzNeutroClave(...)]`, con el interruptor apagado y prendido.
+    veredicto_neutralizado(a, b, &a2, &b2, None, || camino_interruptores(r, b, crate::analisis::interruptores_coercion(minified, kind)))
 }
 
 /// t-principio: el prefijo de los helpers de coercion renombrados.
@@ -487,12 +675,15 @@ pub fn violaciones(a: &runner::Exec) -> Vec<&str> {
 /// divergiendo por otra y el veredicto dependeria del orden.
 /// n-principio (n06/n07/n10/n11/n12/n17/n18: el bug en el catch de la violacion, que en
 /// A' no corre): rige `veredicto_neutralizado`, B tiene que dar lo mismo que A'.
+/// `i3` (integracion 7.1 + 7.4): el runner con el sensor y el minificado si A y B se
+/// compararon sin el sensor (`camino_de_b`).
 pub fn violaciones_matter(
     r: &runner::Runner,
     recheck: (backend::Minifier, minify::Preset, SourceKind),
     original: &str,
     a: &runner::Exec,
     b: &runner::Exec,
+    i3: Option<(&runner::Runner, &str)>,
 ) -> Recheck {
     let (minifier, preset, kind) = recheck;
     let v = violaciones(a);
@@ -522,7 +713,9 @@ pub fn violaciones_matter(
         return Recheck::Inconcluso(format!("la variante sin violaciones no termino ({:?})", a2.status));
     }
     let b2 = r.run(&m2);
-    veredicto_neutralizado(a, b, &a2, &b2, None)
+    // b7-1 (r01/r03/r09: la TDZ o la coercion de Symbol que B todavia hace, con el bug en el
+    // catch): el sensor no tiene que ver en B ninguna violacion.
+    veredicto_neutralizado(a, b, &a2, &b2, None, || camino_de_b(r, i3, b, None))
 }
 
 /// b4-a: el programa con cada violacion de `spec` (`<clase> <linea>:<columna>`,
@@ -791,6 +984,129 @@ pub fn neutralize_with(src: &str, kind: SourceKind) -> Option<String> {
     .flatten()
 }
 
+/// b7-1: los interruptores que define el preload con DIFUZZ_NEUTRO (`camino_interruptores`).
+pub const INTERRUPTOR_WITH: &str = "__difuzzNeutroWith";
+pub const INTERRUPTOR_CLAVE: &str = "__difuzzNeutroClave";
+
+/// b7-1: `callee(arg)` con `callee` un identificador libre.
+fn llamar(callee: &str, arg: Expr) -> Box<Expr> {
+    use swc_ecma_ast::{CallExpr, Callee, ExprOrSpread, Ident};
+    Box::new(Expr::Call(CallExpr {
+        span: DUMMY_SP,
+        callee: Callee::Expr(Box::new(Expr::Ident(Ident::new_no_ctxt(callee.into(), DUMMY_SP)))),
+        args: vec![ExprOrSpread { spread: None, expr: Box::new(arg) }],
+        ..Default::default()
+    }))
+}
+
+/// b7-1: parsea, aplica `v` y emite. `Some(None)`: no hay nada que cambiar. `None`: no se
+/// pudo (no parsea, no emite o el fuente ya nombra los interruptores): eso no es "nada que
+/// cambiar", es no saber.
+fn instrumentar<V: VisitMut>(src: &str, kind: SourceKind, mut v: V, cambio: impl Fn(&V) -> bool) -> Option<Option<String>> {
+    if src.contains("__difuzzNeutro") {
+        return None;
+    }
+    catch_unwind(AssertUnwindSafe(|| {
+        GLOBALS.set(&Globals::new(), || {
+            let cm: Lrc<SourceMap> = Default::default();
+            let fm = cm.new_source_file(FileName::Anon.into(), src.to_string());
+            let mut program = backend::swc::parse_program(&fm, kind)?;
+            program.visit_mut_with(&mut v);
+            if !cambio(&v) {
+                return Some(None);
+            }
+            emit(cm, &program.apply(fixer(None))).map(Some)
+        })
+    }))
+    .ok()
+    .flatten()
+}
+
+/// b7-1: el minificado con cada `with (o) S` como `with (__difuzzNeutroWith(o)) S`. Con
+/// DIFUZZ_NEUTRO=0 el interruptor devuelve `o` (B tal cual); con 1, un objeto sin
+/// propiedades: cada nombre de `S` resuelve afuera, como en `{ o; S; }` (`neutralize_with`).
+/// `Some(None)` si no hay `with`; `None` si no se pudo (`instrumentar`).
+pub fn interruptores_with(src: &str, kind: SourceKind) -> Option<Option<String>> {
+    struct N(bool);
+    impl VisitMut for N {
+        fn visit_mut_stmt(&mut self, s: &mut Stmt) {
+            s.visit_mut_children_with(self);
+            if let Stmt::With(w) = s {
+                let obj = std::mem::take(&mut w.obj);
+                w.obj = llamar(INTERRUPTOR_WITH, *obj);
+                self.0 = true;
+            }
+        }
+    }
+    instrumentar(src, kind, N(false), |n| n.0)
+}
+
+/// b7-1: el minificado con cada definicion de helper de coercion que renombra
+/// `neutralize_coercion` (las mismas claves) como clave computada
+/// `[__difuzzNeutroClave("valueOf")]` (o `[__difuzzNeutroClave(Symbol.toPrimitive)]`).
+/// Con DIFUZZ_NEUTRO=0 el interruptor devuelve la clave (B tal cual: un metodo con clave
+/// computada se llama igual); con 1, `__dz_<nombre>`, como el renombre del original.
+/// `Some(None)` si no hay nada que cambiar; `None` si no se pudo (`instrumentar`).
+pub fn interruptores_coercion(src: &str, kind: SourceKind) -> Option<Option<String>> {
+    use swc_ecma_ast::{AssignExpr, AssignTarget, ClassMember, ComputedPropName, MemberProp, Prop, PropName, SimpleAssignTarget, Str};
+    fn clave_de(k: &PropName) -> Option<Expr> {
+        match k {
+            PropName::Ident(i) if crate::checks::is_coercion_name(i.sym.as_str()) => {
+                Some(Expr::Lit(Lit::Str(Str { span: DUMMY_SP, value: i.sym.as_str().into(), raw: None })))
+            }
+            PropName::Computed(c) if crate::checks::is_symbol_to_primitive(&c.expr) => Some((*c.expr).clone()),
+            _ => None,
+        }
+    }
+    fn clave(k: &mut PropName) -> bool {
+        let Some(e) = clave_de(k) else {
+            return false;
+        };
+        *k = PropName::Computed(ComputedPropName { span: DUMMY_SP, expr: llamar(INTERRUPTOR_CLAVE, e) });
+        true
+    }
+    struct N(bool);
+    impl VisitMut for N {
+        fn visit_mut_prop(&mut self, p: &mut Prop) {
+            p.visit_mut_children_with(self);
+            let k = match p {
+                Prop::KeyValue(x) => &mut x.key,
+                Prop::Method(x) => &mut x.key,
+                Prop::Getter(x) => &mut x.key,
+                Prop::Setter(x) => &mut x.key,
+                _ => return,
+            };
+            self.0 |= clave(k);
+        }
+        fn visit_mut_class_member(&mut self, m: &mut ClassMember) {
+            m.visit_mut_children_with(self);
+            let k = match m {
+                ClassMember::Method(x) => &mut x.key,
+                ClassMember::ClassProp(x) => &mut x.key,
+                _ => return,
+            };
+            self.0 |= clave(k);
+        }
+        fn visit_mut_assign_expr(&mut self, n: &mut AssignExpr) {
+            n.visit_mut_children_with(self);
+            if let AssignTarget::Simple(SimpleAssignTarget::Member(m)) = &mut n.left {
+                let e = match &m.prop {
+                    MemberProp::Ident(i) if crate::checks::is_coercion_name(i.sym.as_str()) => {
+                        Some(Expr::Lit(Lit::Str(Str { span: DUMMY_SP, value: i.sym.as_str().into(), raw: None })))
+                    }
+                    MemberProp::Computed(c) if crate::checks::is_symbol_to_primitive(&c.expr) => Some((*c.expr).clone()),
+                    _ => None,
+                };
+                if let Some(e) = e {
+                    m.prop = MemberProp::Computed(ComputedPropName { span: DUMMY_SP, expr: llamar(INTERRUPTOR_CLAVE, e) });
+                    self.0 = true;
+                }
+            }
+        }
+    }
+    instrumentar(src, kind, N(false), |n| n.0)
+}
+
 /// R2-H10: el nombre que toma el binding `arguments` en la variante estricta.
 pub const ARGUMENTS_RENOMBRADO: &str = "__dz_arguments";
 
@@ -941,7 +1257,7 @@ fn emit(cm: Lrc<SourceMap>, program: &Program) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{globals_matter, neutralize_violaciones, neutralize_with, offset_utf16, violaciones_matter, with_matters, Recheck};
+    use super::{globals_matter, neutralize_violaciones, neutralize_with, offset_utf16, violaciones_matter, with_matters, Camino, Recheck};
     use crate::backend::Minifier;
     use crate::minify::{Preset, SourceKind};
     use crate::runner::{Exec, Preload, Runner, Status, THROW_EXIT};
@@ -958,11 +1274,70 @@ mod tests {
         }
     }
 
+    /// b7-1: `veredicto_neutralizado` con un B que no pasa por la violacion (lo de antes).
+    fn veredicto_igual(a: &Exec, b: &Exec, a2: &Exec, b2: &Exec, salada: Option<&Exec>) -> Recheck {
+        super::veredicto_neutralizado(a, b, a2, b2, salada, || Camino::Igual)
+    }
+
+    /// b7-1 (revision n2, IMPORTANTE 1): B == A' y B' == A', pero B pasa por la violacion
+    /// (r01: `let s = ""` y el bug deja `""` en el catch de la TDZ): ya no es Explica.
+    /// `camino` solo se consulta si todo lo demas da Explica.
+    #[test]
+    fn veredicto_exige_que_b_no_pase_por_la_violacion() {
+        use super::veredicto_neutralizado as v;
+        let ok = |s: &str| ex(Status::Exited(0), s);
+        let (a, b) = (ok("\"bc\"\n"), ok("\"\"\n"));
+        let r = v(&a, &b, &b, &b, None, || Camino::Distinto("el sensor ve en B la violacion tdz 1:16".into()));
+        assert!(matches!(r, Recheck::Inconcluso(ref n) if n.contains("todavia pasa por la violacion") && n.contains("tdz 1:16")), "{r:?}");
+        let r = v(&a, &b, &b, &b, None, || Camino::NoSe("sin cobertura".into()));
+        assert!(matches!(r, Recheck::Inconcluso(ref n) if n.contains("no pude ver") && n.contains("sin cobertura")), "{r:?}");
+        assert_eq!(v(&a, &b, &b, &b, None, || Camino::Igual), Recheck::Explica);
+        let nunca = || -> Camino { panic!("no hacia falta mirar el camino de B") };
+        assert_eq!(v(&ok("1\n"), &ok("2\n"), &ok("1\n"), &ok("2\n"), None, nunca), Recheck::NoExplica);
+        assert!(matches!(v(&ok("1\n"), &ok("2\n"), &ok("1\n"), &ok("1\n"), None, nunca), Recheck::Inconcluso(ref n) if n.contains("B != A'")));
+    }
+
+    /// b7-1: el sensor en B (lineas `viol`), por clase; sin el sensor entero, no se sabe.
+    #[test]
+    fn camino_por_el_sensor() {
+        use super::camino_sensor;
+        let mut b = ex(Status::Exited(0), "");
+        assert_eq!(camino_sensor(&b, true, None), Camino::Igual);
+        b.ctl = "viol tdz 1:16\nflags tdz_atrapada\n".into();
+        assert!(matches!(camino_sensor(&b, true, None), Camino::Distinto(ref n) if n.contains("tdz 1:16")));
+        assert_eq!(camino_sensor(&b, true, Some(&["extends"])), Camino::Igual);
+        assert!(matches!(camino_sensor(&b, false, None), Camino::NoSe(_)));
+        b.ctl = "viol extends 0:10\nsensor_tope\n".into();
+        assert!(matches!(camino_sensor(&b, true, Some(&["extends"])), Camino::NoSe(ref n) if n.contains("sensor_tope")));
+        // Integracion 7.1 + 7.4 (rev-int H1): heredar las violaciones de la corrida con el
+        // sensor (7.4) no le da a B sin el sensor un camino: sigue sin saberse.
+        let mut sin = ex(Status::Exited(0), "");
+        sin.heredar_violaciones(&ex(Status::Exited(0), ""));
+        assert!(matches!(camino_sensor(&sin, false, None), Camino::NoSe(_)));
+    }
+
+    /// b7-1: la comparacion de coberturas exige que las corridas con cobertura sean las de B y B'.
+    #[test]
+    fn comparar_caminos_por_cobertura() {
+        use super::comparar_caminos;
+        let cov = |s: &str, c: &str| {
+            let mut e = ex(Status::Exited(0), s);
+            e.ctl = format!("flags \ncobertura {c}\n");
+            e
+        };
+        let (b, b2) = (ex(Status::Exited(0), "\"\"\n"), ex(Status::Exited(0), "\"\"\n"));
+        assert_eq!(comparar_caminos(&b, &cov("\"\"\n", "ab 3"), Some(&b2), &cov("\"\"\n", "ab 3")), Camino::Igual);
+        assert!(matches!(comparar_caminos(&b, &cov("\"\"\n", "ab 3"), Some(&b2), &cov("\"\"\n", "cd 4")), Camino::Distinto(_)));
+        assert!(matches!(comparar_caminos(&b, &cov("x\n", "ab 3"), Some(&b2), &cov("\"\"\n", "ab 3")), Camino::NoSe(_)));
+        assert!(matches!(comparar_caminos(&b, &cov("\"\"\n", "ab 3"), Some(&b2), &cov("y\n", "ab 3")), Camino::NoSe(_)));
+        assert!(matches!(comparar_caminos(&b, &ex(Status::Exited(0), "\"\"\n"), None, &cov("y\n", "ab 3")), Camino::NoSe(_)));
+    }
+
     /// b1-b: solo es concluyente si A' termina y B' == A'; n-principio: y B == A' (los
     /// escenarios del viejo `veredicto`, con lo que dan ahora).
     #[test]
     fn veredicto_concluyente() {
-        use super::veredicto_neutralizado as v;
+        let v = veredicto_igual;
         let ok = |s: &str| ex(Status::Exited(0), s);
         let th = |s: &str| ex(Status::Exited(THROW_EXIT), s);
         let inconcluso = |r: Recheck| matches!(r, Recheck::Inconcluso(ref n) if n.contains("B != A'"));
@@ -997,7 +1372,8 @@ mod tests {
     /// concluyente; `mismo_camino` y `localizada` ya no (el bug puede estar en lo neutralizado).
     #[test]
     fn veredicto_neutralizado_exige_b_igual_a_a2() {
-        use super::{localizada_con_marca, veredicto_neutralizado, FIJO_MARCO, FIJO_TOSTRING};
+        use super::{localizada_con_marca, FIJO_MARCO, FIJO_TOSTRING};
+        let veredicto_neutralizado = veredicto_igual;
         let ok = |s: &str| ex(Status::Exited(0), s);
         // B ya se comporta como A' (16-builtins-positivo, keep_comparisons): Explica.
         assert_eq!(veredicto_neutralizado(&ok("pisado\n"), &ok("ABC\n"), &ok("ABC\n"), &ok("ABC\n"), None), Recheck::Explica);
@@ -1049,6 +1425,34 @@ mod tests {
         let out = neutralize_with("var o = {a: 1};\nwith (o) { console.log(a); }\n", SourceKind::Script).unwrap();
         assert!(out.contains("{\n    o;\n    {\n        console.log(a);\n    }\n}"), "{out}");
         assert!(neutralize_with("console.log(1);\n", SourceKind::Script).is_none());
+    }
+
+    /// b7-1: los interruptores en el minificado: el objeto de cada `with` y la clave de cada
+    /// definicion de helper de coercion (las mismas que `neutralize_coercion`); las lecturas y
+    /// los patrones no. Tres respuestas: instrumentado, nada que cambiar, no se pudo.
+    #[test]
+    fn interruptores_en_el_minificado() {
+        use super::{interruptores_coercion, interruptores_with};
+        let k = SourceKind::Script;
+        let out = interruptores_with("var o={a:1};with(o)console.log(a);with({})x;", k).unwrap().unwrap();
+        assert!(out.contains("with (__difuzzNeutroWith(o))") && out.contains("with (__difuzzNeutroWith({}))"), "{out}");
+        assert_eq!(interruptores_with("console.log(1);", k), Some(None));
+        assert_eq!(interruptores_with("let = ;", k), None);
+        assert_eq!(interruptores_with("with(o)__difuzzNeutroWith;", k), None);
+        let src = "var o = { valueOf() { return 1; }, toString: f, [Symbol.toPrimitive]: g, x: 1 };\nclass C { toString() {} }\nC.prototype.valueOf = h;\no[Symbol.toPrimitive] = k;\nvar { toString: t } = o;\nconsole.log(o.valueOf());\n";
+        let out = interruptores_coercion(src, k).unwrap().unwrap();
+        for n in [
+            "[__difuzzNeutroClave(\"valueOf\")] ()",
+            "[__difuzzNeutroClave(\"toString\")]: f",
+            "[__difuzzNeutroClave(Symbol.toPrimitive)]: g",
+            "class C {\n    [__difuzzNeutroClave(\"toString\")]()",
+            "C.prototype[__difuzzNeutroClave(\"valueOf\")] = h",
+            "o[__difuzzNeutroClave(Symbol.toPrimitive)] = k",
+        ] {
+            assert!(out.contains(n), "{n}: {out}");
+        }
+        assert!(out.contains("toString: t") && out.contains("o.valueOf()"), "{out}");
+        assert_eq!(interruptores_coercion("var { toString } = o;\n", k), Some(None));
     }
 
     /// t-principio: se renombran las definiciones de helpers de coercion (literal,
@@ -1136,17 +1540,65 @@ mod tests {
         // (no aplica: el minificado se re-hace con oxc, que no diverge aca).
         let w = "var o = { x: 1 };\nwith (o) { console.log(typeof o); }\n";
         let aw = r.run(w);
-        assert_eq!(with_matters(&r, (Minifier::Oxc, Preset::CoreDefaults, SourceKind::Script), w, &aw, &aw), Recheck::Explica);
+        assert_eq!(with_matters(&r, (Minifier::Oxc, Preset::CoreDefaults, SourceKind::Script), w, w, &aw, &aw), Recheck::Explica);
         // O4 (oxc #24331: `delete (0/0)` -> `delete NaN`) con un `with` al lado que
         // no tiene nada que ver: sin el scope la divergencia sigue, el flag se va.
         let o4 = "var o = {};\nwith (o) { console.log(1); }\nconsole.log(delete (0 / 0));\n";
         let a4 = r.run(o4);
-        assert_eq!(with_matters(&r, (Minifier::Oxc, Preset::CoreDefaults, SourceKind::Script), o4, &a4, &a4), Recheck::NoExplica);
+        assert_eq!(with_matters(&r, (Minifier::Oxc, Preset::CoreDefaults, SourceKind::Script), o4, o4, &a4, &a4), Recheck::NoExplica);
         // 02-with-positivo (c4): sin el scope el original devuelve otra cosa, y el
         // minificado ya se comporta asi: la asuncion explica la divergencia.
         let p = "function f() { var a = 1; with ({ a: 2 }) { return a; } }\nconsole.log(f());\n";
         let (ap, bp) = (r.run(p), r.run("console.log(1);\n"));
-        assert_eq!(with_matters(&r, (Minifier::Oxc, Preset::CoreDefaults, SourceKind::Script), p, &ap, &bp), Recheck::Explica);
+        assert_eq!(with_matters(&r, (Minifier::Oxc, Preset::CoreDefaults, SourceKind::Script), p, "console.log(1);\n", &ap, &bp), Recheck::Explica);
+    }
+
+    /// b7-1 (revision n2, IMPORTANTE 1), con node y oxc: el bug deja el valor por defecto y B
+    /// == A' == B'. Antes Explica (known/); ahora el camino de B lo delata, en cada familia
+    /// con neutralizacion: los stubs (q03), el `with` (q04), los built-ins (q06), la coercion
+    /// (r07) y la TDZ atrapada (r01, por el sensor). Los positivos siguen en Explica.
+    #[test]
+    fn coincidencia_con_el_valor_por_defecto() {
+        use super::{builtins_matter, coercion_matters};
+        if !crate::test_util::requiere_node() {
+            return;
+        }
+        let preload = Preload::write_tagged("b71").unwrap();
+        let r = Runner::new(&preload, crate::test_util::id_runner(), std::time::Duration::from_secs(20));
+        let cfg = Preset::CarrilA.build(Minifier::Oxc, SourceKind::Script);
+        let ab = |src: &str| {
+            let crate::minify::Outcome::Ok { original, minified, .. } = crate::minify::prepare(src, &cfg) else {
+                panic!("no minifica: {src}");
+            };
+            let (a, b) = (r.run(&original), r.run(&minified));
+            assert_eq!((a.stdout.as_str(), b.stdout.as_str()), ("\"bc\"\n", "\"\"\n"), "oxc ya no pliega mal substring: buscar otro bug\n{minified}");
+            (original, minified, a, b)
+        };
+        let todavia = |x: Recheck| matches!(x, Recheck::Inconcluso(ref n) if n.contains("todavia pasa por la violacion"));
+        let rc = (Minifier::Oxc, Preset::CarrilA, SourceKind::Script);
+        let bug = "s = \"abc\".substring(1, undefined);";
+        let (o, m, a, b) = ab(&format!("let s = \"\";\nif (typeof window === \"undefined\") {{ {bug} }}\nconsole.log(JSON.stringify(s));\n"));
+        let g = globals_matter(&r, SourceKind::Script, &o, &m, &a, &b);
+        assert!(todavia(g.clone()), "q03: {g:?}");
+        let (o, m, a, b) = ab(&format!("var s = \"\";\nvar o = {{ k: 1 }};\nwith (o) {{ if (typeof k === \"number\") {bug} }}\nconsole.log(JSON.stringify(s));\n"));
+        let w = with_matters(&r, rc, &o, &m, &a, &b);
+        assert!(todavia(w.clone()), "q04: {w:?}");
+        let (o, m, a, b) = ab(&format!("let s = \"\";\nArray.prototype.includes = function () {{ {bug} return false; }};\nif ([1].includes(2)) s = \"q\";\nconsole.log(JSON.stringify(s));\n"));
+        let bi = builtins_matter(&r, &o, &m, &a, &b);
+        assert!(todavia(bi.clone()), "q06: {bi:?}");
+        let (o, m, a, b) = ab(&format!("let s = \"\";\nconst o = {{ valueOf() {{ {bug} return 1; }} }};\nif (o + 1 === 0) s = \"q\";\nconsole.log(JSON.stringify(s));\n"));
+        let c = coercion_matters(&r, rc, &o, &m, &a, &b);
+        assert!(todavia(c.clone()), "r07: {c:?}");
+        let (o, _, a, b) = ab(&format!("let s = \"\";\ntry {{ if (String(x) === \"zz\") s = \"q\"; }} catch (e) {{ {bug} }}\nconsole.log(JSON.stringify(s));\nlet x = 1;\n"));
+        let v = violaciones_matter(&r, rc, &o, &a, &b, None);
+        assert!(todavia(v.clone()), "r01: {v:?}");
+        // Positivos (03-global-positivo y keep_comparisons): B ya no depende de la asuncion.
+        let o = "try { window; console.log(\"hay window\"); } catch (e) { console.log(\"no hay\"); }\n";
+        let m = "console.log(`hay window`);\n";
+        assert_eq!(globals_matter(&r, SourceKind::Script, o, m, &r.run(o), &r.run(m)), Recheck::Explica);
+        let o = "var o1 = { valueOf: function () { t1(); } };\nvar o2 = { valueOf: function () { t2(); } };\nvar r1 = o1 <= o2;\n";
+        let m = "var o1 = { valueOf: function () { t1(); } };\nvar o2 = { valueOf: function () { t2(); } };\n";
+        assert_eq!(coercion_matters(&r, rc, o, m, &r.run(o), &r.run(m)), Recheck::Explica);
     }
 
     /// b4-a: la posicion de V8 (0-based, UTF-16) a byte, y la neutralizacion por clase.
@@ -1208,7 +1660,7 @@ mod tests {
                 panic!("no minifica: {src}");
             };
             let (a, b) = (r.run(&original), r.run(&minified));
-            let rc = violaciones_matter(&r, (Minifier::Oxc, Preset::CoreDefaults, SourceKind::Script), &original, &a, &b);
+            let rc = violaciones_matter(&r, (Minifier::Oxc, Preset::CoreDefaults, SourceKind::Script), &original, &a, &b, None);
             (a, b, rc)
         };
         let bug = "console.log(delete (0 / 0));\n";
@@ -1253,7 +1705,7 @@ mod tests {
         // Sin violacion ubicada (coercion de Symbol no atrapada sin marcos) no hay
         // re-chequeo posible: inconcluso.
         let a = r.run("console.log(1);\n");
-        let rc = violaciones_matter(&r, (Minifier::Oxc, Preset::CoreDefaults, SourceKind::Script), "console.log(1);\n", &a, &a);
+        let rc = violaciones_matter(&r, (Minifier::Oxc, Preset::CoreDefaults, SourceKind::Script), "console.log(1);\n", &a, &a, None);
         assert!(matches!(rc, Recheck::Inconcluso(_)), "{rc:?}");
     }
 

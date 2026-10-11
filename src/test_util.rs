@@ -4,6 +4,11 @@
 //!   PATH. Con `DIFUZZ_SIN_NODE=1` lo saltea y lo deja contado en stderr con el
 //!   prefijo `DIFUZZ_SALTEADO_SIN_NODE` al principio de la linea (contar con
 //!   `cargo test --no-fail-fast 2>&1 | rg -c '^DIFUZZ_SALTEADO_SIN_NODE'`).
+//! - `requiere_userns(prueba)` (7.5): lo mismo para los tests de `--sandbox-red`, que
+//!   necesitan user namespaces. `prueba` es el resultado de
+//!   `runner::probar_sandbox(Sandbox::PermisosYRed)` (este archivo no depende del crate).
+//!   Si fallo, el test FALLA; con `DIFUZZ_SIN_USERNS=1` lo saltea y lo cuenta con el
+//!   prefijo `DIFUZZ_SALTEADO_SIN_USERNS`.
 //! - `id_runner()`: el id de `Runner` de cada test. Dos `Runner` con el mismo id
 //!   en el mismo proceso comparten script, ctl y cwd, y en paralelo uno pisa al
 //!   otro (paso con 9988 y 9989). El test `ningun_runner_con_id_fijo` falla si
@@ -24,6 +29,14 @@ pub const SIN_NODE: &str = "DIFUZZ_SIN_NODE";
 pub const PREFIJO_SALTEADO: &str = "DIFUZZ_SALTEADO_SIN_NODE";
 
 static SALTEADOS: AtomicUsize = AtomicUsize::new(0);
+
+/// 7.5: variable que permite saltear (y contar) los tests que necesitan user namespaces.
+pub const SIN_USERNS: &str = "DIFUZZ_SIN_USERNS";
+
+/// 7.5: prefijo de la linea que deja cada test salteado sin user namespaces.
+pub const PREFIJO_SALTEADO_USERNS: &str = "DIFUZZ_SALTEADO_SIN_USERNS";
+
+static SALTEADOS_USERNS: AtomicUsize = AtomicUsize::new(0);
 
 fn hay_node() -> bool {
     static HAY: OnceLock<bool> = OnceLock::new();
@@ -48,12 +61,37 @@ pub fn requiere_node() -> bool {
         );
     }
     let n = SALTEADOS.fetch_add(1, Ordering::SeqCst) + 1;
+    avisar_salteo(PREFIJO_SALTEADO, &test, n);
+    false
+}
+
+/// 7.5: `true` si esta maquina arma el sandbox con red (`prueba` es `Ok`; el test sigue).
+/// Si no: con `DIFUZZ_SIN_USERNS=1` devuelve `false` (el test saltea esa parte) y lo
+/// anota en stderr; sin la variable, panic con el error de `prueba`. Antes estos tests
+/// pasaban sin probar nada si no habia user namespaces.
+pub fn requiere_userns(prueba: Result<(), String>) -> bool {
+    let Err(e) = prueba else {
+        return true;
+    };
+    let test = std::thread::current().name().unwrap_or("?").to_string();
+    if std::env::var(SIN_USERNS).as_deref() != Ok("1") {
+        panic!(
+            "{test}: este test necesita el sandbox con red (user namespaces) y esta maquina no lo arma: {e}. \
+             Para saltear a sabiendas lo que lo necesita, defini {SIN_USERNS}=1 \
+             (cada salteo deja una linea {PREFIJO_SALTEADO_USERNS} en stderr)."
+        );
+    }
+    let n = SALTEADOS_USERNS.fetch_add(1, Ordering::SeqCst) + 1;
+    avisar_salteo(PREFIJO_SALTEADO_USERNS, &format!("{test}: {e}"), n);
+    false
+}
+
+fn avisar_salteo(prefijo: &str, que: &str, n: usize) {
     // Directo a stderr y no con eprintln!: libtest captura lo de eprintln! y, si
     // el test pasa, no lo muestra. Una sola escritura y con salto de linea
     // adelante: libtest puede tener a medias su linea `test ... ` en stdout.
-    let linea = format!("\n{PREFIJO_SALTEADO}: {test} (salteados en este binario: {n})\n");
+    let linea = format!("\n{prefijo}: {que} (salteados en este binario: {n})\n");
     let _ = std::io::stderr().write_all(linea.as_bytes());
-    false
 }
 
 /// Base de los ids de test: lejos de los ids de produccion (`0..jobs`).
@@ -205,6 +243,19 @@ mod tests {
         // Argumentos con parentesis y comas adentro; y un comentario no cuenta.
         assert!(ids(format!("let r = {new}&f(a, 1), g(), d);")).is_empty());
         assert!(ids(format!("// un `{new}` de `src/` con id 9988, d)\nx;")).is_empty());
+    }
+
+    /// 7.5: con el sandbox con red, sigue; sin el, falla salvo `DIFUZZ_SIN_USERNS=1`, que
+    /// saltea (y no "pasa probando").
+    #[test]
+    fn requiere_userns_falla_sin_la_variable() {
+        assert!(super::requiere_userns(Ok(())));
+        let r = std::panic::catch_unwind(|| super::requiere_userns(Err("prueba: sin user namespaces".into())));
+        if std::env::var(super::SIN_USERNS).as_deref() == Ok("1") {
+            assert_eq!(r.ok(), Some(false));
+        } else {
+            assert!(r.is_err(), "sin {} tenia que fallar", super::SIN_USERNS);
+        }
     }
 
     /// `id_runner()` no repite ids aunque lo pidan muchos hilos a la vez.

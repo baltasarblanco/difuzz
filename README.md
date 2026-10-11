@@ -208,7 +208,10 @@ por el programa); con `--sandbox`, además, el envoltorio de `process._kill` ano
 `_kill` de node (que no lanza: devuelve `-1`) y el de `process._debugProcess`, aunque el programa
 los atrape. Con el sandbox, `os.setPriority` y `process._debugProcess` con el pid ficticio dan
 `EPERM` (el filtro niega cualquier pid que no sea el real) y marcan. difuzz busca esos textos (y
-`kill EPERM` y `uv_os_setpriority returned EPERM`) en la salida.
+`kill EPERM` y `uv_os_setpriority returned EPERM`) en la salida. Un `EPERM` natural se ve igual: un
+`kill`/`_kill` a un proceso de otro usuario (el pid 1, por ejemplo) da `EPERM` también sin el
+sandbox, y con `--sandbox` marca y descarta el caso (MEDIDO, revisión de la integración del
+bloque 7: un bug real al lado va a descartes en vez de `div/`).
 
 **Límites** (lo que el sandbox no frena):
 
@@ -362,21 +365,51 @@ Principios:
     renombre solo: si A con el binding renombrado da lo mismo que A y su minificado también,
     la divergencia la explica ligar `arguments`, válido solo en sloppy.
   - los nombres (minificar preservándolos), en los dos: que la divergencia desaparezca.
+  - en todos los anteriores salvo los nombres, además, **B no tiene que pasar por la
+    violación**. B == A' también puede ser una coincidencia: si el bug deja justo el valor que
+    una variable tiene cuando la rama de la violación no corre (`""`, `false`, `0`, un `+=` que
+    no suma), B corre esa rama con el bug y da lo mismo que A', que no la corre. Se mira en B
+    mismo: el sensor no tiene que ver en B ninguna violación (TDZ, coerción de `Symbol`,
+    `extends`); para el resto, B se corre dos veces con la cobertura de bloques de V8, sin y con
+    la asunción neutralizada en B (los stubs de globals, los built-ins congelados, el contenido
+    fijo, más pila; el objeto de cada `with` y la clave de cada `valueOf`/`toString`/
+    `[Symbol.toPrimitive]` pasan por un interruptor del preload; `"use sloppy"` contra
+    `"use strict"`, del mismo largo), y las dos coberturas tienen que coincidir. Si el minifier
+    aprovechó la asunción, en B ya no queda nada que dependa de ella y el camino no cambia. Si
+    cambia (o no se puede ver), inconcluso: `div/`. Cuesta 2 ejecuciones de node más (y una
+    instrumentación del minificado con SWC para `with` y coerción), solo cuando todo lo demás
+    ya daba `Explica`.
 
   En oxc todos los flags de su tabla tienen re-chequeo. En swc, `proxy`, `tdz`, `callee`,
   `redefine_global`, el backlog y la asunción por ruta (`issue_2719`) clasifican directo, sin
   re-chequeo.
 
-  **Límites conocidos** (lo que no se prueba): el re-chequeo compara salidas, no caminos. Si la
-  salida de B con el bug coincide con la del original neutralizado (B == A'), la divergencia se
-  explica y va a `known/` aunque B haya ejecutado el bug. No hace falta un programa armado: alcanza
-  el patrón más común, una variable con su valor por defecto (`""`, `false`, `0`) que solo cambia
-  en la rama de la violación. En A' esa rama no corre y queda el valor por defecto; si el bug deja
-  ese mismo valor en B, B == A' (medido con oxc 0.153.0 en la revisión de la noche 2: 11 programas
-  de tdz, symbol, global_conocido, with, solo_sloppy, builtins, coercion y profundidad, 72 filas de
-  `known/` en 8 celdas; el mismo programa con `let s = "dz"` va a `div/`). Un programa que imprime a
-  propósito una línea con forma de marco de V8 en la rama del contenido fijo también termina en
-  `known/`. Un bug que está en el
+  **Límites conocidos** (lo que no se prueba): el re-chequeo compara salidas y el camino de B,
+  no el de A' contra el de B. Lo que cubre el chequeo del camino de B (medido con oxc 0.153.0):
+  los 11 programas de la revisión de la noche 2 (tdz, symbol, global_conocido, with,
+  solo_sloppy, builtins, coercion y profundidad; 72 filas de `known/` en 8 celdas) van a `div/`,
+  y de 99 variantes (11 familias × 9 valores por defecto: `""`, `undefined`, `[]`, `+=` de
+  números y de strings, `false`, `NaN`, `++` que no corre, un objeto sin la clave), de 476 filas
+  en `known/` quedan 32. Esas 32 son lo que no cubre: oxc pliega mal la condición de adentro
+  (`Number.isInteger(5e-324)`, `"abc".substring(1, undefined)`) y con eso borra la rama entera
+  (`if (typeof window === "undefined")`, la rama sloppy, el cuerpo del `with`); B ya no tiene
+  ninguna rama que dependa de la asunción y da el valor por defecto, como un minificado que
+  aprovechó la asunción. Desde las corridas de B no se distingue. Tampoco se cubre:
+  - la cobertura cuenta los scripts del programa (y los de `eval`), no lo que corre en un
+    listener de `exit` que el programa registra, en workers ni en procesos hijos;
+  - un programa cuyo camino cambia entre dos corridas del mismo texto (reloj, `Math.random`,
+    GC) da otra cobertura: va a `div/` aunque sea una asunción, igual que un B que cambia de
+    camino con la neutralización sin que se vea en la salida (en el corpus de SWC, la
+    aceptación y el golden no hay ninguno: ningún caso cambió de destino);
+  - sin el sensor entero en B (`sensor_caido`, `sensor_tope`), los re-chequeos de las
+    violaciones y de `extends` quedan inconclusos (cuando A o B pasan el tope, el camino de B
+    sale de otra corrida de B con el sensor y un tope mayor, que tiene que tomar el mismo camino
+    que B sin el sensor: ver el tope del sensor abajo);
+  - solo sloppy por el renombre de `arguments` (`Renombrando`) compara contra A, no contra A',
+    y no pasa por este chequeo.
+
+  Un programa que imprime a propósito una línea con forma de marco de V8 en la rama del contenido
+  fijo también termina en `known/`. Un bug que está en el
   programa pero que B no ejecuta (oxc borró la sentencia que lanza y con eso el `catch` que lo
   tenía) no deja rastro en la salida: la divergencia es entera de la asunción y va a `known/`.
   Lo que se pierde por exigir B == A' (van a `div/`): los positivos en que B no da ni lo de A
@@ -385,17 +418,33 @@ Principios:
   `dead_code_constant_boolean_should_warn_more`: funciones en bloque de Anexo B), y un `.stack`
   impreso en que el minificado cambia el nombre de un marco (el mangling de `core_defaults`) o
   la cantidad de marcos (inlining).
+- **Posiciones en líneas con forma de marco de V8** (`archivo:L:C`): la comparación las borra
+  solo si el archivo es de difuzz o el de un marco que el preload formateó en esa corrida (A o
+  B). Una línea impresa a propósito con el archivo de un marco real (`__filename`, el mismo nombre
+  que un `//# sourceURL=` del programa) pierde la posición y un bug en ella no se ve. Además, las
+  pausas del sensor formatean el stack de cada excepción atrapada: el archivo de un `eval` con
+  `//# sourceURL=x.js` que lanza y atrapa queda anotado aunque el programa nunca lea un stack, y
+  una línea impresa con `x.js:L:C` da `iguales` aunque la posición cambie (MEDIDO, revisión de la
+  integración del bloque 7).
 - **El sensor de violaciones atrapadas se apaga a las 256 pausas** (`MAX_PAUSAS` en el preload):
   cada excepción atrapada lo pausa y cuesta de 0,5 ms (sin marcos) a 1,4 ms (50 marcos de
   profundidad); sin tope, 10 000 excepciones atrapadas tardan de 5 a 15 s y llegan al timeout por
   defecto (5 s). Al pausar, V8 formatea el stack del
-  error (puede llamar al `toString` o a `Error.prepareStackTrace` del programa): si A o B pasan el
-  tope, los dos se repiten y se comparan sin el sensor, simétricos (`sensor:` en la
-  `clasificacion:`; `comparados_sin_sensor=` en las stats). Las violaciones que el sensor ubicó
-  antes del tope pasan a esas corridas y el re-chequeo de violaciones, también sin el sensor,
-  decide como siempre (B == A'): un positivo con más de 256 excepciones atrapadas ya no va a
-  `div/` si su violación cae entre las primeras 256 pausas. Una violación atrapada después del
-  tope no se ve: el caso va a `div/`.
+  error (puede llamar al `toString` o a `Error.prepareStackTrace` del programa, que así puede
+  notar el sensor y tomar otro camino): si A o B pasan el tope, los dos se repiten y se comparan
+  sin el sensor (`sensor:` en la `clasificacion:`; `comparados_sin_sensor=` en las stats). La
+  comparación y los re-chequeos son simétricos (sin el sensor); las violaciones que el sensor
+  ubicó antes del tope pasan a esas corridas y solo dicen dónde neutralizar. El re-chequeo de
+  violaciones decide como siempre (B == A' y B no pasa por la violación): un positivo con más de
+  256 excepciones atrapadas ya no va a `div/` si su violación cae entre las primeras 256 pausas.
+  El camino de B, que no es simétrico (sale de una corrida con el sensor), se mira solo cuando
+  todo lo demás ya da `Explica`: B corre otra vez con el sensor y un tope de 4096 pausas, y otra
+  sin el sensor, las dos con la cobertura de bloques de V8; cuenta solo si la corrida con el sensor
+  es entera, da lo mismo que B y tiene la misma cobertura que la de sin el sensor (un programa que
+  nota el sensor y cambia de camino no pasa). Si no, el camino no se sabe y va a `div/`
+  (inconcluso). Cuesta 2 node más, uno de ellos con el sensor y hasta 4096 pausas: con muchos
+  marcos puede llegar al timeout (y entonces node se repite sin el sensor, un node más) y el
+  positivo se pierde. Una violación de A atrapada después del tope no se ve: el caso va a `div/`.
 - **Un minificado que node no acepta nunca se explica con una asunción**: ninguna permite
   producir código inválido.
 - **Una conocida que cambia de síntoma vuelve a `div/`** (se compara contra
@@ -427,8 +476,8 @@ Sin `node` en el `PATH`, los tests que lo necesitan fallan con un mensaje claro.
 
 - **Golden de detección** (`tests/golden/`): 16 casos con bugs conocidos de oxc y swc, en 8
   celdas, más `--invocar` y `--stubs`; la clase esperada de cada caso está en `esperado.tsv`.
-- **Aceptación de los re-chequeos** (`tests/aceptacion/rechequeos/`): 95 casos que combinan un
-  bug real de oxc con un flag de asunción, en las 4 celdas de oxc (380 comparaciones).
+- **Aceptación de los re-chequeos** (`tests/aceptacion/rechequeos/`): 111 casos que combinan un
+  bug real de oxc con un flag de asunción, en las 4 celdas de oxc (444 comparaciones).
 
 ```sh
 tests/golden/verificar.sh --jobs 4                    # sale con 0 y "comparaciones=N fallas=0"
