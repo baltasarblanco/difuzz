@@ -11,7 +11,8 @@ Fuentes:
 
 Criterios (cada rechazo se cuenta por causa en <out>/stats.tsv):
   - origen (ruta o npm:paquete:archivo) sin tab, \\n ni \\r: van sin escapar en una columna de
-    fuentes.tsv y romperian la fila (rechazo_nombre_tsv)
+    fuentes.tsv y romperian la fila (rechazo_nombre_tsv); y que sea UTF-8 valido: fuentes.tsv es
+    UTF-8 (rechazo_nombre_no_utf8)
   - extension .js/.cjs/.mjs; nada de .min.js; tamano entre --min y --max bytes
   - UTF-8 valido; no parece minificado (linea media <= 200 y ninguna linea > 2000 chars)
   - sin capacidades peligrosas: fs, child_process, net, http(s), dgram, tls, worker_threads,
@@ -313,6 +314,15 @@ def main():
         # columnas (barrido-real.sh lee la forma por posicion; --excluir, el sha256).
         if any(c in origen for c in '\t\n\r'):
             stats['rechazo_nombre_tsv'] = stats.get('rechazo_nombre_tsv', 0) + 1
+            continue
+        # 9.4: un nombre que no es UTF-8 (os.walk y tarfile lo dan con surrogateescape) no se puede
+        # escribir en fuentes.tsv (UTF-8): antes cortaba el armado a medias con UnicodeEncodeError.
+        # Se rechaza en vez de escribir los bytes crudos: fuentes.tsv dejaria de ser UTF-8 y --excluir
+        # (que lo lee en UTF-8 estricto) se cortaria con el corpus siguiente.
+        try:
+            origen.encode('utf-8')
+        except UnicodeEncodeError:
+            stats['rechazo_nombre_no_utf8'] = stats.get('rechazo_nombre_no_utf8', 0) + 1
             continue
         causa, info = clasificar(origen, data, a)
         if causa:
