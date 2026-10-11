@@ -13,7 +13,7 @@ cargo build --release && cargo build --profile oraculo   # los dos binarios
 `cargo test`: los unitarios de `src/` y tres binarios de integración:
 
 - `tests/salida_celdas.rs`: dos celdas en el mismo `--out` no se pisan; una corrida cortada queda marcada.
-- `tests/salida_usuario.rs`: códigos de salida 0, 1 y 2 de difuzz, y que `descartes.tsv` reconstruya el total.
+- `tests/salida_usuario.rs`: códigos de salida 0, 1 y 2 de difuzz, que `descartes.tsv` reconstruya el total y que un pipe cerrado en stdout o stderr no cambie el código ni pierda una divergencia (9.4).
 - `tests/verificaciones.rs`: sus dos tests (golden y aceptación) quedan ignorados; ver "Como tests de cargo".
 
 Cada binario de integración incluye `src/test_util.rs` (con `#[path]`) y corre también sus 4 tests. Ignorados en

@@ -5,6 +5,22 @@
 //! Mutaciones opcionales (--mutaciones), sin reduccion. Feo a proposito: el
 //! pipeline es la entrega.
 
+/// 9.4: `eprintln!` sin panic. El de std hace panic si escribir en stderr falla (un pipe
+/// cerrado: `difuzz ... 2>&1 | rg -m1 x`, EPIPE, porque Rust ignora SIGPIPE): en un worker,
+/// el panic del `DIVERGENCIA ...` llegaba antes que el reporter y se perdia el hallazgo (ni
+/// div/ ni descartes.tsv: el `panic del fuzzer` tambien hacia panic), y en el hilo principal
+/// salia con 101. Los avisos y el progreso de stderr no son la salida de la corrida (esa
+/// queda en `--out`): si no se pueden escribir, se pierden y la corrida sigue. Definido antes
+/// de los `mod`, tapa al de std en todo el crate (alcance textual de `macro_rules!`). En los
+/// tests queda el de std: es el que captura libtest.
+#[cfg(not(test))]
+macro_rules! eprintln {
+    ($($arg:tt)*) => {{
+        use ::std::io::Write as _;
+        let _ = ::std::writeln!(::std::io::stderr(), $($arg)*);
+    }};
+}
+
 mod analisis;
 mod backend;
 mod binario;
@@ -121,9 +137,33 @@ uso: difuzz <corpus_dir> [--out DIR] [--minifier M] [--config C] [--forma F] [--
          el oraculo reescrito en el lugar a mitad de corrida (R1-H18/M3; CORRIDA.txt: incompleta, con
          binario_cambiado; con /proc, reemplazar difuzz o el oraculo por otro archivo no corta la
          corrida: se siguen lanzando los del arranque; sin /proc se vigilan por ruta y cualquier
-         cambio corta); --cruce sin indices; --emitir que no puede leer o minificar
+         cambio corta); --cruce sin indices; --emitir que no puede leer o minificar; stdout que
+         no se puede escribir (disco lleno; no un pipe cerrado)
     2    error de uso: opcion desconocida, valor o combinacion invalida (con este texto en stderr)
-    130  interrumpida por SIGINT o SIGTERM (CORRIDA.txt: interrumpida)";
+    130  interrumpida por SIGINT o SIGTERM (CORRIDA.txt: interrumpida)
+    ni un pipe cerrado en stdout (`| head -1`) ni un error al escribir en stderr cambian el codigo
+    (9.4): lo que no se pudo imprimir se pierde y la corrida sigue (sus resultados estan en --out)";
+
+/// 9.4: escribe `t` en stdout sin panic (el `print!` de std lo hace si escribir falla). Un
+/// pipe que se cerro (`| head -1`, EPIPE) no es un error: el que lee no quiere mas (como
+/// rg). Cualquier otro error (disco lleno, `> /dev/full`) si: se pierde lo que se imprime.
+fn a_stdout(t: &str) -> std::io::Result<()> {
+    use std::io::Write as _;
+    let mut o = std::io::stdout().lock();
+    match o.write_all(t.as_bytes()).and_then(|()| o.flush()) {
+        Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => Ok(()),
+        r => r,
+    }
+}
+
+/// 9.4: `a_stdout` para `--help`, `--cruce` y `--emitir`, donde stdout es todo lo que hacen:
+/// si no se pudo escribir (salvo un pipe cerrado), sale con 1.
+fn a_stdout_o_salir(t: &str) {
+    if let Err(e) = a_stdout(t) {
+        eprintln!("no pude escribir en stdout: {e}");
+        std::process::exit(SALIDA_ERROR);
+    }
+}
 
 /// R2-H09: los codigos de salida de la tabla del USAGE (0 es el exito).
 const SALIDA_ERROR: i32 = 1;
@@ -702,7 +742,7 @@ fn main() {
     // R2-H09: la ayuda es un pedido, no un error de uso (antes: "opcion desconocida", 2).
     // Solo como argumento propio: `--out -h` sigue por Cli::parse (pide_ayuda).
     if pide_ayuda(&args) {
-        println!("{USAGE}");
+        a_stdout_o_salir(&format!("{USAGE}\n"));
         return;
     }
     let repetidas = opciones_repetidas(&args);
@@ -720,7 +760,7 @@ fn main() {
     // `--cruce DIR`: solo lee los indices, no corre nada. Sin index-*.tsv: exit 1.
     if let Some(dir) = &cli.cruce {
         match indice::cruce(dir) {
-            Ok(t) => print!("{t}"),
+            Ok(t) => a_stdout_o_salir(&t),
             Err(e) => {
                 eprintln!("no pude leer los indices en {}: {e}", dir.display());
                 std::process::exit(SALIDA_ERROR);
@@ -732,7 +772,7 @@ fn main() {
     if let Some(f) = &cli.emitir {
         std::panic::set_hook(Box::new(minify::record_panic_location));
         match emitir::emitir(f, cli.minifier, cli.preset, cli.forma, cli.kind) {
-            Ok(t) => print!("{t}"),
+            Ok(t) => a_stdout_o_salir(&t),
             Err(e) => {
                 eprintln!("{e}");
                 std::process::exit(SALIDA_ERROR);
@@ -1000,34 +1040,42 @@ fn main() {
         eprintln!("no pude guardar lint-triage.tsv: {e}");
     }
     print_hint(&cell_out, &stats);
-    println!("{}", stats.line());
+    // 9.4: las lineas de stats van a stdout juntas y sin panic (`a_stdout`); antes, println!.
+    let mut so = String::new();
+    macro_rules! linea {
+        ($($arg:tt)*) => {{
+            use std::fmt::Write as _;
+            let _ = writeln!(so, $($arg)*);
+        }};
+    }
+    linea!("{}", stats.line());
     if cli.mutaciones + cli.mutaciones_extra > 0 {
-        println!("{}", stats.mutaciones.line());
+        linea!("{}", stats.mutaciones.line());
     }
     if cli.mutaciones_extra > 0 {
-        println!("{}", stats.mutaciones.line_extra());
+        linea!("{}", stats.mutaciones.line_extra());
     }
     if cli.invocar {
-        println!("invocar (M31): reintentos_sin_invocar={}", stats.invocar_retry);
+        linea!("invocar (M31): reintentos_sin_invocar={}", stats.invocar_retry);
     }
     // R1-H13 / R1-H14: en una linea aparte (no cambia la de `total=`).
-    println!(
+    linea!(
         "analisis_swc (R1-H13): recuperados={} perdidos={} lint_sin_analisis={} | bloques (R1-H14): pasadas={} sin_epilogo_normal={} sin_salida={}",
         stats.analisis_recuperado, stats.analisis_perdido, stats.lint_sin_analisis, stats.bloques, stats.bloques_unica, stats.bloques_sin_salida
     );
     if subproceso::hay_oraculo() || stats.solo_asserts > 0 {
-        println!("oraculo (R1-H05): solo_asserts={} sin_divergencia={}", stats.solo_asserts, stats.solo_asserts_sin_div);
+        linea!("oraculo (R1-H05): solo_asserts={} sin_divergencia={}", stats.solo_asserts, stats.solo_asserts_sin_div);
     }
     if stats.fallos_analisis > 0 {
-        println!("analisis de difuzz (A6/R1-H12): casos_con_fallo={} descartados={}", stats.fallos_analisis, stats.descartes_analisis);
+        linea!("analisis de difuzz (A6/R1-H12): casos_con_fallo={} descartados={}", stats.fallos_analisis, stats.descartes_analisis);
     }
     // M1 (revision-b456): en una linea aparte, solo si paso (no cambia la de `total=`).
     if stats.sensor_repetidos > 0 {
-        println!("sensor (I3): comparados_sin_sensor={}", stats.sensor_repetidos);
+        linea!("sensor (I3): comparados_sin_sensor={}", stats.sensor_repetidos);
     }
     // b7-8: idem.
     if stats.sensor_omitidos > 0 {
-        println!("sensor (b7-8): omitido_por_riesgo_v8={}", stats.sensor_omitidos);
+        linea!("sensor (b7-8): omitido_por_riesgo_v8={}", stats.sensor_omitidos);
     }
     // n-sandbox: en una linea aparte, solo con --sandbox (no cambia la de `total=`).
     // 7.7 (MENOR 5): `solo_original=` cuenta pasadas, tambien las de las variantes.
@@ -1043,8 +1091,11 @@ fn main() {
         .activo()
         .then(|| format!("sandbox: modo={} descartados={} solo_original={solo_original} ambos={ambos} corto={corto}", cli.sandbox.nombre(), stats.a_sandbox));
     if let Some(l) = &linea_sandbox {
-        println!("{l}");
+        linea!("{l}");
     }
+    // 9.4: un pipe cerrado no es error; otro (disco lleno) sale con 1, despues de cerrar la
+    // corrida (las stats quedan tambien en CORRIDA.txt).
+    let fallo_stdout = a_stdout(&so).err();
     // M27 (a): una escritura perdida del reporter es un hallazgo perdido.
     let lost = oracle::write_errors() - errors_before;
     // R2-H05: solo una corrida entera (todos los casos contados: un worker
@@ -1079,6 +1130,11 @@ fn main() {
     // contaron): antes salia con 0.
     if !entera {
         eprintln!("corrida incompleta: {} de {total} casos contados en {}", stats.total, cell_out.display());
+        drop(preload);
+        std::process::exit(SALIDA_ERROR);
+    }
+    if let Some(e) = fallo_stdout {
+        eprintln!("no pude escribir las stats en stdout: {e} (estan en {})", cell_out.join(corrida::ARCHIVO).display());
         drop(preload);
         std::process::exit(SALIDA_ERROR);
     }

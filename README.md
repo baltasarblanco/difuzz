@@ -686,9 +686,14 @@ reintento.
 | código | significado |
 |---|---|
 | 0 | corrida entera (con o sin hallazgos; `CORRIDA.txt: completa`); `--cruce`, `--emitir` y `--help` sin error |
-| 1 | error de entrada o de entorno: corpus inexistente, que no es directorio o sin `input.js`; `--out` que no se puede escribir; escrituras perdidas o casos sin contar; el oráculo se reescribió a mitad de corrida (ver [Compilar](#compilar)); `--cruce` sin índices; `--emitir` que no puede leer o minificar |
+| 1 | error de entrada o de entorno: corpus inexistente, que no es directorio o sin `input.js`; `--out` que no se puede escribir; escrituras perdidas o casos sin contar; el oráculo se reescribió a mitad de corrida (ver [Compilar](#compilar)); `--cruce` sin índices; `--emitir` que no puede leer o minificar; stdout que no se puede escribir (disco lleno, `> /dev/full`; un pipe cerrado no) |
 | 2 | error de uso: opción desconocida, valor o combinación inválida (con la ayuda en stderr); también `-h`, `--help` u otra opción de difuzz como valor de `--out`, `--cache`, `--indice`, `--emitir` o `--cruce` (para una ruta con ese nombre: `./-h`) |
 | 130 | interrumpida por SIGINT o SIGTERM (`CORRIDA.txt: interrumpida`) |
+
+Ni un pipe cerrado en stdout (`difuzz ... | head -1`) ni un error al escribir en stderr
+(`2>&1 | rg -m1 DIVERGENCIA`) cambian el código: lo que no se pudo imprimir se pierde y la corrida
+sigue, con sus resultados en `--out` y las stats en `CORRIDA.txt` (9.4; antes salía con 101 y,
+con stderr cerrado a mitad de corrida, una divergencia podía perderse).
 
 ## Tests y verificaciones
 

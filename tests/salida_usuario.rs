@@ -270,3 +270,72 @@ fn descartes_reconstruye_el_total() {
     assert_eq!(campo(stats, "iguales"), total - casos.len(), "{stats}");
     std::fs::remove_dir_all(&b).unwrap();
 }
+
+/// 9.4: `difuzz` con stdout y/o stderr en un pipe cerrado (el que lee ya se fue: EPIPE). Antes,
+/// rc 101 (panic de `println!`/`eprintln!`) y, con stderr cerrado a mitad de corrida, la
+/// divergencia se perdia: el panic del `DIVERGENCIA ...` llegaba antes que el reporter.
+/// Devuelve el rc y lo que salio por el stream que sigue abierto.
+fn difuzz_con_pipe_cerrado(base: &Path, args: &[&str], stdout: bool, stderr: bool) -> (Option<i32>, String) {
+    let mut c = Command::new(BIN);
+    c.args(args).env("TMPDIR", base.join("tmp")).env("DIFUZZ_ORACULO", "ninguno");
+    let (lectura, escritura) = std::io::pipe().unwrap();
+    drop(lectura);
+    c.stdout(if stdout { Stdio::from(escritura.try_clone().unwrap()) } else { Stdio::piped() });
+    c.stderr(if stderr { Stdio::from(escritura) } else { Stdio::piped() });
+    let o = c.output().unwrap();
+    let mut leido = String::new();
+    for (cerrado, bytes) in [(stdout, &o.stdout), (stderr, &o.stderr)] {
+        if !cerrado {
+            leido.push_str(&String::from_utf8_lossy(bytes));
+        }
+    }
+    (o.status.code(), leido)
+}
+
+#[test]
+fn pipe_cerrado_ayuda_y_uso() {
+    let b = base("pipe-uso");
+    for (stdout, stderr) in [(true, false), (false, true), (true, true)] {
+        let (rc, leido) = difuzz_con_pipe_cerrado(&b, &["--help"], stdout, stderr);
+        assert_eq!(rc, Some(0), "--help, stdout cerrado={stdout} stderr cerrado={stderr}: {leido}");
+        let (rc, leido) = difuzz_con_pipe_cerrado(&b, &["--opcion-rara"], stdout, stderr);
+        assert_eq!(rc, Some(2), "uso, stdout cerrado={stdout} stderr cerrado={stderr}: {leido}");
+    }
+    // Un stdout que no se puede escribir por otra cosa (disco lleno) si es un error: 1.
+    if Path::new("/dev/full").exists() {
+        let full = std::fs::OpenOptions::new().write(true).open("/dev/full").unwrap();
+        let o = Command::new(BIN).arg("--help").stdout(Stdio::from(full)).stderr(Stdio::piped()).output().unwrap();
+        assert_eq!(rc(&o), Some(1), "{}", err(&o));
+        assert!(err(&o).starts_with("no pude escribir en stdout: "), "{}", err(&o));
+    }
+    std::fs::remove_dir_all(&b).unwrap();
+}
+
+#[test]
+fn pipe_cerrado_no_pierde_la_divergencia() {
+    if !test_util::requiere_node() {
+        return;
+    }
+    let b = base("pipe-div");
+    let corpus = b.join("corpus");
+    // golden oxc-o1: div:ThrowNew en oxc carril_a (tests/golden/esperado.tsv).
+    let o1 = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/golden/corpus/oxc-o1/input.js");
+    caso(&corpus, "o1", &std::fs::read(o1).unwrap());
+    caso(&corpus, "igual", b"console.log(1);\n");
+    for (stdout, stderr) in [(false, true), (true, false), (true, true)] {
+        let out = b.join(format!("out-{stdout}-{stderr}"));
+        let args = [corpus.to_str().unwrap(), "--out", out.to_str().unwrap(), "--minifier", "oxc", "--no-cache", "--jobs", "1"];
+        let (rc, leido) = difuzz_con_pipe_cerrado(&b, &args, stdout, stderr);
+        let que = format!("stdout cerrado={stdout} stderr cerrado={stderr}");
+        assert_eq!(rc, Some(0), "{que}: {leido}");
+        let celda = out.join("oxc+carril_a+tal_cual");
+        assert!(celda.join("div/o1").is_dir(), "{que}: falta div/o1\n{leido}");
+        let corrida = std::fs::read_to_string(celda.join("CORRIDA.txt")).unwrap();
+        assert!(corrida.starts_with("estado: completa\n"), "{que}: {corrida}");
+        if !stdout {
+            let stats = leido.lines().find(|l| l.starts_with("total=")).unwrap_or_else(|| panic!("{que}: {leido}"));
+            assert_eq!((campo(stats, "total"), campo(stats, "DIVERGENCIAS"), campo(stats, "panics_del_fuzzer")), (2, 1, 0), "{stats}");
+        }
+    }
+    std::fs::remove_dir_all(&b).unwrap();
+}
