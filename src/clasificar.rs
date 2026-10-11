@@ -8,7 +8,8 @@
 //! minifier: el orden de esas ejecuciones no cambia):
 //! 1. contenido de toString/.stack (A con los contenidos cambiados; t-principio:
 //!    y A'/B' con el contenido fijo),
-//! 2. profundidad (M16, A con mas pila; t-principio: y B con mas pila),
+//! 2. profundidad (M16, A con mas pila; t-principio: y B con mas pila; 8.1: un
+//!    Explica se confirma con los literales salados),
 //! 3. nombres (core_defaults: minificar preservando nombres),
 //! 4. re-chequeos de la politica (`extends`, `global_conocido`, `with`,
 //!    violaciones; t-principio: `builtins`, `coercion`),
@@ -203,7 +204,28 @@ pub fn clasificar<'a>(
     // b7-1 (r04: B todavia llega al limite de la pila y corre el catch con el bug): B con la
     // pila de siempre y con mas pila, con cobertura.
     let camino = |b2: &runner::Exec| recheck::camino_entorno(runner, minified, b, b2, (&[runner::DEEP_STACK], &[]), &[]);
-    match depth_recheck(a, b, &deep, a_otra_vez, || runner.run_with_args(minified, &[runner::DEEP_STACK]), camino) {
+    // 8.1 (rev-final F1: un desborde de pila NATIVO usado como dato, `JSON.stringify` de un
+    // arreglo anidado; B recorre los mismos bloques con y sin mas pila y el camino no lo ve): sin
+    // sensor de uso, un Explica se confirma salado, como contenido. El mismo M16 sobre el
+    // original salado: si A salado ya no depende de la pila (o la corrida honda falla), no
+    // confirma nada.
+    let r = match depth_recheck(a, b, &deep, a_otra_vez, || runner.run_with_args(minified, &[runner::DEEP_STACK]), camino) {
+        Some(recheck::Recheck::Explica) => Some(match ctx.medido {
+            Some(m) => recheck::con_literales_salados(runner, (m.minifier, m.preset, m.kind), original, |o2, m2, a2, b2| {
+                let deep2 = runner.run_with_args(o2, &[runner::DEEP_STACK]);
+                let camino2 = |b3: &runner::Exec| recheck::camino_entorno(runner, m2, b2, b3, (&[runner::DEEP_STACK], &[]), &[]);
+                depth_recheck(a2, b2, &deep2, || runner.run(o2), || runner.run_with_args(m2, &[runner::DEEP_STACK]), camino2)
+                    .unwrap_or_else(|| {
+                        recheck::Recheck::Inconcluso(
+                            "A con mas pila da lo mismo que A (o la corrida honda fallo): la divergencia ya no depende de la pila".into(),
+                        )
+                    })
+            }),
+            None => recheck::Recheck::Explica,
+        }),
+        otro => otro,
+    };
+    match r {
         None => traza.paso("profundidad", "no aplica (A con mas pila da lo mismo, o la corrida honda fallo)"),
         Some(recheck::Recheck::Explica) => {
             traza.recheck("profundidad", &recheck::Recheck::Explica, par);

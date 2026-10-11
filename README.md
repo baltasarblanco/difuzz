@@ -471,9 +471,10 @@ Principios:
     corrida en estricto). Si lo toca, inconcluso; si no se pudo sensar (un built-in redefinido o
     borrado), también. El contenido fijo ya no fija el texto de una función nativa
     (`function max() { [native code] }`): es el mismo en A y en B.
-  - para contenido y solo sloppy, que no tienen un sensor de uso completo (el texto de una
+  - para contenido, solo sloppy y profundidad, que no tienen un sensor de uso completo (el texto de una
     función del programa es justo lo que lee un positivo como `String(f)`; el `arguments` atado a
-    los parámetros; profundidad no tiene ninguno: ver Límites conocidos), un `Explica` se confirma con el original **salado**: cada literal de cadena
+    los parámetros; profundidad no tiene ninguno, y un desborde de pila nativo usado como dato no
+    cambia el camino de B: ver Límites conocidos), un `Explica` se confirma con el original **salado**: cada literal de cadena
     en posición de dato con `dz` al final, minificado igual, y el mismo re-chequeo tiene que dar
     `Explica` también ahí (con otro valor por defecto la coincidencia se rompe). La sal toca solo
     literales de cadena (y plantillas sin expresiones) que sean elemento de un arreglo, valor de
@@ -482,11 +483,18 @@ Principios:
     ramas de `?:` o de `||`) ni números, booleanos o `null` (ver Límites conocidos). Sin literales que
     salar, no cambia nada. Si el original salado ya no diverge, la sal cambió el camino (un
     literal que guarda la rama del bug, `modo === "x" ? bug : ...`): inconcluso, porque el salado
-    no confirma nada.
+    no confirma nada. La confirmación salada de profundidad (8.1) no depende de la política del
+    backend: vale en las celdas de swc también, y un `Explica` de profundidad en swc paga el
+    salado y puede ir a `div/` como en oxc (en el corpus de tests de SWC ninguna divergencia de
+    swc llega ahí: sin cambios en `swc a`, `swc b` ni `swc a --sandbox`, medido en la revisión del
+    bloque 8).
 
     Cuesta, solo cuando todo lo demás ya daba `Explica`: 2 ejecuciones de node (en solo sloppy,
-    además, 1 o 2 `node --check`), una instrumentación del minificado con SWC y, para contenido y
-    solo sloppy con literales, 1 minificación y 2 node más el re-chequeo sobre el salado.
+    además, 1 o 2 `node --check`), una instrumentación del minificado con SWC y, para contenido,
+    solo sloppy y profundidad con literales, 1 minificación y 2 node más el re-chequeo sobre el
+    salado (en profundidad, hasta 5 node más: A salado con más pila, A salado otra vez, B salado
+    con más pila y las 2 corridas de B salado con cobertura, más una instrumentación del
+    minificado salado).
 
   En oxc todos los flags de su tabla tienen re-chequeo. En swc, `proxy`, `tdz`, `callee`,
   `redefine_global`, el backlog y la asunción por ruta (`issue_2719`) clasifican directo, sin
@@ -518,14 +526,15 @@ Principios:
     argumento (4) y el texto de una función con valor por defecto `0` (8). Con un literal de cadena
     en posición de dato (`["", bug][i]`) van a `div/`.
   - la profundidad, cuando la salida depende como dato de un desborde de pila **nativo** (por
-    ejemplo, si `JSON.stringify` de un arreglo anidado 7000 veces lanzó o no): el re-chequeo de
-    profundidad no tiene sensor de uso ni confirmación salada, y con una recursión nativa B
-    recorre los mismos bloques con y sin más pila, así que su camino no cambia. Si el bug deja en
-    B el mismo valor que A con más pila, se explica por el límite de pila y va a `known/` (medido
-    en la revisión final del bloque 7: con `.then(JSON.stringify)` en las 8 celdas y con
-    `try`/`throw` en `a/core_defaults`, la única en que se probó, también con `--sandbox`,
-    `--sandbox-red` e `--invocar`; igual que `fe0cd86`). Con una recursión de JS la cobertura
-    cambia y va a `div/`.
+    ejemplo, si `JSON.stringify` de un arreglo anidado 7000 veces lanzó o no) y el bug deja en B
+    un valor por defecto que la sal no cambia. El re-chequeo de profundidad no tiene sensor de
+    uso, y con una recursión nativa B recorre los mismos bloques con y sin más pila, así que su
+    camino no cambia; desde 8.1 su `Explica` se confirma salado, como contenido. Medido con oxc
+    0.153.0 en las 8 celdas: los dos programas de la revisión final del bloque 7 (con
+    `.then(JSON.stringify)` y con `try`/`throw`, el valor por defecto `""` en un arreglo), que con
+    `90cd16b` y `fe0cd86` iban a `known/`, van a `div/`; con el valor por defecto `0` en el arreglo
+    (`[0, bug.length]`) sigue en `known/` (8 filas), el mismo residuo de la sal que en el punto
+    anterior. Con una recursión de JS la cobertura cambia y va a `div/`.
   - el sensor de uso de `global_conocido` ve lecturas (`typeof`, `window`, `globalThis.window`),
     no `"window" in globalThis` ni `hasOwnProperty`; el de `builtins`, lecturas después de pisar
     (si el programa redefine o borra la propiedad, inconcluso); el de coerción, las definiciones
@@ -649,8 +658,8 @@ Sin `node` en el `PATH`, los tests que lo necesitan fallan con un mensaje claro.
 
 - **Golden de detección** (`tests/golden/`): 16 casos con bugs conocidos de oxc y swc, en 8
   celdas, más `--invocar` y `--stubs`; la clase esperada de cada caso está en `esperado.tsv`.
-- **Aceptación de los re-chequeos** (`tests/aceptacion/rechequeos/`): 139 casos que combinan un
-  bug real de oxc con un flag de asunción, en las 4 celdas de oxc (556 comparaciones).
+- **Aceptación de los re-chequeos** (`tests/aceptacion/rechequeos/`): 142 casos que combinan un
+  bug real de oxc con un flag de asunción, en las 4 celdas de oxc (568 comparaciones).
 
 ```sh
 tests/golden/verificar.sh --jobs 4                    # sale con 0 y "comparaciones=N fallas=0"

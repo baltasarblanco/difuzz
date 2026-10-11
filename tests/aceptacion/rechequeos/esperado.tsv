@@ -655,3 +655,24 @@
 23-b71c-s2e-global-writesync	oxc-a-carril_a	div:Stdout
 23-b71c-s2e-global-writesync	oxc-b-core_defaults	div:Stdout
 23-b71c-s2e-global-writesync	oxc-b-carril_a	div:Stdout
+# 8.1 (rev-final F1): profundidad con un desborde de pila NATIVO usado como dato (`JSON.stringify` de un arreglo
+# anidado 7000 veces). B recorre los mismos bloques con y sin mas pila: el camino no lo ve, y el bug (oxc pliega
+# `"abc".substring(1, undefined)` a `""`) deja en B el valor de A con mas pila. Con 90cd16b (y fe0cd86) iban a known/;
+# ahora el Explica de profundidad se confirma con los literales salados y con otro valor por defecto B != A':
+# inconcluso, div/ (d01 con `.then(JSON.stringify)`, d04 con try/throw). p01: el positivo (el original desborda
+# con JSON.stringify a 4800 marcos de recursion, el minificado sin las locales muertas no; la salida sale de un
+# arreglo de literales, asi que la sal se aplica) sigue en known/. La profundidad 4800 esta entre los limites
+# medidos con node 24 y el preload (3775 marcos el original, 5933 el minificado sin locales): con otro node u
+# otro tamano de pila el positivo puede dejar de serlo. MEDIDO con el binario de 8.1 y con el de 90cd16b.
+24-f1-d01-profundidad-nativa-tabla	oxc-a-core_defaults	div:Stdout
+24-f1-d01-profundidad-nativa-tabla	oxc-a-carril_a	div:Stdout
+24-f1-d01-profundidad-nativa-tabla	oxc-b-core_defaults	div:Stdout
+24-f1-d01-profundidad-nativa-tabla	oxc-b-carril_a	div:Stdout
+24-f1-d04-profundidad-nativa-throw	oxc-a-core_defaults	div:Stdout
+24-f1-d04-profundidad-nativa-throw	oxc-a-carril_a	div:Stdout
+24-f1-d04-profundidad-nativa-throw	oxc-b-core_defaults	div:Stdout
+24-f1-d04-profundidad-nativa-throw	oxc-b-carril_a	div:Stdout
+24-f1-p01-profundidad-nativa-positivo	oxc-a-core_defaults	known
+24-f1-p01-profundidad-nativa-positivo	oxc-a-carril_a	known
+24-f1-p01-profundidad-nativa-positivo	oxc-b-core_defaults	known
+24-f1-p01-profundidad-nativa-positivo	oxc-b-carril_a	known
