@@ -221,6 +221,22 @@
   // process.exit se captura aca: un programa que lo pisa no evita que un throw termine.
   const fs = require('fs');
   const realExit = process.exit.bind(process);
+  // b7-1c (revision 7.1b, S2): lo que usan el canal y el calculo de la cobertura (al salir, despues
+  // del programa) se toma ahora: el programa puede pisar `fs.writeSync`, los metodos de String o
+  // de Number, `Math.imul`, `Object.keys`, el iterador de los arreglos (`for...of`) o
+  // `Session.prototype.post`, y con eso callar una linea del canal o cambiar lo que entra al hash
+  // (rev-7.1b x7, x8, x8b, x8c). `desligar(f)(x, ...a)` llama `f` con `this` = x sin buscar
+  // `call` en el momento.
+  const desligar = (f) => Function.prototype.call.bind(f);
+  const writeSync = desligar(fs.writeSync);
+  const strCharCodeAt = desligar(String.prototype.charCodeAt);
+  const strIndexOf = desligar(String.prototype.indexOf);
+  const strSlice = desligar(String.prototype.slice);
+  const strEmpiezaEn = desligar(String.prototype.startsWith);
+  const imul = Math.imul;
+  const esArreglo = Array.isArray;
+  const clavesPropias = Object.keys;
+  const crearObjeto = Object.create;
   let ctlFd = null;
   try {
     if (process.env.DIFUZZ_CTL) ctlFd = fs.openSync(process.env.DIFUZZ_CTL, 'a');
@@ -229,7 +245,7 @@
   const ctl = (line) => {
     if (ctlFd === null) return;
     try {
-      fs.writeSync(ctlFd, `${line}\n`);
+      writeSync(fs, ctlFd, `${line}\n`);
     } catch {}
   };
   // Una linea "!dz " del preload: se cuenta en el canal (runner::Exec::own_output).
@@ -311,6 +327,10 @@
   // ganchos del minificado instrumentado y el sensor de uso (antes de la foto de globals).
   const COBERTURA = process.env.DIFUZZ_COBERTURA === '1';
   delete process.env.DIFUZZ_COBERTURA;
+  // b7-1c (revision 7.1b, S2 y P1): el texto que corre esta instrumentado (recheck::GANCHOS): solo
+  // entonces se definen los ganchos (abajo) y `toString` saca lo insertado (`quitarGanchos`).
+  const GANCHOS = COBERTURA && process.env.DIFUZZ_GANCHOS === '1';
+  delete process.env.DIFUZZ_GANCHOS;
   // Las cuentas de `__difuzzNeutroRama` (abajo), para el hash de la cobertura.
   let cuentasDeRamas = null;
   // b7-1b: lo que usan los ganchos, tomado antes de que corra el programa (corren en medio
@@ -340,14 +360,56 @@
   const uso = (s) => marcarUso(`uso ${s}`);
   const usoNoSensado = (s) => marcarUso(`uso? ${s}`);
 
+  // b7-1c (revision 7.1b, P1): lo que recheck::instrumentar_ramas y recheck::interruptores_sloppy
+  // insertan en el texto de B (recheck::RAMA_FIN, recheck::THIS_INSERTO): con GANCHOS, el texto
+  // de una funcion sale sin eso, es decir, el de B. El fuente no nombra `__difuzzNeutro`
+  // (recheck::instrumentar se niega), asi que todo lo que se saca es lo insertado.
+  const MARCA_GANCHO = '__difuzzNeutro';
+  const RAMA_INICIO = '(__difuzzNeutroRama(';
+  const RAMA_FIN = ' /*__difuzzNeutroFin*/)';
+  const THIS_INSERTO = ';__difuzzNeutroThis(this);';
+  const quitarGanchos = (s) => {
+    if (typeof s !== 'string' || strIndexOf(s, MARCA_GANCHO) < 0) return s;
+    let out = '';
+    let i = 0;
+    for (;;) {
+      const j = strIndexOf(s, MARCA_GANCHO, i);
+      if (j < 0) break;
+      if (j - 1 >= i && strEmpiezaEn(s, RAMA_INICIO, j - 1)) {
+        const d = j - 1 + RAMA_INICIO.length;
+        let k = d;
+        while (k < s.length && strCharCodeAt(s, k) >= 48 && strCharCodeAt(s, k) <= 57) k++;
+        if (k > d && strEmpiezaEn(s, '),', k)) {
+          out += strSlice(s, i, j - 1);
+          i = k + 2;
+          continue;
+        }
+      } else if (j - 3 >= i && strEmpiezaEn(s, RAMA_FIN, j - 3)) {
+        out += strSlice(s, i, j - 3);
+        i = j - 3 + RAMA_FIN.length;
+        continue;
+      } else if (j - 1 >= i && strEmpiezaEn(s, THIS_INSERTO, j - 1)) {
+        out += strSlice(s, i, j - 1);
+        i = j - 1 + THIS_INSERTO.length;
+        continue;
+      }
+      out += strSlice(s, i, j + MARCA_GANCHO.length);
+      i = j + MARCA_GANCHO.length;
+    }
+    return out + strSlice(s, i);
+  };
+
   // Node usa primordials internos: console.log(f) no pasa por aca, solo el programa.
   const realToString = Function.prototype.toString;
+  const llamarToString = desligar(realToString);
   Object.defineProperty(Function.prototype, 'toString', {
     value: {
       toString() {
         flags.add('fn_tostring');
-        // 7.2: `process._kill` envuelto se ve como el nativo.
-        const s = realToString.call(killPropio !== null && this === killPropio ? killReal : this);
+        // 7.2: `process._kill` envuelto se ve como el nativo. 7.1c: sin buscar `call` en el
+        // momento (`llamarToString`), y sin los ganchos insertados en B (`quitarGanchos`).
+        const f = killPropio !== null && this === killPropio ? killReal : this;
+        const s = GANCHOS ? quitarGanchos(llamarToString(f)) : llamarToString(f);
         // b7-1b (revision 7.1, H2 d05): el texto de una funcion nativa (`function max() {
         // [native code] }`) es el mismo en A y en B: el minifier no lo cambia y la asuncion no
         // habla de el. Fijarlo hacia que un programa que elige un valor por ese texto diera en
@@ -834,7 +896,9 @@
   // helper de coercion pasa a `__dz_<nombre>` (como neutralize_coercion). Antes de la foto
   // de globals: no son globals del programa. Sin la variable no se define nada.
   // b7-1b (revision 7.1, H1/H2): con DIFUZZ_COBERTURA=1, ademas, los ganchos que pone en el
-  // minificado recheck::instrumentar_* y el sensor de uso:
+  // minificado recheck::instrumentar_* y el sensor de uso (b7-1c, S2: los ganchos solo con
+  // DIFUZZ_GANCHOS=1, es decir, cuando el texto que corre los usa; antes, en toda corrida con
+  // cobertura, y un B sin instrumentar podia verlos):
   //   - `__difuzzNeutroRama(i)`: cuenta cada vez que corre una parte condicional que la
   //     cobertura de V8 no separa (el lado derecho de `&&=`/`||=`/`??=`, el valor por defecto
   //     de un parametro o de una desestructuracion: MEDIDO, node 24.14.1); las cuentas entran
@@ -858,7 +922,7 @@
       const n = neutro === '1';
       try {
         def('__difuzzNeutroWith', (o) => {
-          if (n) return Object.create(null);
+          if (n) return crearObjeto(null);
           if (!COBERTURA || o === null || o === undefined) return o;
           return new RealProxy(ObjetoReal(o), {
             has(t, k) {
@@ -871,7 +935,7 @@
         def('__difuzzNeutroClave', (k) => (n ? `__dz_${typeof k === 'symbol' ? 'toPrimitive' : k}` : k));
       } catch {}
     }
-    if (COBERTURA) {
+    if (GANCHOS) {
       const sinUso = neutro === '1';
       const ramas = Object.create(null);
       cuentasDeRamas = ramas;
@@ -1544,29 +1608,36 @@
     try {
       const PRELOAD_URL = require('url').pathToFileURL(__filename).href;
       const sesion = new (require('inspector').Session)();
+      const postar = desligar(sesion.post);
       sesion.connect();
       sesion.post('Profiler.enable');
       sesion.post('Profiler.startPreciseCoverage', { callCount: true, detailed: true });
       process.on('exit', () => {
         try {
-          sesion.post('Profiler.takePreciseCoverage', (err, res) => {
-            if (err || !res || !Array.isArray(res.result)) return;
+          postar(sesion, 'Profiler.takePreciseCoverage', (err, res) => {
+            if (err || !res || !esArreglo(res.result)) return;
             // Dos FNV-1a de 32 bits con distinta semilla (64 bits en total).
+            // b7-1c (S2): con lo tomado al principio y con indices (sin iteradores).
             let h1 = 0x811c9dc5, h2 = 0x01000193 ^ 0x5bd1e995, rangos = 0;
             const mezclar = (s) => {
               for (let i = 0; i < s.length; i++) {
-                const c = s.charCodeAt(i);
-                h1 = Math.imul(h1 ^ c, 0x01000193);
-                h2 = Math.imul(h2 ^ c, 0x01000193 + 2);
+                const c = strCharCodeAt(s, i);
+                h1 = imul(h1 ^ c, 0x01000193);
+                h2 = imul(h2 ^ c, 0x01000193 + 2);
               }
             };
-            for (const sc of res.result) {
+            const scripts = res.result;
+            for (let a = 0; a < scripts.length; a++) {
+              const sc = scripts[a];
               const url = typeof sc.url === 'string' ? sc.url : '';
-              if (url === PRELOAD_URL || url.startsWith('node:') || url.startsWith('difuzz-stub:')) continue;
+              if (url === PRELOAD_URL || strEmpiezaEn(url, 'node:') || strEmpiezaEn(url, 'difuzz-stub:')) continue;
               mezclar(`s${url}|`);
-              for (const f of sc.functions || []) {
+              const fns = esArreglo(sc.functions) ? sc.functions : [];
+              for (let b = 0; b < fns.length; b++) {
                 mezclar('f');
-                for (const r of f.ranges || []) {
+                const rs = esArreglo(fns[b].ranges) ? fns[b].ranges : [];
+                for (let c = 0; c < rs.length; c++) {
+                  const r = rs[c];
                   rangos++;
                   mezclar(`${r.startOffset},${r.endOffset},${r.count};`);
                 }
@@ -1574,9 +1645,16 @@
             }
             if (cuentasDeRamas !== null) {
               mezclar('r');
-              for (const i of Object.keys(cuentasDeRamas)) mezclar(`${i}:${cuentasDeRamas[i]};`);
+              const ks = clavesPropias(cuentasDeRamas);
+              for (let i = 0; i < ks.length; i++) mezclar(`${ks[i]}:${cuentasDeRamas[ks[i]]};`);
             }
-            const hex = (x) => (x >>> 0).toString(16).padStart(8, '0');
+            // Sin `Number.prototype.toString` ni `padStart` (el programa los puede pisar).
+            const HEX = '0123456789abcdef';
+            const hex = (x) => {
+              let t = '';
+              for (let i = 28; i >= 0; i -= 4) t += HEX[(x >>> i) & 15];
+              return t;
+            };
             ctl(`cobertura ${hex(h1)}${hex(h2)} ${rangos}`);
           });
         } catch {}

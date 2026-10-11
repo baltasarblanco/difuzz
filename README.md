@@ -406,8 +406,10 @@ Principios:
     cambia (o no se puede ver), inconcluso: `div/`. La cobertura de V8 no separa el lado derecho
     de `&&=`/`||=`/`??=` ni los valores por defecto de parámetros y desestructuraciones (medido
     con node 24.14.1; oxc arma `t&&=e=...` de un `if (t) t = (e = ...)`): B corre con un contador
-    delante de cada uno, y las cuentas entran a la comparación. Los scripts de `vm` también
-    cuentan.
+    delante de cada uno, y las cuentas entran a la comparación. Los contadores (y el sensor del
+    `this` de sloppy) se insertan en el texto de B, sin re-emitirlo, y el `toString` de una función
+    devuelve su texto sin lo insertado: un programa que lee el texto de sus funciones ve el de B
+    (`String(f)` de una función con un valor por defecto). Los scripts de `vm` también cuentan.
   - el camino no ve una dependencia **por datos**: la asunción elige un índice, una clave o un
     valor y B recorre el mismo código con y sin ella (`["", bug][+(typeof window > "u")]`). Por
     eso, en esas mismas corridas, un **sensor de uso**: B no tiene que tocar la asunción. Toca
@@ -424,7 +426,9 @@ Principios:
     los parámetros), un `Explica` se confirma con el original **salado**: cada literal de cadena
     en posición de dato con `dz` al final, minificado igual, y el mismo re-chequeo tiene que dar
     `Explica` también ahí (con otro valor por defecto la coincidencia se rompe). Sin literales que
-    salar, o si el salado no diverge, no cambia nada.
+    salar, no cambia nada. Si el original salado ya no diverge, la sal cambió el camino (un
+    literal que guarda la rama del bug, `modo === "x" ? bug : ...`): inconcluso, porque el salado
+    no confirma nada.
 
     Cuesta, solo cuando todo lo demás ya daba `Explica`: 2 ejecuciones de node (en solo sloppy,
     además, 1 o 2 `node --check`), una instrumentación del minificado con SWC y, para contenido y
@@ -449,8 +453,12 @@ Principios:
     por defecto, como un minificado que la aprovechó. Desde B no se distingue.
   - una dependencia por datos de una asunción sin sensor de uso completo cuyo valor por defecto
     no sale de un literal de cadena: el `arguments` atado o el texto de una función del programa
-    elegidos por datos contra un valor calculado (`[].join()`); la sal no lo cambia. En las
-    variantes medidas, todas las de esas familias usan literales y van a `div/`.
+    elegidos por datos contra un valor calculado (`[].join()`); la sal no lo cambia. Medido con
+    oxc 0.153.0 en las 8 celdas de la revisión de 7.1b, con B ejecutando el bug, en `known/`: el
+    `arguments` atado contra `[].join()` (4 filas: las de carril A), el texto de una función (8) y,
+    de sloppy, una función declarada en un bloque (Anexo B: `typeof fb` fuera del bloque, 4 filas;
+    otra diferencia de sloppy sin sensor, además del `this`). Con un literal en lugar de
+    `[].join()` van a `div/`.
   - el sensor de uso de `global_conocido` ve lecturas (`typeof`, `window`, `globalThis.window`),
     no `"window" in globalThis` ni `hasOwnProperty`; el de `builtins`, lecturas después de pisar
     (si el programa redefine o borra la propiedad, inconcluso); el de coerción, las definiciones
@@ -463,6 +471,18 @@ Principios:
     camino o toca la asunción sin que se vea en la salida. En el corpus de SWC (7 celdas), la
     aceptación, el golden y los 14 corpus adversariales ningún caso cambió de destino respecto
     de 7.1 ni de fe0cd86.
+  - el programa puede reconocer la instrumentación o interferir con el preload. El canal y el
+    cálculo de la cobertura usan lo que el preload toma antes de que corra el programa
+    (`fs.writeSync`, los métodos de String, `Math.imul`, `Object.keys`, `Session.prototype.post`) y
+    recorren con índices; los ganchos `__difuzzNeutro*` solo existen cuando el texto que corre está
+    instrumentado. Pero un programa que encuentra los ganchos o los contadores (por ejemplo,
+    listando los globals en la corrida instrumentada), que cuenta las pausas del sensor en su
+    `Error.prepareStackTrace` o que escribe en el canal de control puede elegir otro camino solo
+    en las corridas de difuzz, y un bug real puede terminar en `known/`. Es la misma clase que un
+    programa que detecta el sensor de violaciones. Lo que se cerró (medido): pisar al final
+    `String.prototype.startsWith`, el iterador de los arreglos o `Session.prototype.post` dejaba
+    la cobertura vacía e igual en las dos corridas, y eso mandaba el bug a `known/`; ahora va a
+    `div/`.
   - sin el sensor entero en B (`sensor_caido`, `sensor_tope`), los re-chequeos de las
     violaciones y de `extends` quedan inconclusos (cuando A o B pasan el tope, el camino de B
     sale de otra corrida de B con el sensor y un tope mayor, que tiene que tomar el mismo camino
@@ -557,8 +577,8 @@ Sin `node` en el `PATH`, los tests que lo necesitan fallan con un mensaje claro.
 
 - **Golden de detección** (`tests/golden/`): 16 casos con bugs conocidos de oxc y swc, en 8
   celdas, más `--invocar` y `--stubs`; la clase esperada de cada caso está en `esperado.tsv`.
-- **Aceptación de los re-chequeos** (`tests/aceptacion/rechequeos/`): 129 casos que combinan un
-  bug real de oxc con un flag de asunción, en las 4 celdas de oxc (516 comparaciones).
+- **Aceptación de los re-chequeos** (`tests/aceptacion/rechequeos/`): 139 casos que combinan un
+  bug real de oxc con un flag de asunción, en las 4 celdas de oxc (556 comparaciones).
 
 ```sh
 tests/golden/verificar.sh --jobs 4                    # sale con 0 y "comparaciones=N fallas=0"

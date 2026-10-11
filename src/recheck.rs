@@ -200,21 +200,36 @@ pub fn camino_entorno(
     (args, env): (&[&str], &[(&str, &str)]),
     con_env: &[(&str, &str)],
 ) -> Camino {
-    let texto = match texto_instrumentado(minified, crate::analisis::ramas(minified, r.kind())) {
+    let (texto, ganchos) = match texto_instrumentado(minified, crate::analisis::ramas(minified, r.kind())) {
         Ok(t) => t,
         Err(c) => return c,
     };
-    let con = r.run_con_cobertura(&texto, &[], con_env);
-    let neutro = r.run_con_cobertura(&texto, args, env);
+    let con = r.run_con_cobertura(&texto, &[], &con_ganchos(con_env, ganchos));
+    let neutro = r.run_con_cobertura(&texto, args, &con_ganchos(env, ganchos));
     comparar_caminos(b, &con, Some(b2), &neutro)
 }
 
+/// b7-1c (revision 7.1b, S2): el preload define los ganchos (`__difuzzNeutroRama`, etc.) y saca lo
+/// insertado del texto de las funciones solo con DIFUZZ_GANCHOS=1, que va solo cuando el texto que
+/// corre esta instrumentado. Antes los definia en toda corrida con cobertura: un B sin instrumentar
+/// podia verlos.
+pub const GANCHOS: (&str, &str) = ("DIFUZZ_GANCHOS", "1");
+
+/// b7-1c: `env` mas `GANCHOS` si `ganchos`.
+fn con_ganchos<'a>(env: &[(&'a str, &'a str)], ganchos: bool) -> Vec<(&'a str, &'a str)> {
+    let mut v = env.to_vec();
+    if ganchos {
+        v.push(GANCHOS);
+    }
+    v
+}
+
 /// b7-1b: el texto que corre con cobertura: el instrumentado, o B tal cual si no hacia falta
-/// instrumentar nada; si no se pudo, no se sabe.
-fn texto_instrumentado(minified: &str, r: Result<Option<Option<String>>, String>) -> Result<String, Camino> {
+/// instrumentar nada; si no se pudo, no se sabe. b7-1c: y si esta instrumentado (`GANCHOS`).
+fn texto_instrumentado(minified: &str, r: Result<Option<Option<String>>, String>) -> Result<(String, bool), Camino> {
     match r {
-        Ok(Some(Some(t))) => Ok(t),
-        Ok(Some(None)) => Ok(minified.to_string()),
+        Ok(Some(Some(t))) => Ok((t, true)),
+        Ok(Some(None)) => Ok((minified.to_string(), false)),
         Ok(None) => Err(Camino::NoSe("no pude instrumentar el minificado (no parsea con SWC)".into())),
         Err(e) => {
             crate::analisis::registrar("re-chequeo (instrumentar el minificado)", &e);
@@ -239,8 +254,8 @@ pub fn camino_interruptores(r: &runner::Runner, b: &runner::Exec, instrumentado:
             return Camino::NoSe(format!("fallo el analisis de difuzz: {}", e.lines().next().unwrap_or_default()));
         }
     };
-    let con = r.run_con_cobertura(&texto, &[], &[("DIFUZZ_NEUTRO", "0")]);
-    let neutro = r.run_con_cobertura(&texto, &[], &[("DIFUZZ_NEUTRO", "1")]);
+    let con = r.run_con_cobertura(&texto, &[], &[("DIFUZZ_NEUTRO", "0"), GANCHOS]);
+    let neutro = r.run_con_cobertura(&texto, &[], &[("DIFUZZ_NEUTRO", "1"), GANCHOS]);
     comparar_caminos(b, &con, None, &neutro)
 }
 
@@ -280,11 +295,13 @@ pub fn camino_sensor(b: &runner::Exec, con_sensor: bool, clases: Option<&[&str]>
 /// no separa el lado derecho de `&&=`/`||=`/`??=` ni un valor por defecto, y un programa que nota el
 /// sensor puede cambiar de camino solo ahi (MEDIDO: b7-int/sensor-rhs a01 iba a known/).
 pub fn camino_sensor_i3(sin: &runner::Runner, con: &runner::Runner, minified: &str, b: &runner::Exec, clases: Option<&[&str]>) -> Camino {
-    let texto = match texto_instrumentado(minified, crate::analisis::ramas(minified, sin.kind())) {
+    // Integracion 7.1c: el texto instrumentado corre con los ganchos (`con_ganchos`), como en
+    // `camino_entorno`; el hash de la cobertura lo arma el preload con lo capturado al inicio (S2).
+    let (texto, ganchos) = match texto_instrumentado(minified, crate::analisis::ramas(minified, sin.kind())) {
         Ok(t) => t,
         Err(c) => return c,
     };
-    let c = con.run_con_cobertura(&texto, &[], &[("DIFUZZ_MAX_PAUSAS", runner::MAX_PAUSAS_MAYOR)]);
+    let c = con.run_con_cobertura(&texto, &[], &con_ganchos(&[("DIFUZZ_MAX_PAUSAS", runner::MAX_PAUSAS_MAYOR)], ganchos));
     if let Some(d) = c.sensor_degradado() {
         return Camino::NoSe(format!(
             "A y B se compararon sin el sensor (I3) y B con el sensor (tope {}) tampoco corrio entero ({d})",
@@ -294,7 +311,7 @@ pub fn camino_sensor_i3(sin: &runner::Runner, con: &runner::Runner, minified: &s
     if !matches!(oracle::compare(b, &c), oracle::Verdict::Same) {
         return Camino::NoSe(format!("con el sensor B no da lo mismo que sin el ({:?})", c.status));
     }
-    let s = sin.run_con_cobertura(&texto, &[], &[]);
+    let s = sin.run_con_cobertura(&texto, &[], &con_ganchos(&[], ganchos));
     if !matches!(oracle::compare(b, &s), oracle::Verdict::Same) {
         return Camino::NoSe(format!("con la cobertura prendida B no da lo mismo ({:?})", s.status));
     }
@@ -334,12 +351,13 @@ pub fn camino_estricto(r: &runner::Runner, minified: &str, b: &runner::Exec) -> 
     }
     // b7-1b (revision 7.1, H1/H2 d07): con los contadores de rama y el sensor del `this` de
     // sloppy (`interruptores_sloppy`): en estricto, un `this` que sloppy cambia es uso.
-    let texto = match texto_instrumentado(&base, crate::analisis::interruptores_sloppy(&base)) {
+    let (texto, ganchos) = match texto_instrumentado(&base, crate::analisis::interruptores_sloppy(&base)) {
         Ok(t) => t,
         Err(c) => return c,
     };
-    let con = r.run_con_cobertura(&format!("{PREFIJO_SLOPPY}{texto}"), &[], &[]);
-    let neutro = r.run_con_cobertura(&format!("{PREFIJO_ESTRICTO}{texto}"), &[], &[]);
+    let env = con_ganchos(&[], ganchos);
+    let con = r.run_con_cobertura(&format!("{PREFIJO_SLOPPY}{texto}"), &[], &env);
+    let neutro = r.run_con_cobertura(&format!("{PREFIJO_ESTRICTO}{texto}"), &[], &env);
     comparar_caminos(b, &con, None, &neutro)
 }
 
@@ -1054,11 +1072,11 @@ pub const INTERRUPTOR_WITH: &str = "__difuzzNeutroWith";
 pub const INTERRUPTOR_CLAVE: &str = "__difuzzNeutroClave";
 /// b7-1b (revision 7.1, H1/H2): los ganchos que define el preload con DIFUZZ_COBERTURA=1:
 /// el contador de rama, el uso de un helper de coercion (al principio de su cuerpo, o
-/// envolviendo su valor) y el `this` de una funcion sloppy.
+/// envolviendo su valor) y el `this` de una funcion sloppy (`__difuzzNeutroThis`, dentro de
+/// `THIS_INSERTO`). b7-1c: con DIFUZZ_GANCHOS=1 (`GANCHOS`), no con toda corrida con cobertura.
 pub const GANCHO_RAMA: &str = "__difuzzNeutroRama";
 pub const GANCHO_USO: &str = "__difuzzNeutroUso";
 pub const GANCHO_VALOR: &str = "__difuzzNeutroValor";
-pub const GANCHO_THIS: &str = "__difuzzNeutroThis";
 
 /// b7-1: `callee(arg)` con `callee` un identificador libre.
 fn llamar(callee: &str, arg: Expr) -> Box<Expr> {
@@ -1187,11 +1205,121 @@ fn ramas(program: &mut Program) -> bool {
     r.0 > 0
 }
 
+/// b7-1c (revision 7.1b, P1): como `instrumentar`, pero sin re-emitir: `f` junta inserciones
+/// (posicion en bytes del fuente, texto) y se insertan en el texto de B tal cual. Asi el texto de
+/// cada funcion de B sigue siendo el de B mas lo insertado, y el preload (con DIFUZZ_GANCHOS=1,
+/// `quitarGanchos`) lo saca en `Function.prototype.toString`: un programa que lee el texto de
+/// sus funciones ve el de B (con el re-emitido de SWC veia otro texto entero, y con un contador
+/// `(__difuzzNeutroRama(0), 1)`: `p1-tostring-default`). Cada insercion empieza o termina en
+/// `GANCHOS_TEXTO` y nada mas en el fuente lo nombra (`instrumentar`), asi que lo que el preload
+/// saca es exactamente lo insertado. El resultado se vuelve a parsear: si no parsea, `None`.
+/// Orden en una misma posicion: primero los cierres (el de adentro antes), despues las aperturas
+/// (la de afuera antes); `f` las junta en post-orden (`seq` creciente: la de adentro primero).
+fn insertar(src: &str, kind: SourceKind, f: impl FnOnce(&Program) -> Vec<Insercion>) -> Option<Option<String>> {
+    if src.contains("__difuzzNeutro") {
+        return None;
+    }
+    catch_unwind(AssertUnwindSafe(|| {
+        GLOBALS.set(&Globals::new(), || {
+            let cm: Lrc<SourceMap> = Default::default();
+            let fm = cm.new_source_file(FileName::Anon.into(), src.to_string());
+            let program = backend::swc::parse_program(&fm, kind)?;
+            let mut ins = f(&program);
+            if ins.is_empty() {
+                return Some(None);
+            }
+            let base = fm.start_pos.0;
+            let mut pos: Vec<(usize, u8, i64, String)> = Vec::with_capacity(ins.len());
+            for (seq, i) in ins.drain(..).enumerate() {
+                let p = usize::try_from(i.pos.0.checked_sub(base)?).ok()?;
+                let seq = i64::try_from(seq).ok()?;
+                pos.push(if i.cierre { (p, 0, seq, i.texto) } else { (p, 1, -seq, i.texto) });
+            }
+            pos.sort_by_key(|x| (x.0, x.1, x.2));
+            let mut out = String::with_capacity(src.len() + pos.iter().map(|x| x.3.len()).sum::<usize>());
+            let mut ultimo = 0;
+            for (p, _, _, t) in pos {
+                if p < ultimo || p > src.len() || !src.is_char_boundary(p) {
+                    return None;
+                }
+                out.push_str(&src[ultimo..p]);
+                out.push_str(&t);
+                ultimo = p;
+            }
+            out.push_str(&src[ultimo..]);
+            let fm2 = cm.new_source_file(FileName::Anon.into(), out.clone());
+            backend::swc::parse_program(&fm2, kind)?;
+            Some(Some(out))
+        })
+    }))
+    .ok()
+    .flatten()
+}
+
+/// b7-1c: una insercion de `insertar`: en `pos` (del fuente parseado), `texto`; `cierre` si cierra
+/// algo que abrio otra insercion.
+struct Insercion {
+    pos: BytePos,
+    cierre: bool,
+    texto: String,
+}
+
+/// b7-1c (revision 7.1b, P1): lo que insertan `instrumentar_ramas` e `interruptores_sloppy` y saca el
+/// preload (`quitarGanchos`, preload.js). La apertura de un contador es `(__difuzzNeutroRama(<i>),`,
+/// el cierre `RAMA_FIN` y el gancho del `this` `THIS_INSERTO`. Si se cambian, cambiar el preload.
+pub const RAMA_FIN: &str = " /*__difuzzNeutroFin*/)";
+pub const THIS_INSERTO: &str = ";__difuzzNeutroThis(this);";
+
+/// b7-1c: lo mismo que `ramas` (las mismas partes, el mismo orden de los indices), como inserciones
+/// en el texto (`insertar`): `(__difuzzNeutroRama(<i>), x /*__difuzzNeutroFin*/)`.
+fn ramas_texto(program: &Program, ins: &mut Vec<Insercion>) {
+    use swc_ecma_ast::{AssignExpr, AssignOp, AssignPat, AssignPatProp};
+    use swc_ecma_visit::{Visit, VisitWith};
+    struct R<'a>(u32, &'a mut Vec<Insercion>);
+    impl R<'_> {
+        fn contar(&mut self, e: &Expr) {
+            if definicion_anonima(e) {
+                return;
+            }
+            let s = e.span();
+            // Post-orden: el cierre de adentro se anota antes que el de afuera.
+            self.1.push(Insercion { pos: s.hi, cierre: true, texto: RAMA_FIN.into() });
+            self.1.push(Insercion { pos: s.lo, cierre: false, texto: format!("({GANCHO_RAMA}({}),", self.0) });
+            self.0 += 1;
+        }
+    }
+    impl Visit for R<'_> {
+        fn visit_assign_expr(&mut self, n: &AssignExpr) {
+            n.visit_children_with(self);
+            if matches!(n.op, AssignOp::AndAssign | AssignOp::OrAssign | AssignOp::NullishAssign) {
+                self.contar(&n.right);
+            }
+        }
+        fn visit_assign_pat(&mut self, p: &AssignPat) {
+            p.visit_children_with(self);
+            self.contar(&p.right);
+        }
+        fn visit_assign_pat_prop(&mut self, p: &AssignPatProp) {
+            p.visit_children_with(self);
+            if let Some(v) = &p.value {
+                self.contar(v);
+            }
+        }
+    }
+    program.visit_with(&mut R(0, ins));
+}
+
 /// b7-1b (revision 7.1, H1): el minificado con los contadores de rama (`ramas`), para el camino
 /// de B por cobertura (`camino_entorno`). `Some(None)` si no hay donde ponerlos (B corre tal
 /// cual); `None` si no se pudo (`instrumentar`).
+/// b7-1c (revision 7.1b, P1): por insercion en el texto de B (`insertar`, `ramas_texto`), no
+/// re-emitido: el texto de las funciones no cambia para el programa.
 pub fn instrumentar_ramas(src: &str, kind: SourceKind) -> Option<Option<String>> {
-    instrumentar(src, kind, ramas)
+    insertar(src, kind, |p| {
+        let mut ins = Vec::new();
+        ramas_texto(p, &mut ins);
+        ins
+    })
 }
 
 /// b7-1: el minificado con cada `with (o) S` como `with (__difuzzNeutroWith(o)) S`. Con
@@ -1372,39 +1500,44 @@ pub fn interruptores_sloppy(src: &str) -> Option<Option<String>> {
         f.body.visit_with(&mut b);
         b.0
     }
-    struct S {
+    // b7-1c (revision 7.1b, P1): por insercion en el texto (`insertar`): `;__difuzzNeutroThis(this);`
+    // despues de las directivas (el `;` de adelante: una directiva sin `;` no se pega a la llamada).
+    struct S<'a> {
         estricto: bool,
-        puso: bool,
+        ins: &'a mut Vec<Insercion>,
     }
-    impl VisitMut for S {
-        fn visit_mut_function(&mut self, f: &mut Function) {
+    impl Visit for S<'_> {
+        fn visit_function(&mut self, f: &Function) {
             let antes = self.estricto;
             self.estricto |= f.body.as_ref().is_some_and(|b| tiene_use_strict(&b.stmts));
-            f.visit_mut_children_with(self);
+            f.visit_children_with(self);
             if !self.estricto && usa_this(f) {
-                if let Some(b) = &mut f.body {
-                    al_principio(&mut b.stmts, sentencia(llamar(GANCHO_THIS, Expr::This(ThisExpr { span: DUMMY_SP }))));
-                    self.puso = true;
+                if let Some(b) = &f.body {
+                    let pos = match b.stmts.iter().take_while(|x| es_directiva(x)).last() {
+                        Some(d) => d.span().hi,
+                        None => b.span.lo + BytePos(1),
+                    };
+                    self.ins.push(Insercion { pos, cierre: false, texto: THIS_INSERTO.into() });
                 }
             }
             self.estricto = antes;
         }
-        fn visit_mut_class(&mut self, c: &mut Class) {
+        fn visit_class(&mut self, c: &Class) {
             let antes = self.estricto;
             self.estricto = true;
-            c.visit_mut_children_with(self);
+            c.visit_children_with(self);
             self.estricto = antes;
         }
     }
-    instrumentar(src, SourceKind::Script, |p| {
+    insertar(src, SourceKind::Script, |p| {
         let estricto = match p {
             Program::Script(s) => tiene_use_strict(&s.body),
             Program::Module(_) => true,
         };
-        let mut s = S { estricto, puso: false };
-        p.visit_mut_with(&mut s);
-        let r = ramas(p);
-        s.puso || r
+        let mut ins = Vec::new();
+        p.visit_with(&mut S { estricto, ins: &mut ins });
+        ramas_texto(p, &mut ins);
+        ins
     })
 }
 
@@ -1480,7 +1613,8 @@ pub fn salar_literales(src: &str, kind: SourceKind) -> Option<Option<String>> {
 /// confirma con el original SALADO (`salar_literales`): se minifica igual, se corren A y B
 /// salados y `recheck` (el mismo re-chequeo) tiene que dar Explica tambien ahi. Si el bug deja
 /// justo el valor por defecto, con otro valor ya no coincide (B != A'). Sin literales que salar,
-/// o si el salado no diverge, no hay nada que mirar: Explica. 1 minify + 2 node + el re-chequeo,
+/// no hay nada que mirar: Explica. b7-1c (revision 7.1b, S1): si el salado no diverge, Inconcluso
+/// (la sal cambio el camino; antes, Explica). 1 minify + 2 node + el re-chequeo,
 /// solo en los candidatos a Explica de esas familias. Heuristica: un valor por defecto que no
 /// viene de un literal (`[].join()`) no cambia con la sal.
 pub fn con_literales_salados(
@@ -1503,8 +1637,14 @@ pub fn con_literales_salados(
         return Recheck::Inconcluso("no pude minificar el original con los literales salados".into());
     };
     let (a2, b2) = (r.run(&o2), r.run(&m2));
+    // b7-1c (revision 7.1b, S1): esto se llama solo con un Explica del original, asi que el
+    // original diverge. Si el salado no, la sal cambio el camino (un literal que guarda la rama
+    // del bug: `modo === "x" ? bug : ...`) y el salado no confirma nada: antes daba Explica y el
+    // bug real iba a known/ (x5-sloppyargs-sal-guarda, x5b-tostring-sal-guarda).
     if matches!(oracle::compare(&a2, &b2), oracle::Verdict::Same) {
-        return Recheck::Explica;
+        return Recheck::Inconcluso(
+            "con los literales salados (otro valor por defecto) el original ya no diverge: la sal cambio el camino y no se puede confirmar".into(),
+        );
     }
     match recheck(&o2, &m2, &a2, &b2) {
         Recheck::Explica => Recheck::Explica,
@@ -1885,31 +2025,54 @@ mod tests {
     /// b7-1b (revision 7.1, H1): los contadores de rama donde V8 no separa bloques: el lado
     /// derecho de `&&=`/`||=`/`??=` (identificador o miembro) y los valores por defecto (parametro,
     /// declaracion, asignacion, `for`, `catch`). Una definicion anonima no (NamedEvaluation).
+    /// b7-1c (revision 7.1b, P1): insertados en el texto de B (no re-emitido); sacando lo insertado
+    /// (lo que hace el preload en `toString`) vuelve exactamente B. Anidados: el de adentro se cierra
+    /// antes.
     #[test]
     fn contadores_de_rama() {
         use super::instrumentar_ramas;
         let k = SourceKind::Script;
-        let src = "let e=``,t=1;t&&=e=``;t||=1;t??=f();o.p&&=g();function g(t=e=``){}const[a=1]=[],{b=2}=o;({c=3}=o);[d=4]=o;y||=function(){};z=(q=function(){})=>q;for(const[w=5]of o);try{}catch({m=6}){}";
+        let f = super::RAMA_FIN;
+        let src = "let e=``,t=1;t&&=e=``;t||=1;t??=f();o.p&&=g();function g(t=e=``){}const[a=1]=[],{b=2}=o;({c=3}=o);[d=4]=o;y||=function(){};z=(q=function(){})=>q;for(const[w=5]of o);try{}catch({m=6}){}a||=b||=c;";
         let out = instrumentar_ramas(src, k).unwrap().unwrap();
         for n in [
-            "t &&= (__difuzzNeutroRama(0), e = ``)",
-            "t ||= (__difuzzNeutroRama(1), 1)",
-            "t ??= (__difuzzNeutroRama(2), f())",
-            "o.p &&= (__difuzzNeutroRama(3), g())",
-            "function g(t = (__difuzzNeutroRama(4), e = ``))",
-            "const [a = (__difuzzNeutroRama(5), 1)] = [], { b = (__difuzzNeutroRama(6), 2) } = o",
-            "({ c = (__difuzzNeutroRama(7), 3) } = o)",
-            "[d = (__difuzzNeutroRama(8), 4)] = o",
-            "y ||= function() {}",
-            "z = (q = function() {})=>q",
-            "for (const [w = (__difuzzNeutroRama(9), 5)] of o)",
-            "catch ({ m = (__difuzzNeutroRama(10), 6) })",
+            format!("t&&=(__difuzzNeutroRama(0),e=``{f};"),
+            format!("t||=(__difuzzNeutroRama(1),1{f};"),
+            format!("t??=(__difuzzNeutroRama(2),f(){f};"),
+            format!("o.p&&=(__difuzzNeutroRama(3),g(){f};"),
+            format!("function g(t=(__difuzzNeutroRama(4),e=``{f}){{}}"),
+            format!("const[a=(__difuzzNeutroRama(5),1{f}]=[],{{b=(__difuzzNeutroRama(6),2{f}}}=o"),
+            format!("({{c=(__difuzzNeutroRama(7),3{f}}}=o)"),
+            format!("[d=(__difuzzNeutroRama(8),4{f}]=o"),
+            "y||=function(){}".into(),
+            "z=(q=function(){})=>q".into(),
+            format!("for(const[w=(__difuzzNeutroRama(9),5{f}]of o)"),
+            format!("catch({{m=(__difuzzNeutroRama(10),6{f}}})"),
+            format!("a||=(__difuzzNeutroRama(12),b||=(__difuzzNeutroRama(11),c{f}{f};"),
         ] {
-            assert!(out.contains(n), "{n}: {out}");
+            assert!(out.contains(&n), "{n}: {out}");
         }
+        assert_eq!(sin_ganchos(&out), src);
         assert_eq!(instrumentar_ramas("if (t) e = 1; t && (e = 1); x = a ?? b;", k), Some(None));
         assert_eq!(instrumentar_ramas("let = ;", k), None);
         assert_eq!(instrumentar_ramas("t &&= __difuzzNeutroRama;", k), None);
+        // Con comentarios, saltos de linea y texto no ASCII en el medio: B tal cual mas lo insertado.
+        let src = "function s(p = /* ñ */ 'ü' // x\n) { return p; }\nq ??= 1\n";
+        let out = instrumentar_ramas(src, k).unwrap().unwrap();
+        assert_eq!(sin_ganchos(&out), src, "{out}");
+    }
+
+    /// b7-1c: saca lo que insertan `instrumentar_ramas` e `interruptores_sloppy`, como `quitarGanchos`
+    /// del preload (preload.js).
+    fn sin_ganchos(s: &str) -> String {
+        let mut out = s.replace(super::RAMA_FIN, "").replace(super::THIS_INSERTO, "");
+        while let Some(i) = out.find("(__difuzzNeutroRama(") {
+            let resto = &out[i + "(__difuzzNeutroRama(".len()..];
+            let n = resto.find("),").unwrap();
+            assert!(resto[..n].bytes().all(|c| c.is_ascii_digit()), "{out}");
+            out.replace_range(i..i + "(__difuzzNeutroRama(".len() + n + 2, "");
+        }
+        out
     }
 
     /// b7-1b (revision 7.1, H2, opcion (c)): se salan los literales de cadena en posicion de dato
@@ -1933,17 +2096,19 @@ mod tests {
     #[test]
     fn interruptores_de_sloppy() {
         use super::interruptores_sloppy;
-        let src = "function f(){'use x';return this}function g(){'use strict';return function(){return this}}var h=function(){return()=>this},i={m(){return this}};class C{m(){return this}}function j(){return function(){}}t??=1;";
+        let src = "function f(){'use x';return this}function g(){'use strict';return function(){return this}}var h=function(){return()=>this},i={m(){return this}};class C{m(){return this}}function j(){return function(){}}t??=1;function k(){'use y'\nreturn this}";
         let out = interruptores_sloppy(src).unwrap().unwrap();
         for n in [
-            "function f() {\n    'use x';\n    __difuzzNeutroThis(this);\n    return this;",
-            "var h = function() {\n    __difuzzNeutroThis(this);\n    return ()=>this;",
-            "m () {\n        __difuzzNeutroThis(this);",
-            "t ??= (__difuzzNeutroRama(0), 1)",
+            "function f(){'use x';;__difuzzNeutroThis(this);return this}".to_string(),
+            "var h=function(){;__difuzzNeutroThis(this);return()=>this}".into(),
+            "m(){;__difuzzNeutroThis(this);return this}}".into(),
+            format!("t??=(__difuzzNeutroRama(0),1{};", super::RAMA_FIN),
+            "function k(){'use y';__difuzzNeutroThis(this);\nreturn this}".into(),
         ] {
-            assert!(out.contains(n), "{n}: {out}");
+            assert!(out.contains(&n), "{n}: {out}");
         }
-        assert_eq!(out.matches("__difuzzNeutroThis").count(), 3, "{out}");
+        assert_eq!(out.matches("__difuzzNeutroThis").count(), 4, "{out}");
+        assert_eq!(sin_ganchos(&out), src);
         assert_eq!(interruptores_sloppy("'use strict';function f(){return this}"), Some(None));
         assert_eq!(interruptores_sloppy("function f(){return 1}"), Some(None));
     }
@@ -2152,6 +2317,67 @@ mod tests {
         let (o, m, a, b) = prep("(function f1() { var o = { a: 1 }, a = 2; with (o) console.log(a); })();\n");
         assert!(m.contains("with"), "{m}");
         assert_eq!(with_matters(&r, rc, &o, &m, &a, &b), Recheck::Explica, "collapse_vars_eval_and_with: {m}");
+    }
+
+    /// b7-1c (revision 7.1b): P1, el texto de una funcion con contadores es el de B (17-tostring con
+    /// un valor por defecto o un `||=` sigue Explica; el bug en un valor por defecto elegido por el
+    /// texto no); S1, si el salado no diverge, la sal cambio el camino (Inconcluso); S2, los ganchos
+    /// solo con DIFUZZ_GANCHOS=1 y la cobertura no se vacia si el programa pisa lo que usa el preload.
+    #[test]
+    fn texto_de_funciones_sal_y_preload() {
+        use super::{con_literales_salados, contenido_matters, GANCHOS};
+        if !crate::test_util::requiere_node() {
+            return;
+        }
+        let preload = Preload::write_tagged("b71c").unwrap();
+        let r = Runner::new(&preload, crate::test_util::id_runner(), std::time::Duration::from_secs(20));
+        let cfg = Preset::CarrilA.build(Minifier::Oxc, SourceKind::Script);
+        let prep = |src: &str| {
+            let crate::minify::Outcome::Ok { original, minified, .. } = crate::minify::prepare(src, &cfg) else {
+                panic!("no minifica: {src}");
+            };
+            let (a, b) = (r.run(&original), r.run(&minified));
+            (original, minified, a, b)
+        };
+        let contenido = |o: &str, m: &str, a: &Exec, b: &Exec| contenido_matters(&r, o, m, a, b, &r.run_salted(o));
+        // P1: con el contador insertado (no re-emitido) y sacado en `toString`, B da lo mismo.
+        for src in [
+            "function suma(primero, segundo = 1) { return primero + segundo; }\nconsole.log(String(suma));\n",
+            "function f(o) { o.x ||= 1; return o.x; }\nconsole.log(String(f));\n",
+        ] {
+            let (o, m, a, b) = prep(src);
+            assert_ne!(a.stdout, b.stdout, "{m}");
+            assert_eq!(contenido(&o, &m, &a, &b), Recheck::Explica, "{src}{m}");
+        }
+        let (o, m, a, b) = prep("let s = \"\";\nfunction f0() { return 1; }\nfunction h(p = (s = \"abc\".substring(1, undefined))) { return p; }\nh([undefined, 0][+((String(f0).indexOf(\"return\") >= 0) + (String(f0).indexOf(\"/*\") < 0) !== 2)]);\nconsole.log(JSON.stringify(s));\n");
+        assert_eq!((a.stdout.as_str(), b.stdout.as_str()), ("\"bc\"\n", "\"\"\n"), "{m}");
+        let c = contenido(&o, &m, &a, &b);
+        assert!(matches!(c, Recheck::Inconcluso(ref n) if n.contains("cobertura")), "p1n: {c:?}");
+        // S1 (x5b): un literal guarda la rama del bug; el salado no diverge.
+        let src = "function f0() { return 1; }\nconst modo = \"x\";\nconst t = [\"\", modo === \"x\" ? \"abc\".substring(1, undefined) : \"bc\"];\nconsole.log(JSON.stringify(t[+((String(f0).indexOf(\"return\") >= 0) + (String(f0).indexOf(\"/*\") < 0) === 2)]));\n";
+        let (o, m, a, b) = prep(src);
+        assert_eq!((a.stdout.as_str(), b.stdout.as_str()), ("\"bc\"\n", "\"\"\n"), "{m}");
+        assert_eq!(contenido(&o, &m, &a, &b), Recheck::Explica, "x5b sin la sal");
+        let s = con_literales_salados(&r, (Minifier::Oxc, Preset::CarrilA, SourceKind::Script), &o, |o2, m2, a2, b2| contenido(o2, m2, a2, b2));
+        assert!(matches!(s, Recheck::Inconcluso(ref n) if n.contains("la sal cambio el camino")), "x5b: {s:?}");
+        // S2: los ganchos solo con el texto instrumentado.
+        let g = "console.log(typeof __difuzzNeutroRama, typeof __difuzzNeutroThis);\n";
+        assert_eq!(r.run_con_cobertura(g, &[], &[]).stdout, "undefined undefined\n");
+        assert_eq!(r.run_con_cobertura(g, &[], &[GANCHOS]).stdout, "function function\n");
+        // S2: lo que el programa pisa al final no vacia ni aplana la cobertura (rev-7.1b x8, x8b).
+        for pisa in [
+            "String.prototype.startsWith = function () { return true; };",
+            "Object.getPrototypeOf([][Symbol.iterator]()).next = function () { return { done: true }; };",
+            "Math.imul = function () { return 0; };",
+            "String.prototype.charCodeAt = function () { return 0; };",
+            "Number.prototype.toString = function () { return \"0\"; };",
+            "require(\"inspector\").Session.prototype.post = function (m, p, cb) { (cb || p)(null, { result: [] }); };",
+        ] {
+            let cov = |n: u32| r.run_con_cobertura(&format!("let s = 0;\nfor (let i = 0; i < {n}; i++) s++;\nconsole.log(s > 0);\n{pisa}\n"), &[], &[]).cobertura().map(String::from);
+            let (x, y) = (cov(2), cov(3));
+            assert!(x.is_some() && y.is_some() && x != y, "{pisa}: {x:?} {y:?}");
+            assert!(!x.unwrap().ends_with(" 0"), "{pisa}: sin rangos");
+        }
     }
 
     /// b4-a: la posicion de V8 (0-based, UTF-16) a byte, y la neutralizacion por clase.

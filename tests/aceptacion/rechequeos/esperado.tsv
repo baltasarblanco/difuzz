@@ -609,3 +609,48 @@
 23-b78-omitido-tdz	oxc-a-carril_a	div:Stdout
 23-b78-omitido-tdz	oxc-b-core_defaults	known
 23-b78-omitido-tdz	oxc-b-carril_a	known
+# b7-1c (revision 7.1b, P1, S1 y S2). P1: los contadores de rama de 7.1b se veian en el texto de las funciones
+# (`String(f)` de una funcion con un valor por defecto o un `||=` daba `(__difuzzNeutroRama(0), 1)`) y un positivo
+# de contenido iba a div/; ahora se insertan en el texto de B y el `toString` del preload los saca (p1, p1b known).
+# p1n: el bug en un valor por defecto que el texto de una funcion elige por datos sigue en div/ (el contador lo ve).
+# S1: si el original salado ya no diverge, la sal cambio el camino (un literal guarda la rama del bug): inconcluso
+# (s1, s1b; con 7.1b iban a known/). S2: el programa pisa al final lo que el preload usa para el hash de la cobertura
+# (`startsWith`, el iterador de los arreglos, `Session.prototype.post`) o para el canal (`fs.writeSync`); con 7.1b
+# la cobertura quedaba vacia e igual en las dos corridas (s2, s2b, s2c, s2d a known/); ahora el preload usa lo que
+# tomo al principio. MEDIDO con el binario de 7.1b: p1/p1b div, s1/s1b/s2/s2b/s2c/s2d known, s2e div.
+23-b71c-p1-tostring-default	oxc-a-core_defaults	known
+23-b71c-p1-tostring-default	oxc-a-carril_a	known
+23-b71c-p1-tostring-default	oxc-b-core_defaults	known
+23-b71c-p1-tostring-default	oxc-b-carril_a	known
+23-b71c-p1b-tostring-orasig	oxc-a-core_defaults	known
+23-b71c-p1b-tostring-orasig	oxc-a-carril_a	known
+23-b71c-p1b-tostring-orasig	oxc-b-core_defaults	known
+23-b71c-p1b-tostring-orasig	oxc-b-carril_a	known
+23-b71c-p1n-tostring-default-bug	oxc-a-core_defaults	div:Stdout
+23-b71c-p1n-tostring-default-bug	oxc-a-carril_a	div:Stdout
+23-b71c-p1n-tostring-default-bug	oxc-b-core_defaults	div:Stdout
+23-b71c-p1n-tostring-default-bug	oxc-b-carril_a	div:Stdout
+23-b71c-s1-sloppyargs-sal-guarda	oxc-a-core_defaults	div:Stdout
+23-b71c-s1-sloppyargs-sal-guarda	oxc-a-carril_a	div:Stdout
+23-b71c-s1b-tostring-sal-guarda	oxc-a-core_defaults	div:Stdout
+23-b71c-s1b-tostring-sal-guarda	oxc-a-carril_a	div:Stdout
+23-b71c-s1b-tostring-sal-guarda	oxc-b-core_defaults	div:Stdout
+23-b71c-s1b-tostring-sal-guarda	oxc-b-carril_a	div:Stdout
+23-b71c-s2-profundidad-startswith	oxc-a-core_defaults	div:Stdout
+23-b71c-s2-profundidad-startswith	oxc-a-carril_a	div:Stdout
+23-b71c-s2-profundidad-startswith	oxc-b-core_defaults	div:Stdout
+23-b71c-s2-profundidad-startswith	oxc-b-carril_a	div:Stdout
+23-b71c-s2b-profundidad-iterador	oxc-a-core_defaults	div:Stdout
+23-b71c-s2b-profundidad-iterador	oxc-a-carril_a	div:Stdout
+23-b71c-s2b-profundidad-iterador	oxc-b-core_defaults	div:Stdout
+23-b71c-s2b-profundidad-iterador	oxc-b-carril_a	div:Stdout
+23-b71c-s2c-sloppyargs-iterador	oxc-a-core_defaults	div:Stdout
+23-b71c-s2c-sloppyargs-iterador	oxc-a-carril_a	div:Stdout
+23-b71c-s2d-profundidad-post-falso	oxc-a-core_defaults	div:Stdout
+23-b71c-s2d-profundidad-post-falso	oxc-a-carril_a	div:Stdout
+23-b71c-s2d-profundidad-post-falso	oxc-b-core_defaults	div:Stdout
+23-b71c-s2d-profundidad-post-falso	oxc-b-carril_a	div:Stdout
+23-b71c-s2e-global-writesync	oxc-a-core_defaults	div:Stdout
+23-b71c-s2e-global-writesync	oxc-a-carril_a	div:Stdout
+23-b71c-s2e-global-writesync	oxc-b-core_defaults	div:Stdout
+23-b71c-s2e-global-writesync	oxc-b-carril_a	div:Stdout

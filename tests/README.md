@@ -41,7 +41,7 @@ tests/golden/verificar.sh [--jobs N] [BINARIO] [DIR_SALIDA]
 
 ## Aceptación de los re-chequeos — `tests/aceptacion/rechequeos/`
 
-129 casos que combinan un bug real de oxc con un flag de asunción, en las 4 celdas de oxc (129 × 4 = 516
+139 casos que combinan un bug real de oxc con un flag de asunción, en las 4 celdas de oxc (139 × 4 = 556
 comparaciones): 21 de la revisión 1 (C4, `00-` a `10-`), 9 adversariales del revisor de la fase R (`r01` a
 `r10`, sin `r05`), `14-tdz-positivo`, 11 de los flags que antes no tenían re-chequeo (`15-` coerción, `16-`
 built-ins, `17-` contenido de `toString`/`.stack`, `18-` profundidad: positivos y adversariales con el Issue A),
@@ -55,7 +55,8 @@ violación no corre; el re-chequeo mira además el camino de B), 1 de los timers
 ítem 7.3: el bug solo se ve en `_repeat` de un timer cancelado), 3 de la revisión de la integración (`23-i01`,
 `23-i02`, `23-i03`: el programa nota el sensor por su `Error.prepareStackTrace` y solo sin él corre el bug; en
 `23-i03`, solo en el lado derecho de un `&&=`), 15 de 7.1b (`23-b71b-`: lados de `&&=`/`||=`/defaults que la
-cobertura no separa, dependencia por datos, y `q02t`, la línea con forma de marco elegida por datos) y 2 del sensor
+cobertura no separa, dependencia por datos, y `q02t`, la línea con forma de marco elegida por datos), 10 de 7.1c (`23-b71c-`: el texto de las funciones con los
+contadores, la sal que cambia el camino y un programa que pisa lo que usa el preload) y 2 del sensor
 omitido (`23-b78-`, ítem 7.8: el patrón del bug de V8 con el sensor, sloppy + `eval` directo + clase; en el carril A
 corren sin el sensor y una TDZ atrapada que solo él vería va a `div/`, no a `known/`). Los `19-`, `20-` y `22-`
 esperan `div/` en todas las celdas; los `21-` y `23-`, `div/` salvo los positivos.
