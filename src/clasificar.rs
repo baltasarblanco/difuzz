@@ -943,7 +943,7 @@ mod tests {
             let minify::Outcome::Ok { original, minified, .. } = minify::prepare(&src, &cfg) else { panic!("no minifica") };
             let mut st = Stats::default();
             let p = format!("{rel}/input.js");
-            assert!(compare_and_report(&ctx, &r, &mut st, Path::new(&p), &original, &minified, r.run(&original), false, false, &[], None));
+            assert!(compare_and_report(&ctx, &r, &mut st, Path::new(&p), &original, &minified, r.run(&original), false, None, false, &[], None));
             assert_eq!((st.known, st.divergences), known_div, "{rel}");
         }
         let meta = std::fs::read_to_string(d.join("known/pos/meta.txt")).unwrap();
@@ -1026,7 +1026,7 @@ mod tests {
             let minify::Outcome::Ok { original, minified, static_flags, .. } = minify::prepare(src, &cfg) else { panic!("no minifica: {rel}") };
             let mut st = Stats::default();
             let p = format!("{rel}/input.js");
-            assert!(compare_and_report(&ctx, &r, &mut st, Path::new(&p), &original, &minified, r.run(&original), false, false, &static_flags, None), "{rel}: no diverge");
+            assert!(compare_and_report(&ctx, &r, &mut st, Path::new(&p), &original, &minified, r.run(&original), false, None, false, &static_flags, None), "{rel}: no diverge");
             assert_eq!((st.known, st.divergences), if *a_known { (1, 0) } else { (0, 1) }, "{rel}");
             let meta = std::fs::read_to_string(d.join(format!("{}/{rel}/meta.txt", if *a_known { "known" } else { "div" }))).unwrap();
             assert!(meta.contains(paso), "{rel}: {meta}");

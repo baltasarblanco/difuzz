@@ -159,9 +159,14 @@ confianza (paquetes de npm, código real) eso es un riesgo.
   el canal de control de difuzz, y `--allow-inspector` cuando corre el sensor de violaciones.
   Sin `--allow-child-process`, `--allow-worker`, `--allow-addons` ni `--allow-wasi`: no hay
   procesos hijos, workers, addons nativos ni WASI (tampoco `process.binding`). Como el modelo de
-  permisos no cubre las señales, un filtro seccomp (sin root; solo Linux x86_64 y aarch64) deja
-  que node se mande señales solo a sí mismo (su pid, 0 o su grupo de procesos): `process.kill` a
-  cualquier otro proceso da `EPERM` (`pidfd_send_signal`, siempre).
+  permisos no cubre las señales ni la prioridad de otros procesos, un filtro seccomp (sin root;
+  solo Linux x86_64 y aarch64: en otra arquitectura `--sandbox` no arranca y difuzz sale con 1)
+  deja que node se mande señales solo a sí mismo (su pid, 0 o su grupo de procesos):
+  `process.kill`, `process._kill` y `process._debugProcess` a cualquier otro proceso dan `EPERM`
+  (`pidfd_send_signal`, siempre); y que cambie solo su propia prioridad: `os.setPriority` a otro
+  proceso da `EPERM` (y cualquier `setpriority` sobre todos los procesos del usuario). Las
+  llamadas de las señales y de la prioridad son lo único que el filtro mira: lo que llega por un
+  socket (D-Bus, por ejemplo) no pasa por ellas; ver los límites.
 - **`--sandbox-red`** (solo Linux, sin root, con *user namespaces*): `--sandbox` más un
   namespace de usuario (el mismo uid y gid adentro), uno de red (solo un loopback propio: un
   programa que se conecta a sí mismo por 127.0.0.1 anda; lo de afuera da `ENETUNREACH`) y uno
@@ -169,30 +174,53 @@ confianza (paquetes de npm, código real) eso es un riesgo.
   `/run` (de `/proc/net/unix`, al lanzar cada node) tapado con `/dev/null`. Si no se puede
   armar, difuzz sale con 1 antes de empezar.
 
+**`process.pid` y `process.ppid`** (con o sin sandbox). El preload los fija (para que el original
+y el minificado vean lo mismo) en valores que ningún proceso puede tener: 4204242 y 4204241, más
+que el máximo de Linux de 64 bits (`PID_MAX_LIMIT`, 4194304). Además envuelve `process._kill` (lo
+que llama `process.kill`): una señal al pid ficticio (o a su grupo, el negativo) va al node real,
+así que matarse, la señal 0 a sí mismo y un handler propio andan como en node y, con el sandbox,
+no lo tocan; una señal al ppid ficticio da `ESRCH` sin llamar al sistema (nunca llega al padre
+real, que es difuzz). Lo demás que reciba el pid ficticio no llega a ningún proceso:
+`process._debugProcess` y `os.getPriority`/`os.setPriority` dan `ESRCH`, y `/proc/<pid>`,
+`ENOENT`. Para el programa, `process.kill` y `process._kill` se ven como los de node (código,
+`length`, `name`, errores). Sin el sandbox, una señal a un pid escrito a mano sigue llegando a
+ese proceso, como cualquier otra cosa que el programa haga sin el sandbox.
+
 **Simetría.** Original y minificado corren siempre con el mismo sandbox. Si el **original y el
-minificado** tocan el sandbox (un permiso negado, atrapado o no; una señal negada; con
+minificado** tocan el sandbox (un permiso negado, atrapado o no; una señal o una prioridad negada; con
 `--sandbox-red`, además, un error de red), el caso no se compara: va a `descartes.tsv` con causa
 **`sandbox`**, nunca a `div/` ni a `known/` por eso. En cualquier pasada (cruda, observada, de
 bloques, `--invocar`, envoltorio de módulos); en las variantes de `--mutaciones` cuenta en
 `original=`. Si lo toca **uno solo**, sí se compara: es un cambio de comportamiento. Puede ser el
 minificado (el minifier cambió qué archivo abre) o el original (con el bug, el minificado no llega
-a abrirlo): en ese caso el minificado corre una vez de más para saberlo, y el hallazgo lleva la nota
-`sandbox: solo el original toco el sandbox` en `meta.txt`. La celda lleva `+sandbox` o
-`+sandbox_red`, la caché de A no se comparte con las corridas sin sandbox y al terminar se imprime
-(y queda en `CORRIDA.txt`) la línea `sandbox: modo=... descartados=N solo_original=M` (`M`:
-pasadas en que solo el original tocó el sandbox y se compararon).
+a abrirlo): en ese caso el minificado corre antes para saberlo (y se compara ese mismo minificado,
+sin correrlo otra vez), y el hallazgo lleva la nota `sandbox: solo el original toco el sandbox` en
+`meta.txt`. La celda lleva `+sandbox` o `+sandbox_red`, la caché de A no se comparte con las
+corridas sin sandbox y al terminar se imprime (y queda en `CORRIDA.txt`) la línea
+`sandbox: modo=... descartados=N solo_original=M` (`M`: pasadas en que solo el original tocó el
+sandbox y se compararon, también las de las variantes de `--mutaciones`; en el carril B, un módulo
+mudo puede sumar dos: la pasada cruda y la del envoltorio de módulos).
 
 Cómo se reconoce que una ejecución tocó el sandbox: el preload anota `ERR_ACCESS_DENIED`,
-`ERR_DLOPEN_DISABLED` y el `EPERM` de `kill` en su canal cuando ve el error (no atrapado, en
-`--invocar` o, con el sensor de violaciones, atrapado por el programa), y difuzz busca esos textos
-(y `kill EPERM`) en la salida.
+`ERR_DLOPEN_DISABLED`, el `EPERM` de `kill` y el de `os.setPriority` (`uv_os_setpriority`) en su
+canal cuando ve el error (no atrapado, en `--invocar` o, con el sensor de violaciones, atrapado
+por el programa); con `--sandbox`, además, el envoltorio de `process._kill` anota el `EPERM` del
+`_kill` de node (que no lanza: devuelve `-1`) y el de `process._debugProcess`, aunque el programa
+los atrape. Con el sandbox, `os.setPriority` y `process._debugProcess` con el pid ficticio dan
+`EPERM` (el filtro niega cualquier pid que no sea el real) y marcan. difuzz busca esos textos (y
+`kill EPERM` y `uv_os_setpriority returned EPERM`) en la salida.
 
 **Límites** (lo que el sandbox no frena):
 
 - El modelo de permisos de node **no es una barrera contra código hostil**: **no frena la
   red** ni `connect` a un **socket unix** (medido con node 24.14.1): con `--sandbox`
   solo, un programa puede llegar a D-Bus, a systemd-resolved (DNS) o a cualquier servicio con
-  socket. Para eso está `--sandbox-red`.
+  socket. Para eso está `--sandbox-red`. Por eso "señales solo a sí mismo" vale para las
+  llamadas de señales de node: con `--sandbox` solo, por D-Bus se le podría pedir a
+  `systemd --user` que detenga o mate una unidad del usuario (no probado).
+- `os.getPriority` de otro proceso sigue andando (solo lee). Un `os.setPriority` negado que el
+  programa atrapa en silencio sin el sensor de violaciones (swc) no se reconoce, como un permiso
+  negado (abajo).
 - Con `--sandbox-red` quedan alcanzables los sockets unix creados después de lanzar ese node
   y los que tengan espacios en la ruta; el resto del disco sigue a la vista del sistema
   operativo (lo frena el modelo de permisos de node, no el namespace).
@@ -203,6 +231,10 @@ Cómo se reconoce que una ejecución tocó el sandbox: el preload anota `ERR_ACC
   `inspector.open()` escucha en un puerto local).
 - Los comandos `repro_original:`/`repro_minificado:` de `meta.txt` no llevan las flags del
   sandbox.
+- Con `--sandbox` (y `--sandbox-red`), node se lanza con `fork` + `exec` en vez de
+  `posix_spawn` (el filtro se instala entre los dos): cuesta algo más de tiempo de sistema por
+  ejecución de node (medido en la muestra, con otros procesos cargando la máquina: ~1,4 ms de
+  sistema más en el proceso de difuzz por cada node lanzado).
 
 ## Celdas
 

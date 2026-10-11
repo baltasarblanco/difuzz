@@ -913,7 +913,16 @@ fn run_file(r: &Runner, script: &Path, start: Instant, timeout: Duration, opts: 
 fn marca_sandbox(s: &str, modo: Sandbox) -> bool {
     // `kill EPERM`: una senal a otro proceso que el filtro de `encerrar_senales` nego (MEDIDO:
     // node imprime `Error: kill EPERM`); sin el sandbox solo la da un proceso de otro usuario.
-    const PERMISOS: &[&str] = &["ERR_ACCESS_DENIED", "Access to this API has been restricted", "ERR_DLOPEN_DISABLED", "kill EPERM"];
+    // 7.7: `os.setPriority` a otro proceso, negado por el mismo filtro (MEDIDO node 24.14.1:
+    // `A system error occurred: uv_os_setpriority returned EPERM (operation not permitted)`;
+    // subir la prioridad propia sin privilegios da EACCES, no EPERM).
+    const PERMISOS: &[&str] = &[
+        "ERR_ACCESS_DENIED",
+        "Access to this API has been restricted",
+        "ERR_DLOPEN_DISABLED",
+        "kill EPERM",
+        "uv_os_setpriority returned EPERM",
+    ];
     const RED: &[&str] = &["ENETUNREACH", "EHOSTUNREACH", "EAI_AGAIN", "ENOTFOUND", "ECONNREFUSED"];
     PERMISOS.iter().any(|m| s.contains(m)) || (modo == Sandbox::PermisosYRed && RED.iter().any(|m| s.contains(m)))
 }
@@ -1031,11 +1040,27 @@ fn encerrar(aislar: Option<&Aislar>) -> std::io::Result<()> {
 /// grupo (`process_group(0)`: pgid = pid de node, y sin `--allow-child-process` no tiene
 /// hijos); `tgkill`, `tkill`, `rt_sigqueueinfo` y `rt_tgsigqueueinfo` a su pid (la
 /// `raise`/`pthread_kill` de glibc y V8 usan `tgkill` con el tgid propio). El resto da
-/// EPERM, y `pidfd_send_signal`, siempre. Otra arquitectura en la llamada (int 0x80, x32)
-/// mata al proceso. Se instala en el hijo, despues de fork, con un solo hilo: lo heredan
-/// todos los hilos que node cree despues del exec.
-unsafe fn encerrar_senales() -> std::io::Result<()> {
-    use libc::{sock_filter, sock_fprog, BPF_ABS, BPF_JEQ, BPF_JGE, BPF_JMP, BPF_K, BPF_LD, BPF_RET, BPF_W};
+/// EPERM, y `pidfd_send_signal`, siempre.
+///
+/// 7.7 (revision fe0cd86, IMPORTANTE 1): `os.setPriority(<pid de afuera>, 19)` le bajaba la
+/// prioridad a cualquier proceso del usuario, y sin `CAP_SYS_NICE` no se la puede devolver
+/// (MEDIDO por el revisor con un senuelo). `setpriority` con `PRIO_PROCESS` o `PRIO_PGRP`
+/// solo a 0 o al propio node (su pid; su grupo, por `process_group(0)`); `PRIO_USER` (todos
+/// los procesos del usuario) y cualquier otro `which`, EPERM. De las demas llamadas que
+/// tocan otro proceso por su pid (`sched_setaffinity`, `sched_set*`, `ioprio_set`,
+/// `prlimit64`, `process_vm_*`, `ptrace`, `kcmp`, `pidfd_open`, `pidfd_getfd`), node 24 sin
+/// procesos hijos, workers ni addons no tiene ninguna API que las llame con un pid elegido
+/// por el programa (MEDIDO con strace: las APIs de node con un pid son `process.kill`,
+/// `process._kill`, `process._debugProcess`, que llaman a `kill`, y `os.setPriority` y
+/// `os.getPriority`, que solo lee; node llama a `prlimit64` y `sched_getaffinity` solo
+/// sobre si mismo): no se filtran.
+///
+/// Otra arquitectura en la llamada (`int 0x80`, AUDIT_ARCH_I386) mata al proceso; una
+/// llamada de x32 (el bit 0x40000000 en el numero, misma arquitectura) da EPERM. Se instala
+/// en el hijo, despues de fork, con un solo hilo: lo heredan todos los hilos que node cree
+/// despues del exec. `pub(crate)`: lo prueban sin node los tests del sandbox.
+pub(crate) unsafe fn encerrar_senales() -> std::io::Result<()> {
+    use libc::{sock_filter, sock_fprog, BPF_ABS, BPF_JEQ, BPF_JGE, BPF_JGT, BPF_JMP, BPF_K, BPF_LD, BPF_RET, BPF_W};
     // linux/audit.h (MEDIDO en /usr/include/linux/audit.h): EM_* | __AUDIT_ARCH_64BIT | __AUDIT_ARCH_LE.
     #[cfg(target_arch = "x86_64")]
     const ARCH_PROPIA: Option<u32> = Some(62 | 0x8000_0000 | 0x4000_0000);
@@ -1048,17 +1073,20 @@ unsafe fn encerrar_senales() -> std::io::Result<()> {
         return Err(std::io::Error::from_raw_os_error(libc::ENOSYS));
     };
     // Desplazamientos en `struct seccomp_data` (nr, arch, ip, args[6]); la mitad baja de
-    // args[0] (little endian en las dos arquitecturas): pid_t es de 32 bits.
+    // args[0] y args[1] (little endian en las dos arquitecturas): pid_t es de 32 bits, y
+    // `setpriority(int which, int who, int prio)` lee `which` y `who` como int.
     const NR: u32 = 0;
     const ARCH_OFF: u32 = 4;
     const ARG0: u32 = 16;
+    const ARG1: u32 = 24;
     // x86_64: las llamadas de x32 llevan este bit en el numero.
     const X32: u32 = 0x4000_0000;
     // Indices de las instrucciones a las que se salta (ver el programa abajo).
-    const KILL: usize = 12;
-    const PROPIO: usize = 16;
-    const NIEGA: usize = 18;
-    const DEJA: usize = 19;
+    const KILL: usize = 13;
+    const PROPIO: usize = 17;
+    const PRIO: usize = 19;
+    const NIEGA: usize = 24;
+    const DEJA: usize = 25;
     const fn salto(desde: usize, hasta: usize) -> u8 {
         (hasta - desde - 1) as u8
     }
@@ -1070,7 +1098,7 @@ unsafe fn encerrar_senales() -> std::io::Result<()> {
     const RET: u32 = BPF_RET | BPF_K;
     let yo = libc::getpid() as u32;
     let nr = |n: libc::c_long| n as u32;
-    let mut prog: [sock_filter; 20] = [
+    let mut prog: [sock_filter; 26] = [
         /* 0 */ ins(LD, 0, 0, ARCH_OFF),
         /* 1 */ ins(JEQ, 1, 0, arch),
         /* 2 */ ins(RET, 0, 0, libc::SECCOMP_RET_KILL_PROCESS),
@@ -1082,15 +1110,22 @@ unsafe fn encerrar_senales() -> std::io::Result<()> {
         /* 8 */ ins(JEQ, salto(8, PROPIO), 0, nr(libc::SYS_rt_sigqueueinfo)),
         /* 9 */ ins(JEQ, salto(9, PROPIO), 0, nr(libc::SYS_rt_tgsigqueueinfo)),
         /* 10 */ ins(JEQ, salto(10, NIEGA), 0, nr(libc::SYS_pidfd_send_signal)),
-        /* 11 */ ins(RET, 0, 0, libc::SECCOMP_RET_ALLOW),
-        /* 12 KILL */ ins(LD, 0, 0, ARG0),
-        /* 13 */ ins(JEQ, salto(13, DEJA), 0, yo),
-        /* 14 */ ins(JEQ, salto(14, DEJA), 0, 0),
-        /* 15 */ ins(JEQ, salto(15, DEJA), salto(15, NIEGA), yo.wrapping_neg()),
-        /* 16 PROPIO */ ins(LD, 0, 0, ARG0),
-        /* 17 */ ins(JEQ, salto(17, DEJA), salto(17, NIEGA), yo),
-        /* 18 NIEGA */ ins(RET, 0, 0, libc::SECCOMP_RET_ERRNO | libc::EPERM as u32),
-        /* 19 DEJA */ ins(RET, 0, 0, libc::SECCOMP_RET_ALLOW),
+        /* 11 */ ins(JEQ, salto(11, PRIO), 0, nr(libc::SYS_setpriority)),
+        /* 12 */ ins(RET, 0, 0, libc::SECCOMP_RET_ALLOW),
+        /* 13 KILL */ ins(LD, 0, 0, ARG0),
+        /* 14 */ ins(JEQ, salto(14, DEJA), 0, yo),
+        /* 15 */ ins(JEQ, salto(15, DEJA), 0, 0),
+        /* 16 */ ins(JEQ, salto(16, DEJA), salto(16, NIEGA), yo.wrapping_neg()),
+        /* 17 PROPIO */ ins(LD, 0, 0, ARG0),
+        /* 18 */ ins(JEQ, salto(18, DEJA), salto(18, NIEGA), yo),
+        // `which` mayor que PRIO_PGRP (PRIO_USER, o uno que no existe): EPERM.
+        /* 19 PRIO */ ins(LD, 0, 0, ARG0),
+        /* 20 */ ins(BPF_JMP | BPF_JGT | BPF_K, salto(20, NIEGA), 0, libc::PRIO_PGRP),
+        /* 21 */ ins(LD, 0, 0, ARG1),
+        /* 22 */ ins(JEQ, salto(22, DEJA), 0, yo),
+        /* 23 */ ins(JEQ, salto(23, DEJA), 0, 0),
+        /* 24 NIEGA */ ins(RET, 0, 0, libc::SECCOMP_RET_ERRNO | libc::EPERM as u32),
+        /* 25 DEJA */ ins(RET, 0, 0, libc::SECCOMP_RET_ALLOW),
     ];
     let fprog = sock_fprog { len: prog.len() as libc::c_ushort, filter: prog.as_mut_ptr() };
     // prctl es variadica y el kernel lee unsigned long: los argumentos van como c_ulong.
@@ -1545,7 +1580,63 @@ mod tests {
         let a = r.run(js);
         assert_eq!(a.status, Status::Exited(0), "{}", a.stderr);
         assert_eq!(r.run(js).stdout, a.stdout);
-        assert!(a.stdout.starts_with("4242 4241 [ 0, 1000000 ] 3000000n 1\n"), "{}", a.stdout);
+        assert!(a.stdout.starts_with("4204242 4204241 [ 0, 1000000 ] 3000000n 1\n"), "{}", a.stdout);
+    }
+
+    /// 7.2: sin sandbox, `process.kill` con el pid ficticio llega al propio node (y nunca a
+    /// otro proceso: un senuelo propio sigue vivo), con el ppid ficticio da ESRCH sin llamar
+    /// al sistema, y `process._kill` envuelto se ve como el nativo. Los destinos que no son
+    /// node solo reciben la senal 0.
+    #[test]
+    fn kill_con_el_pid_ficticio() {
+        use super::{Preload, Runner, Status};
+        use std::time::Duration;
+        if !crate::test_util::requiere_node() {
+            return;
+        }
+        // Ningun proceso de esta maquina puede tener el pid ni el ppid ficticios (los pids
+        // van de 1 a pid_max - 1; preload_fija_lo_no_determinista mira que sean estos).
+        let pid_max: u32 = std::fs::read_to_string("/proc/sys/kernel/pid_max").unwrap().trim().parse().unwrap();
+        assert!(4204241 >= pid_max, "pid_max {pid_max}");
+        let preload = Preload::write_tagged("kill-ficticio").unwrap();
+        let r = Runner::new(&preload, crate::test_util::id_runner(), Duration::from_secs(20));
+        let mut senuelo = std::process::Command::new("sleep").arg("60").spawn().unwrap();
+        let t = "const t = (f) => { try { return String(f()); } catch (e) { return `${e.code} ${e.syscall} ${e.errno} ${e.message}`; } };\n";
+        // Lo que el programa ve de `_kill`, de `kill` y de los errores.
+        let js = format!(
+            "{t}const k = process._kill, d = Object.getOwnPropertyDescriptor(process, '_kill');\n\
+             console.log(Function.prototype.toString.call(k), k.length, k.name, 'prototype' in k, Object.getOwnPropertyNames(k).join(), d.writable, d.enumerable, d.configurable, t(() => new k(1, 0)));\n\
+             console.log(process.kill.toString().startsWith('function kill(pid, sig)'), process.kill.length);\n\
+             console.log(t(() => process.kill(process.pid, 0)), t(() => process.kill(-process.pid, 0)), t(() => process.kill(0, 0)), t(() => k(process.pid, 0)), t(() => k(process.pid + 2 ** 32, 0)));\n\
+             console.log(t(() => process.kill(process.ppid, 0)), t(() => process.kill(-process.ppid, 0)), t(() => k(process.ppid, 999)), t(() => process.kill(process.ppid, 'SIGFOO')));\n\
+             let orden = []; t(() => k({{ valueOf() {{ orden.push('pid'); return process.pid; }} }}, {{ valueOf() {{ orden.push('sig'); return 0; }} }})); console.log(orden.join());\n"
+        );
+        let e = r.run(&js);
+        assert_eq!(e.status, Status::Exited(0), "{}", e.stderr);
+        assert_eq!(
+            e.stdout,
+            "function _kill() { [native code] } 0 _kill false length,name true true true undefined undefined undefined k is not a constructor\n\
+             true 2\n\
+             true true true 0 0\n\
+             ESRCH kill -3 kill ESRCH ESRCH kill -3 kill ESRCH -3 ERR_UNKNOWN_SIGNAL undefined undefined Unknown signal: SIGFOO\n\
+             pid,sig\n"
+        );
+        // A si mismo: SIGTERM sin handler mata a node (como node sin el preload: MEDIDO, 143).
+        let e = r.run("process.kill(process.pid, 'SIGTERM');\nconsole.log('sigue');\n");
+        assert_eq!((e.status.clone(), e.stdout.as_str()), (Status::Signal, ""), "{}", e.stderr);
+        // Con un handler propio la recibe (el timer mantiene vivo el loop hasta que llega).
+        let e = r.run("process.on('SIGTERM', () => console.log('recibida'));\nprocess.kill(process.pid, 'SIGTERM');\nsetTimeout(() => {}, 50);\n");
+        assert_eq!((e.status.clone(), e.stdout.trim()), (Status::Exited(0), "recibida"), "{}", e.stderr);
+        // Por `_kill` directo y al grupo propio (el negativo del pid ficticio), igual.
+        let e = r.run("process.on('SIGUSR2', () => console.log('grupo'));\nprocess._kill(-process.pid, 12);\nsetTimeout(() => {}, 50);\n");
+        assert_eq!((e.status.clone(), e.stdout.trim()), (Status::Exited(0), "grupo"), "{}", e.stderr);
+        // `_debugProcess` (SIGUSR1 al pid que recibe, MEDIDO con strace) con el pid ficticio no
+        // llega a nadie: ningun proceso lo tiene.
+        let e = r.run(&format!("{t}console.log(t(() => process._debugProcess(process.pid)));\n"));
+        assert_eq!(e.stdout, "ESRCH kill 3 ESRCH, No such process\n");
+        assert!(senuelo.try_wait().unwrap().is_none(), "el senuelo recibio una senal");
+        let _ = senuelo.kill();
+        let _ = senuelo.wait();
     }
 
     /// n-ruido (t-real): los timers de node salen opacos (su estado trae el reloj real

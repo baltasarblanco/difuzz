@@ -8,7 +8,7 @@
 //!   va a descartes con causa `sandbox`, nunca a div/ ni a known/; sin el flag, el mismo
 //!   programa (con un "bug" puesto a mano) va a div/.
 //! - Las senales (2b): con el sandbox, `process.kill` a otro proceso da EPERM (y marca); a si
-//!   mismo, a 0 y a su grupo anda.
+//!   mismo, a 0 y a su grupo anda (7.2: tambien con el `process.pid` ficticio, sin marcar).
 //! - La red (`--sandbox-red`, solo Linux con user namespaces): sin salida (ENETUNREACH), el
 //!   loopback propio anda, los sockets unix del sistema quedan tapados; con `--sandbox`
 //!   solo, un socket unix de afuera se alcanza (limite documentado del modelo de node).
@@ -28,16 +28,17 @@ use crate::runner::{Preload, Runner, Sandbox, Status};
 struct Cambia {
     de: String,
     a: String,
+    kind: SourceKind,
 }
 
 impl Backend for Cambia {
     fn prepare(&self, src: &str) -> Outcome {
-        match (Identidad { kind: SourceKind::Script }).prepare(src) {
+        match (Identidad { kind: self.kind }).prepare(src) {
             Outcome::Ok { original, minified, .. } => {
                 assert!(minified.contains(&self.de), "Cambia: {:?} no esta en {minified:?}", self.de);
                 let minified = minified.replacen(&self.de, &self.a, 1);
                 let (static_flags, dead_writes, analisis) =
-                    crate::backend::swc::checks_on_text(src, &original, &minified, SourceKind::Script, Minifier::Identidad);
+                    crate::backend::swc::checks_on_text(src, &original, &minified, self.kind, Minifier::Identidad);
                 Outcome::Ok { original, minified, static_flags, dead_writes, analisis }
             }
             o => o,
@@ -167,6 +168,8 @@ fn sandbox_destino_del_caso() {
         "var m = \"bug-no\";\nif (m === \"bug-no\") {{ try {{ require('fs').readFileSync({}); }} catch (e) {{ console.log(\"negado\", e.code); }} }}\nconsole.log(m);\n",
         js_str(&senuelo)
     );
+    let vivo = "var vivo; try { process.kill(process.pid, 0); vivo = true; } catch (e) { vivo = e.code; }\nconsole.log(vivo, \"bug-no\");\n".to_string();
+    let matarse = "var r; try { process.kill(process.pid, \"SIGTERM\"); r = \"ok\"; } catch (e) { r = e.code; }\nconsole.log(r, \"bug-no\");\n".to_string();
     // (caso, programa, (de, a) del "bug", flags, destino esperado)
     type Caso<'a> = (&'a str, String, (&'a str, String), &'a [&'a str], &'a str);
     let casos: Vec<Caso> = vec![
@@ -177,6 +180,13 @@ fn sandbox_destino_del_caso() {
         // El original escribe adentro; el minificado (el bug) escribe afuera: B-solo.
         ("solo-b", escribir, ("dentro.txt", b.join("fuera.txt").to_str().unwrap().to_string()), &["--sandbox"], "div"),
         ("solo-a", solo_a, ("bug-no", "bug-si".into()), &["--sandbox"], "div"),
+        // 7.2 (revision 10-oct, c02-ayb-kill-cero): "esta vivo?" con el pid ficticio no toca
+        // el sandbox: el bug se compara (con fe0cd86 iba a descartes `sandbox`).
+        ("kill-propio", vivo.clone(), ("bug-no", "bug-si".into()), &["--sandbox"], "div"),
+        ("kill-propio-sin", vivo, ("bug-no", "bug-si".into()), &[], "div"),
+        // 7.2 (k17-pid-falso): matarse muere por la senal, como en node: descarte `senal`.
+        ("matarse", matarse.clone(), ("bug-no", "bug-si".into()), &["--sandbox"], "descarte:senal"),
+        ("matarse-sin", matarse, ("bug-no", "bug-si".into()), &[], "descarte:senal"),
     ];
     let preload = Preload::write_tagged("sandbox-caso").unwrap();
     let known = crate::known::Known::load(&corpus, &out, 0, Minifier::Oxc);
@@ -194,7 +204,7 @@ fn sandbox_destino_del_caso() {
         let celda = out.join(caso);
         let reporter = crate::oracle::Reporter::new(&celda, cli.cell(), crate::runner::PRELOAD);
         let runner = crate::runner_de_celda(&preload, crate::test_util::id_runner(), &cli);
-        let cfg = Config::from_backend(Box::new(Cambia { de: de.into(), a }));
+        let cfg = Config::from_backend(Box::new(Cambia { de: de.into(), a, kind: SourceKind::Script }));
         let ctx = crate::Ctx { reporter: &reporter, known: &known, cache: &cache, triage: &triage, medido: None };
         let mut st = crate::Stats::default();
         crate::process_case(&ctx, &runner, &cfg, None, &cli, &mut st, &corpus.join(caso).join("input.js"));
@@ -214,7 +224,7 @@ fn sandbox_destino_del_caso() {
         if esperado == "div" {
             assert!(causa.is_none(), "{caso}: div/ y ademas descarte {causa:?}");
             let meta = std::fs::read_to_string(celda.join("div").join(caso).join("meta.txt")).unwrap();
-            assert_eq!(meta.contains("solo el original toco el sandbox"), caso == "solo-a", "{caso}: {meta}");
+            assert_eq!(meta.matches("solo el original toco el sandbox").count(), usize::from(caso == "solo-a"), "{caso}: {meta}");
         }
     }
     drop(preload);
@@ -224,10 +234,11 @@ fn sandbox_destino_del_caso() {
 /// 2b: con `--sandbox` (y con `--sandbox-red`, si esta maquina lo arma), node no le manda
 /// senales a otro proceso: EPERM, y la ejecucion queda marcada. El senuelo (un `sleep`
 /// propio) recibe SIGTERM solo si el filtro falla; a este test (el padre de node) y a todo el
-/// usuario (`-1`) se les manda la senal 0, que no hace nada aunque llegue. `process.pid` y
-/// `process.ppid` los fija el preload (4242 y 4241, M20): no son node ni su padre, y con el
-/// sandbox tambien dan EPERM. A si mismo (el pid real, de `process.report`), a 0 y a su
-/// grupo (pgid = pid de node) anda. Sin el sandbox, lo de siempre.
+/// usuario (`-1`) se les manda la senal 0, que no hace nada aunque llegue. A si mismo (el pid
+/// real, de `process.report`), a 0 y a su grupo (pgid = pid de node) anda. 7.2: `process.pid`
+/// (ficticio, M20) tambien es si mismo, sin marcar (antes daba EPERM y el caso iba a
+/// descartes), y `process.ppid` da ESRCH sin llamar al sistema (nunca el padre real), con o
+/// sin el sandbox. Sin el sandbox, lo de siempre.
 #[test]
 fn sandbox_senales() {
     if !crate::test_util::requiere_node() {
@@ -249,8 +260,6 @@ fn sandbox_senales() {
             (pid.to_string(), "'SIGTERM'"),
             (padre.to_string(), "0"),
             ("-1".into(), "0"),
-            ("process.pid".into(), "0"),
-            ("process.ppid".into(), "0"),
         ];
         for (destino, senal) in afuera {
             let (out, toco, st) = intento(&r, &format!("process.kill({destino}, {senal})"));
@@ -259,10 +268,20 @@ fn sandbox_senales() {
         // Sin atrapar: lanza y marca (el mensaje `kill EPERM` en la linea `exc`).
         let e = r.run(&format!("process.kill({pid}, 'SIGTERM');\n"));
         assert!(e.threw() && e.toco_sandbox(), "{modo:?}: {:?} {}", e.status, e.ctl);
-        for destino in [yo.to_string(), "0".into(), format!("-{yo}")] {
+        for destino in [yo.to_string(), "0".into(), format!("-{yo}"), "process.pid".into(), "-process.pid".into()] {
             let (out, toco, _) = intento(&r, &format!("process.kill({destino}, 0)"));
             assert_eq!((out.as_str(), toco), ("ok", false), "{modo:?} {destino}");
         }
+        // 7.2: el ppid ficticio da ESRCH, sin llamar al sistema (no marca).
+        for destino in ["process.ppid", "-process.ppid"] {
+            let (out, toco, st) = intento(&r, &format!("process.kill({destino}, 0)"));
+            assert_eq!((out.as_str(), toco, st), ("err ESRCH", false, Status::Exited(0)), "{modo:?} {destino}");
+        }
+        // 7.2: matarse con el pid ficticio anda como en node (muere por la senal) y no marca.
+        let e = r.run("process.kill(process.pid, 'SIGTERM');\nconsole.log('sigue');\n");
+        assert_eq!((e.status.clone(), e.stdout.as_str(), e.toco_sandbox()), (Status::Signal, "", false), "{modo:?}: {}", e.stderr);
+        let e = r.run("process.on('SIGTERM', () => console.log('recibida'));\nprocess.kill(process.pid, 'SIGTERM');\nsetTimeout(() => {}, 50);\n");
+        assert_eq!((e.stdout.trim(), e.toco_sandbox()), ("recibida", false), "{modo:?}: {}", e.stderr);
         // Y la senal llega: un handler propio la recibe (el timer mantiene vivo el loop hasta
         // que llega; sin el, node termina antes tambien sin el sandbox: MEDIDO).
         let e = r.run(&format!("process.on('SIGUSR2', () => console.log('recibida'));\nprocess.kill({yo}, 'SIGUSR2');\nsetTimeout(() => {{}}, 50);\n"));
@@ -272,6 +291,12 @@ fn sandbox_senales() {
     let sin = Runner::new(&preload, crate::test_util::id_runner(), t);
     let (out, toco, _) = intento(&sin, &format!("process.kill({pid}, 0)"));
     assert_eq!((out.as_str(), toco), ("ok", false));
+    // 7.2: sin el sandbox, lo mismo que con el: el pid ficticio es node y el ppid, ESRCH.
+    let (out, toco, _) = intento(&sin, "process.kill(process.pid, 0)");
+    assert_eq!((out.as_str(), toco), ("ok", false));
+    let (out, toco, _) = intento(&sin, "process.kill(process.ppid, 0)");
+    assert_eq!((out.as_str(), toco), ("err ESRCH", false));
+    assert!(senuelo.try_wait().unwrap().is_none(), "sin sandbox: el senuelo recibio la senal");
     let _ = senuelo.kill();
     let _ = senuelo.wait();
 }
@@ -356,5 +381,198 @@ fn sandbox_red() {
     let e = corto.run("while (true) {}\n");
     assert_eq!(e.status, Status::Timeout);
     drop((red, solo, corto, l));
+    let _ = std::fs::remove_dir_all(&b);
+}
+
+/// 7.7 (MENOR 5): la nota de solo-A va una sola vez, y se saca sin tocar la del analisis.
+#[test]
+fn nota_solo_a_una_vez() {
+    let n = crate::NOTA_SOLO_A;
+    assert_eq!(crate::con_nota_solo_a(None), n);
+    assert_eq!(crate::con_nota_solo_a(Some(n.to_string())), n);
+    assert_eq!(crate::con_nota_solo_a(Some("analisis".into())), format!("analisis | {n}"));
+    assert_eq!(crate::con_nota_solo_a(Some(format!("analisis | {n}"))), format!("analisis | {n}"));
+    assert_eq!(crate::sin_nota_solo_a(Some(format!("analisis | {n}"))).as_deref(), Some("analisis"));
+    assert_eq!(crate::sin_nota_solo_a(Some(n.to_string())), None);
+    assert_eq!(crate::sin_nota_solo_a(Some("analisis".into())).as_deref(), Some("analisis"));
+}
+
+/// 7.7: a quien apunta una llamada de `setpriority` en el hijo (`Quien::Yo`: su pid).
+#[derive(Clone, Copy, Debug)]
+enum Quien {
+    Cero,
+    Yo,
+    Otro(libc::id_t),
+}
+
+/// 7.7: `setpriority(which, quien, 19)` en el hijo de un `Command`, con o sin el filtro de
+/// `encerrar_senales`, sin node: `pre_exec` instala el filtro y hace la llamada; si falla,
+/// su errno vuelve como error del spawn y no hay exec. El hijo esta en un grupo propio
+/// (`process_group(0)`, como node en `run_file`): `PRIO_PGRP` con 0 o con su pid es solo el.
+/// 19 es la prioridad mas baja: sin privilegios solo se puede bajar.
+fn prioridad_en_el_hijo(filtro: bool, which: libc::__priority_which_t, quien: Quien) -> Result<(), Option<i32>> {
+    use std::os::unix::process::CommandExt;
+    let mut cmd = std::process::Command::new("true");
+    cmd.process_group(0).stdin(std::process::Stdio::null());
+    // SAFETY: entre fork y exec solo llamadas al sistema (encerrar_senales, getpid,
+    // setpriority) sobre memoria de la pila.
+    unsafe {
+        cmd.pre_exec(move || {
+            if filtro {
+                crate::runner::encerrar_senales()?;
+            }
+            let who = match quien {
+                Quien::Cero => 0,
+                Quien::Yo => libc::getpid() as libc::id_t,
+                Quien::Otro(w) => w,
+            };
+            if libc::setpriority(which, who, 19) != 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    match cmd.spawn() {
+        Ok(mut c) => {
+            let _ = c.wait();
+            Ok(())
+        }
+        Err(e) => Err(e.raw_os_error()),
+    }
+}
+
+/// 7.7 (revision fe0cd86, IMPORTANTE 1): el filtro deja `setpriority` solo sobre el propio
+/// proceso y su grupo, y niega el resto con EPERM. Los destinos de afuera no existen (un pid
+/// y un grupo mas alla de `pid_max`, un uid sin procesos): sin el filtro dan ESRCH (o
+/// EINVAL, un `which` que no existe), asi que nada cambia aunque el filtro fallara; nunca
+/// `PRIO_USER` con el uid propio.
+#[test]
+fn filtro_prioridad() {
+    // Un uid sin procesos (`find_user` no lo encuentra: ESRCH). No es 0 ni el propio.
+    const NADIE: libc::id_t = 3_999_999_999;
+    let afuera = Quien::Otro(i32::MAX as libc::id_t);
+    let (proceso, grupo, usuario) = (libc::PRIO_PROCESS, libc::PRIO_PGRP, libc::PRIO_USER);
+    for (which, quien) in [(proceso, Quien::Cero), (proceso, Quien::Yo), (grupo, Quien::Cero), (grupo, Quien::Yo)] {
+        assert_eq!(prioridad_en_el_hijo(true, which, quien), Ok(()), "{which} {quien:?}");
+    }
+    let negadas = [(proceso, afuera), (grupo, afuera), (usuario, Quien::Otro(NADIE)), (3, Quien::Cero)];
+    for (which, quien) in negadas {
+        assert_eq!(prioridad_en_el_hijo(true, which, quien), Err(Some(libc::EPERM)), "con el filtro: {which} {quien:?}");
+    }
+    // El control: sin el filtro, el kernel no daba EPERM (lo que cambia es el filtro).
+    let sin = [libc::ESRCH, libc::ESRCH, libc::ESRCH, libc::EINVAL];
+    for ((which, quien), errno) in negadas.into_iter().zip(sin) {
+        assert_eq!(prioridad_en_el_hijo(false, which, quien), Err(Some(errno)), "sin el filtro: {which} {quien:?}");
+    }
+}
+
+/// 7.7 (IMPORTANTE 1 y MENOR 4), con node: `os.setPriority` a otro proceso da EPERM y marca
+/// (atrapado e impreso, atrapado en silencio con el sensor, sin atrapar); a si mismo anda
+/// y no marca. `process._kill` (no lanza: devuelve -1) y `process._debugProcess` negados
+/// marcan aunque el programa los atrape en silencio sin el sensor. El senuelo (un `sleep`
+/// propio) no cambia de prioridad ni recibe nada. Sin el sandbox, `_kill` es el de node.
+#[test]
+fn sandbox_prioridad_y_senales_sin_lanzar() {
+    if !crate::test_util::requiere_node() {
+        return;
+    }
+    let preload = Preload::write_tagged("sandbox-prioridad").unwrap();
+    let t = Duration::from_secs(20);
+    let mut modos = vec![Sandbox::Permisos];
+    match crate::runner::probar_sandbox(Sandbox::PermisosYRed) {
+        Ok(()) => modos.push(Sandbox::PermisosYRed),
+        Err(e) => eprintln!("DIFUZZ_SALTEADO_SIN_USERNS: sandbox_prioridad_y_senales_sin_lanzar con la red: {e}"),
+    }
+    let mut senuelo = std::process::Command::new("sleep").arg("60").spawn().unwrap();
+    let pid = senuelo.id();
+    // SAFETY: getpriority no toca memoria. La prioridad del senuelo es >= 0 (sin privilegios).
+    let prioridad = || unsafe { libc::getpriority(libc::PRIO_PROCESS, pid as libc::id_t) };
+    let antes = prioridad();
+    let yo = "process.report.getReport().header.processId";
+    let os = "require('os')";
+    for modo in modos {
+        let r = Runner::new(&preload, crate::test_util::id_runner(), t).with_sandbox(modo);
+        let mudo = Runner::new(&preload, crate::test_util::id_runner(), t).with_sandbox(modo).with_sensor(false);
+        let (out, toco, st) = intento(&r, &format!("{os}.setPriority({pid}, 19)"));
+        assert_eq!((out.as_str(), toco, st), ("err ERR_SYSTEM_ERROR", true, Status::Exited(0)), "{modo:?}");
+        let e = r.run(&format!("try {{ {os}.setPriority({pid}, 19); }} catch {{}}\nconsole.log(1);\n"));
+        assert_eq!((e.stdout.trim(), e.toco_sandbox()), ("1", true), "{modo:?} en silencio, con el sensor: {}", e.ctl);
+        let e = mudo.run(&format!("try {{ {os}.setPriority({pid}, 19); }} catch (e) {{ console.log(e.message); }}\n"));
+        assert!(e.stdout.contains("uv_os_setpriority returned EPERM") && e.toco_sandbox(), "{modo:?}: {}", e.stdout);
+        let e = mudo.run(&format!("{os}.setPriority({pid}, 19);\n"));
+        assert!(e.threw() && e.toco_sandbox(), "{modo:?}: {:?} {}", e.status, e.ctl);
+        // A si mismo (0 y su pid real) anda; leer la prioridad de otro, tambien (no se filtra).
+        for destino in ["0".to_string(), yo.to_string()] {
+            let (out, toco, _) = intento(&r, &format!("{os}.setPriority({destino}, 19)"));
+            assert_eq!((out.as_str(), toco), ("ok", false), "{modo:?} {destino}");
+        }
+        let e = r.run(&format!("console.log({os}.getPriority({pid}) === {antes});\n"));
+        assert_eq!((e.stdout.trim(), e.toco_sandbox()), ("true", false), "{modo:?}: {}", e.stderr);
+        // MENOR 4: sin el sensor, atrapado o sin lanzar.
+        let e = mudo.run(&format!("console.log(process._kill({pid}, 15));\n"));
+        assert_eq!((e.stdout.trim(), e.toco_sandbox()), ("-1", true), "{modo:?}: {}", e.ctl);
+        let e = mudo.run(&format!("try {{ process._debugProcess({pid}); }} catch {{}}\nconsole.log(1);\n"));
+        assert_eq!((e.stdout.trim(), e.toco_sandbox()), ("1", true), "{modo:?}: {}", e.ctl);
+        // A si mismo, `_kill` anda (0) y no marca; el envoltorio tiene el `length` de node.
+        let e = mudo.run(&format!("console.log(process._kill({yo}, 0), process._kill.length, process._kill.name);\n"));
+        assert_eq!((e.stdout.trim(), e.toco_sandbox()), ("0 0 _kill", false), "{modo:?}: {}", e.stderr);
+        // Integracion 7.2 + 7.7: el pid ficticio va al real por `_kill` (no marca); a otro, si
+        // marca (el EPERM del `_kill` nativo dentro del envoltorio de 7.2). `os.setPriority` y
+        // `_debugProcess` con el pid ficticio no se traducen: el filtro los niega y marcan.
+        let e = mudo.run("console.log(process._kill(process.pid, 0));\ntry { process.kill(process.pid, 0); console.log('vivo'); } catch (e) { console.log(e.code); }\n");
+        assert_eq!((e.stdout.trim(), e.toco_sandbox()), ("0\nvivo", false), "{modo:?}: {}", e.stderr);
+        let e = mudo.run(&format!("try {{ process.kill({pid}, 0); }} catch {{}}\nconsole.log(1);\n"));
+        assert_eq!((e.stdout.trim(), e.toco_sandbox()), ("1", true), "{modo:?}: {}", e.ctl);
+        let (out, toco, _) = intento(&r, &format!("{os}.setPriority(process.pid, 19)"));
+        assert_eq!((out.as_str(), toco), ("err ERR_SYSTEM_ERROR", true), "{modo:?}");
+        let e = mudo.run("try { process._debugProcess(process.pid); } catch (e) { console.log(e.code); }\n");
+        assert_eq!((e.stdout.trim(), e.toco_sandbox()), ("EPERM", true), "{modo:?}: {}", e.ctl);
+        assert!(senuelo.try_wait().unwrap().is_none(), "{modo:?}: el senuelo recibio una senal");
+        assert_eq!(prioridad(), antes, "{modo:?}: el senuelo cambio de prioridad");
+    }
+    // Sin el sandbox, el `_kill` de node (sin envolver) y nada marca.
+    let sin = Runner::new(&preload, crate::test_util::id_runner(), t);
+    let e = sin.run(&format!("console.log(process._kill({pid}, 0), /native code/.test(Function.prototype.toString.call(process._kill)));\n"));
+    assert_eq!((e.stdout.trim(), sin.toco_sandbox(&e), e.toco_sandbox()), ("0 true", false, false), "{}", e.stderr);
+    let _ = senuelo.kill();
+    let _ = senuelo.wait();
+}
+
+/// 7.7 (MENOR 5 y 8): carril B, un modulo mudo cuyo original toca el sandbox y el minificado
+/// no (`revision/a3-2c/corpus-b/m01-mudo-solo-a`): la pasada cruda (iguales: los dos mudos) y
+/// el envoltorio de modulos son solo-A. El hallazgo (div/) lleva la nota UNA vez y el caso
+/// cuenta dos pasadas solo-A.
+#[test]
+fn sandbox_solo_a_modulo() {
+    if !crate::test_util::requiere_node() {
+        return;
+    }
+    let (b, senuelo) = base("modulo");
+    let (corpus, out) = (b.join("corpus"), b.join("out"));
+    let caso = "m01-mudo-solo-a";
+    let js = format!(
+        "import fs from \"node:fs\";\nexport let r = \"x\";\nvar m = \"bug-no\";\nif (m === \"bug-no\") {{ try {{ fs.readFileSync({}); r = \"leyo\"; }} catch (e) {{ r = \"no\"; }} }}\n",
+        js_str(&senuelo)
+    );
+    std::fs::create_dir_all(corpus.join(caso)).unwrap();
+    std::fs::write(corpus.join(caso).join("input.js"), &js).unwrap();
+    let args = [corpus.to_str().unwrap(), "--out", out.to_str().unwrap(), "--no-cache", "--jobs", "1", "--carril", "b", "--sandbox"];
+    let cli = crate::Cli::parse(args.iter().map(|s| s.to_string()).collect()).unwrap();
+    let preload = Preload::write_tagged("sandbox-modulo").unwrap();
+    let known = crate::known::Known::load(&corpus, &out, 0, Minifier::Oxc);
+    let cache = crate::cache::CacheA::new(None, &[]);
+    let triage = crate::triage::Triage::load(&out);
+    let celda = out.join(cli.cell());
+    let reporter = crate::oracle::Reporter::new(&celda, cli.cell(), crate::runner::PRELOAD);
+    let runner = crate::runner_de_celda(&preload, crate::test_util::id_runner(), &cli);
+    let cfg = Config::from_backend(Box::new(Cambia { de: "bug-no".into(), a: "bug-si".into(), kind: SourceKind::Module }));
+    let ctx = crate::Ctx { reporter: &reporter, known: &known, cache: &cache, triage: &triage, medido: None };
+    let mut st = crate::Stats::default();
+    crate::process_case(&ctx, &runner, &cfg, None, &cli, &mut st, &corpus.join(caso).join("input.js"));
+    drop(runner);
+    let meta = std::fs::read_to_string(celda.join("div").join(caso).join("meta.txt")).unwrap_or_default();
+    assert_eq!(meta.matches("solo el original toco el sandbox").count(), 1, "{} | {meta}", st.line());
+    assert_eq!((st.solo_a_sandbox, st.a_sandbox), (2, 0), "{}", st.line());
+    drop(preload);
     let _ = std::fs::remove_dir_all(&b);
 }

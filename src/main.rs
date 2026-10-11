@@ -975,7 +975,9 @@ fn main() {
         println!("sensor (I3): comparados_sin_sensor={}", stats.sensor_repetidos);
     }
     // n-sandbox: en una linea aparte, solo con --sandbox (no cambia la de `total=`).
-    let linea_sandbox = cli.sandbox.activo().then(|| format!("sandbox: modo={} descartados={} solo_original={}", cli.sandbox.nombre(), stats.a_sandbox, stats.solo_a_sandbox));
+    // 7.7 (MENOR 5): `solo_original=` cuenta pasadas, tambien las de las variantes.
+    let solo_original = stats.solo_a_sandbox + stats.mutaciones.solo_a_sandbox;
+    let linea_sandbox = cli.sandbox.activo().then(|| format!("sandbox: modo={} descartados={} solo_original={solo_original}", cli.sandbox.nombre(), stats.a_sandbox));
     if let Some(l) = &linea_sandbox {
         println!("{l}");
     }
@@ -1145,9 +1147,10 @@ fn process_case(
         eprintln!("runner: {e}");
         return;
     }
-    if descarte_sandbox(ctx, runner, stats, rel, &a, &minified) {
-        return;
-    }
+    let b_previo = match descarte_sandbox(ctx, runner, stats, rel, &a, &minified) {
+        Pasada::Descartada => return,
+        Pasada::Sigue(b) => b,
+    };
 
     // Mejora 10: variantes, solo si el original termina solo (si no, las
     // variantes casi seguro tampoco, y cada una costaria un timeout). M18: y no
@@ -1157,7 +1160,7 @@ fn process_case(
     let mutate = cli.mutaciones + cli.mutaciones_extra > 0 && a.completed() && !(a.ok_silent() && !a.has_globals());
     let base_lint = dead_writes.1 > dead_writes.0;
     stats.last_div = None;
-    compare_base(ctx, runner, cfg, names_cfg, cli, stats, rel, &raw, &original, &minified, &static_flags, a, a_cached);
+    compare_base(ctx, runner, cfg, names_cfg, cli, stats, rel, &raw, &original, &minified, &static_flags, a, a_cached, b_previo);
     // R1-H05: con debug assertions hubo panic y el oraculo minifico. Si diverge,
     // ya esta en div/ (o known/) con la nota; si no, va a asserts/, no a panic/.
     if let Some(nota) = minify::tomar_nota_asserts() {
@@ -1189,12 +1192,13 @@ fn compare_base(
     static_flags: &[&'static str],
     a: runner::Exec,
     a_cached: bool,
+    b_previo: Option<runner::Exec>,
 ) {
     if a.ok_with_output() {
         if a.threw() {
             stats.threw += 1;
         }
-        if !compare_and_report(ctx, runner, stats, rel, original, minified, a, a_cached, false, static_flags, names_cfg) {
+        if !compare_and_report(ctx, runner, stats, rel, original, minified, a, a_cached, b_previo, false, static_flags, names_cfg) {
             stats.same += 1;
         }
     } else if a.ok_silent() {
@@ -1203,7 +1207,7 @@ fn compare_base(
         // como el de swc#12397 en un programa que no imprime). Los globals que
         // creo (lineas `!dz global`) entran en esta comparacion.
         let had_globals = a.has_globals();
-        if compare_and_report(ctx, runner, stats, rel, original, minified, a, a_cached, false, static_flags, names_cfg) {
+        if compare_and_report(ctx, runner, stats, rel, original, minified, a, a_cached, b_previo, false, static_flags, names_cfg) {
             return;
         }
         if !cli.observe {
@@ -1325,9 +1329,10 @@ fn observe_epilogue(
         }
     };
     let (a, a_cached) = ctx.cache.run(runner, &original, &mut stats.cache_hits);
-    if descarte_sandbox(ctx, runner, stats, rel, &a, &minified) {
-        return;
-    }
+    let b_previo = match descarte_sandbox(ctx, runner, stats, rel, &a, &minified) {
+        Pasada::Descartada => return,
+        Pasada::Sigue(b) => b,
+    };
     if !a.ok_with_output() {
         stats.observed_not_ok += 1;
         ctx.reporter.discard(rel, "observado_sin_salida", a.elapsed);
@@ -1337,7 +1342,7 @@ fn observe_epilogue(
     if a.threw() {
         stats.threw += 1;
     }
-    if compare_and_report(ctx, runner, stats, rel, &original, &minified, a, a_cached, true, &static_flags, names_cfg) {
+    if compare_and_report(ctx, runner, stats, rel, &original, &minified, a, a_cached, b_previo, true, &static_flags, names_cfg) {
         return;
     }
     if invocar && invoke_pass(ctx, runner, cfg, names_cfg, cli, stats, rel, raw, &instrumented) {
@@ -1416,9 +1421,10 @@ fn pasada_bloques(
         minify::Outcome::ParseError { .. } | minify::Outcome::CodegenError => return Ok(None),
     };
     let (a, a_cached) = ctx.cache.run(runner, &original, &mut stats.cache_hits);
-    if descarte_sandbox(ctx, runner, stats, rel, &a, &minified) {
-        return Ok(Some(true));
-    }
+    let b_previo = match descarte_sandbox(ctx, runner, stats, rel, &a, &minified) {
+        Pasada::Descartada => return Ok(Some(true)),
+        Pasada::Sigue(b) => b,
+    };
     if !a.ok_with_output() {
         stats.bloques_sin_salida += 1;
         return Ok(None);
@@ -1427,7 +1433,7 @@ fn pasada_bloques(
     if a.threw() {
         stats.threw += 1;
     }
-    Ok(Some(compare_and_report(ctx, runner, stats, rel, &original, &minified, a, a_cached, true, &static_flags, names_cfg)))
+    Ok(Some(compare_and_report(ctx, runner, stats, rel, &original, &minified, a, a_cached, b_previo, true, &static_flags, names_cfg)))
 }
 
 /// R1-H13: cuenta el estado del analisis de la pasada cruda y deja su nota
@@ -1507,14 +1513,15 @@ fn invoke_pass(
         minify::Outcome::ParseError { .. } | minify::Outcome::CodegenError => return false,
     };
     let (a, a_cached) = ctx.cache.run(runner, &original, &mut stats.cache_hits);
-    if descarte_sandbox(ctx, runner, stats, rel, &a, &minified) {
-        return true;
-    }
+    let b_previo = match descarte_sandbox(ctx, runner, stats, rel, &a, &minified) {
+        Pasada::Descartada => return true,
+        Pasada::Sigue(b) => b,
+    };
     if !a.ok_with_output() {
         stats.invocar_retry += 1;
         return false;
     }
-    compare_and_report(ctx, runner, stats, rel, &original, &minified, a, a_cached, true, &static_flags, names_cfg)
+    compare_and_report(ctx, runner, stats, rel, &original, &minified, a, a_cached, b_previo, true, &static_flags, names_cfg)
 }
 
 /// Carril B, programa mudo: segunda pasada por el envoltorio que serializa el
@@ -1541,9 +1548,13 @@ fn observe_module(
         obs = runner.observing().with_invocar(false);
         (a, a_cached) = ctx.cache.run(&obs, original, &mut stats.cache_hits);
     }
-    if descarte_sandbox(ctx, &obs, stats, rel, &a, minified) {
-        return true;
-    }
+    // 7.7 (MENOR 5): la nota de solo-A es de esta pasada, no de la cruda (misma nota del
+    // analisis: mismo original y mismo minificado).
+    stats.nota_pasada = sin_nota_solo_a(stats.nota_pasada.take());
+    let b_previo = match descarte_sandbox(ctx, &obs, stats, rel, &a, minified) {
+        Pasada::Descartada => return true,
+        Pasada::Sigue(b) => b,
+    };
     // Sin exports el envoltorio no imprime nada. M12: el llamador sigue con el
     // epilogo (antes el caso quedaba en mudos_sin_bindings: 585 en B contra 84 en A).
     if a.ok_silent() {
@@ -1558,7 +1569,7 @@ fn observe_module(
     if a.threw() {
         stats.threw += 1;
     }
-    if !compare_and_report(ctx, &obs, stats, rel, original, minified, a, a_cached, true, static_flags, names_cfg) {
+    if !compare_and_report(ctx, &obs, stats, rel, original, minified, a, a_cached, b_previo, true, static_flags, names_cfg) {
         stats.same += 1;
     }
     true
@@ -1581,20 +1592,30 @@ fn runner_de_celda(preload: &runner::Preload, worker: usize, cli: &Cli) -> runne
 /// `sandbox`, nunca a div/ ni a known/ por eso. Vale para cualquier pasada (cruda,
 /// observada, de bloques, `--invocar`, envoltorio de modulos); `runner` es el de la
 /// comparacion. Sin `--sandbox`, `Runner::toco_sandbox` es siempre false.
-fn descarte_sandbox(ctx: &Ctx, runner: &runner::Runner, stats: &mut Stats, rel: &Path, a: &runner::Exec, minified: &str) -> bool {
+fn descarte_sandbox(ctx: &Ctx, runner: &runner::Runner, stats: &mut Stats, rel: &Path, a: &runner::Exec, minified: &str) -> Pasada {
     match toca_sandbox(runner, a, minified) {
-        TocaSandbox::No => false,
-        TocaSandbox::SoloA => {
+        TocaSandbox::No => Pasada::Sigue(None),
+        TocaSandbox::SoloA(b) => {
             stats.solo_a_sandbox += 1;
             stats.nota_pasada = Some(con_nota_solo_a(stats.nota_pasada.take()));
-            false
+            Pasada::Sigue(Some(*b))
         }
         TocaSandbox::AyB => {
             stats.a_sandbox += 1;
             ctx.reporter.discard(rel, "sandbox", a.elapsed);
-            true
+            Pasada::Descartada
         }
     }
+}
+
+/// n-sandbox: lo que deja `descarte_sandbox` a la pasada.
+enum Pasada {
+    /// A y B tocaron el sandbox: el caso ya esta en descartes.tsv.
+    Descartada,
+    /// Se compara. 7.7 (revision fe0cd86, MENOR 8): con el B que corrio `toca_sandbox`
+    /// cuando solo el original toco el sandbox (`compare_and_report` lo usa en vez de
+    /// correrlo de nuevo: se decide y se compara con el mismo B).
+    Sigue(Option<runner::Exec>),
 }
 
 /// 2c (revision-n2): quien toco el sandbox en un caso cuyo original lo toco.
@@ -1603,15 +1624,15 @@ enum TocaSandbox {
     No,
     /// El original si y el minificado no: el bug puede ser justo lo que cambia que archivo
     /// se abre (`revision-n2/sb3/u01-solo-a-toca`: con el bug, B no llegaba a leerlo). Se
-    /// compara, con una nota en meta.txt; es el espejo de B-solo.
-    SoloA,
+    /// compara, con una nota en meta.txt; es el espejo de B-solo. Con el B que lo decidio.
+    SoloA(Box<runner::Exec>),
     /// Los dos: lo que se compararia es el sandbox, no el programa.
     AyB,
 }
 
-/// 2c: si A toco el sandbox, B corre con el mismo runner de la comparacion (una ejecucion
-/// de mas solo en esos casos; `compare_and_report` lo vuelve a correr). Un B que no corrio
-/// (fallo del runner) cuenta como que lo toco: el caso se descarta como antes.
+/// 2c: si A toco el sandbox, B corre con el mismo runner de la comparacion (en esos casos,
+/// B corre antes; 7.7: `compare_and_report` usa ese mismo B). Un B que no corrio (fallo del
+/// runner) cuenta como que lo toco: el caso se descarta como antes.
 fn toca_sandbox(runner: &runner::Runner, a: &runner::Exec, minified: &str) -> TocaSandbox {
     if !runner.toco_sandbox(a) {
         return TocaSandbox::No;
@@ -1620,16 +1641,32 @@ fn toca_sandbox(runner: &runner::Runner, a: &runner::Exec, minified: &str) -> To
     if matches!(b.status, Status::Failed(_)) || runner.toco_sandbox(&b) {
         TocaSandbox::AyB
     } else {
-        TocaSandbox::SoloA
+        TocaSandbox::SoloA(Box::new(b))
     }
 }
 
-/// 2c: la nota de meta.txt de un caso en que solo el original toco el sandbox.
+/// 2c: la nota de meta.txt de una pasada en que solo el original toco el sandbox.
+const NOTA_SOLO_A: &str = "sandbox: solo el original toco el sandbox (el minificado no): se compara (2c)";
+
+/// 2c: la nota de la pasada mas la de solo-A. 7.7 (MENOR 5): una sola vez.
 fn con_nota_solo_a(nota: Option<String>) -> String {
-    const SOLO_A: &str = "sandbox: solo el original toco el sandbox (el minificado no): se compara (2c)";
-    match nota {
-        Some(n) => format!("{n} | {SOLO_A}"),
-        None => SOLO_A.to_string(),
+    match sin_nota_solo_a(nota) {
+        Some(n) => format!("{n} | {NOTA_SOLO_A}"),
+        None => NOTA_SOLO_A.to_string(),
+    }
+}
+
+/// 7.7 (revision fe0cd86, MENOR 5): la nota de la pasada sin la de solo-A. El envoltorio de
+/// modulos (`observe_module`) hereda la nota de la pasada cruda: sin esto, la de solo-A
+/// quedaba dos veces (las dos pasadas solo-A) o vieja (la cruda solo-A y la observada no).
+fn sin_nota_solo_a(nota: Option<String>) -> Option<String> {
+    let n = nota?;
+    if n == NOTA_SOLO_A {
+        return None;
+    }
+    match n.strip_suffix(NOTA_SOLO_A).and_then(|r| r.strip_suffix(" | ")) {
+        Some(r) => Some(r.to_string()),
+        None => Some(n),
     }
 }
 
@@ -1662,7 +1699,8 @@ struct Ctx<'a> {
 /// Corre B y compara contra A (que ya termino con exit 0). Devuelve `true` si
 /// el caso quedo cerrado: divergencia reportada o falla del runner. `false`
 /// significa "iguales"; el llamador decide si eso cuenta como `same` o si sigue
-/// a la pasada observada.
+/// a la pasada observada. `b_previo`: el B que ya corrio `toca_sandbox` con este
+/// mismo runner (2c, solo-A); si esta, no se vuelve a correr (7.7, MENOR 8).
 #[allow(clippy::too_many_arguments)]
 fn compare_and_report(
     ctx: &Ctx,
@@ -1673,6 +1711,7 @@ fn compare_and_report(
     minified: &str,
     a: runner::Exec,
     a_cached: bool,
+    b_previo: Option<runner::Exec>,
     observed: bool,
     static_flags: &[&'static str],
     names_cfg: Option<&minify::Config>,
@@ -1684,7 +1723,7 @@ fn compare_and_report(
         }
         return false;
     }
-    let b = runner.run(minified);
+    let b = b_previo.unwrap_or_else(|| runner.run(minified));
     // I3 (revision-b456): el sensor cambia lo que el programa observa (V8 formatea el
     // stack al pausar: llama al toString del programa y congela `.stack`). Es simetrico
     // solo si A y B corrieron igual. Si alguno corrio sin el sensor (`sensor_caido`: se
@@ -1900,10 +1939,14 @@ struct MutStats {
     /// M33: variantes `var` <-> `let`/`const` cuyo original prende `tdz`: ruido del
     /// operador, se descartan sin comparar.
     tdz: usize,
+    /// 7.7 (MENOR 5): variantes comparadas en que solo el original toco el sandbox (2c). Van
+    /// a la linea `sandbox:` (`solo_original=`), no a la de las mutaciones.
+    solo_a_sandbox: usize,
 }
 
 impl MutStats {
     fn merge(&mut self, o: &MutStats) {
+        self.solo_a_sandbox += o.solo_a_sandbox;
         self.variantes += o.variantes;
         self.comparadas += o.comparadas;
         self.iguales += o.iguales;
@@ -2057,13 +2100,13 @@ fn process_mutants(
         // n-sandbox: el original de la variante y su minificado tocaron el sandbox: no se
         // compara (cuenta en `original=` de las mutaciones, como las demas variantes cuyo
         // original no sirve). 2c: si solo lo toco el original, se compara con la nota.
-        let solo_a = match toca_sandbox(runner, &a, &minified) {
+        let (solo_a, b_previo) = match toca_sandbox(runner, &a, &minified) {
             TocaSandbox::AyB => {
                 m.original += 1;
                 continue;
             }
-            TocaSandbox::SoloA => true,
-            TocaSandbox::No => false,
+            TocaSandbox::SoloA(b) => (true, Some(*b)),
+            TocaSandbox::No => (false, None),
         };
         if v.tdz_filter && a.flags.iter().any(|f| f == "tdz") {
             m.tdz += 1;
@@ -2078,9 +2121,15 @@ fn process_mutants(
             m.original += 1;
             continue;
         }
-        let nota = if solo_a { Some(con_nota_solo_a(analisis.nota())) } else { analisis.nota() };
+        // 7.7 (MENOR 5): las pasadas solo-A de las variantes tambien suman a `solo_original=`.
+        let nota = if solo_a {
+            m.solo_a_sandbox += 1;
+            Some(con_nota_solo_a(analisis.nota()))
+        } else {
+            analisis.nota()
+        };
         let mut s = Stats { skip_kind: base_div, nota_pasada: nota, ..Stats::default() };
-        compare_and_report(ctx, runner, &mut s, &rel, &original, &minified, a, false, false, &static_flags, names_cfg);
+        compare_and_report(ctx, runner, &mut s, &rel, &original, &minified, a, false, b_previo, false, &static_flags, names_cfg);
         if contar_variante(m, &s) {
             ctx.reporter.attach(&rel, &files);
         }
@@ -2238,12 +2287,12 @@ mod tests {
         let b = r.run(&minified);
         assert_eq!((b.stdout.as_str(), b.sensor_degradado()), ("toString llamado\nfin\n", None), "sin esto el test no prueba nada");
         let mut st = Stats::default();
-        assert!(!compare_and_report(&ctx, &r, &mut st, Path::new("igual/input.js"), &original, &minified, a, false, false, &[], None));
+        assert!(!compare_and_report(&ctx, &r, &mut st, Path::new("igual/input.js"), &original, &minified, a, false, None, false, &[], None));
         assert_eq!((st.sensor_repetidos, st.divergences, st.a_nondet), (1, 0, 0));
         // Con un bug de verdad: div/, y el paso `sensor` en la traza de meta.txt.
         let bug = format!("{e}console.log(\"fin2\");\n");
         let a = r.run(&original);
-        assert!(compare_and_report(&ctx, &r, &mut st, Path::new("bug/input.js"), &original, &bug, a, false, false, &[], None));
+        assert!(compare_and_report(&ctx, &r, &mut st, Path::new("bug/input.js"), &original, &bug, a, false, None, false, &[], None));
         assert_eq!((st.sensor_repetidos, st.divergences), (2, 1));
         let meta = std::fs::read_to_string(d.join("div/bug/meta.txt")).unwrap();
         assert!(
@@ -2254,7 +2303,7 @@ mod tests {
         let mut st = Stats::default();
         let sin = r.sin_sensor();
         let a = sin.run(&original);
-        assert!(!compare_and_report(&ctx, &sin, &mut st, Path::new("swc/input.js"), &original, &minified, a, false, false, &[], None));
+        assert!(!compare_and_report(&ctx, &sin, &mut st, Path::new("swc/input.js"), &original, &minified, a, false, None, false, &[], None));
         assert_eq!(st.sensor_repetidos, 0);
         drop((sin, r));
         std::fs::remove_dir_all(&d).unwrap();
@@ -2308,24 +2357,24 @@ mod tests {
         let js = "console.log(1);\n";
         let mut st = Stats::default();
         let rel = Path::new("x/input.js");
-        assert!(!compare_and_report(&ctx, &r, &mut st, rel, js, js, a(), false, false, &[], None));
+        assert!(!compare_and_report(&ctx, &r, &mut st, rel, js, js, a(), false, None, false, &[], None));
         assert_eq!((st.identical, st.divergences), (1, 0));
         // En la pasada observada tambien se saltea, pero no se cuenta dos veces.
-        assert!(!compare_and_report(&ctx, &r, &mut st, rel, js, js, a(), false, true, &[], None));
+        assert!(!compare_and_report(&ctx, &r, &mut st, rel, js, js, a(), false, None, true, &[], None));
         assert_eq!(st.identical, 1);
         // Control: con un minificado distinto B si corre y diverge contra el A
         // inventado. M3: antes de reportar se corre A en fresco, que no da lo
         // inventado: el caso se cierra (true) como no determinista, no como div.
-        assert!(compare_and_report(&ctx, &r, &mut st, rel, js, "console.log(2);\n", a(), false, false, &[], None));
+        assert!(compare_and_report(&ctx, &r, &mut st, rel, js, "console.log(2);\n", a(), false, None, false, &[], None));
         assert_eq!((st.identical, st.divergences, st.a_nondet), (1, 0, 1));
         // Con el A real la divergencia se confirma.
         let real = r.run(js);
-        assert!(compare_and_report(&ctx, &r, &mut st, rel, js, "console.log(2);\n", real, false, false, &[], None));
+        assert!(compare_and_report(&ctx, &r, &mut st, rel, js, "console.log(2);\n", real, false, None, false, &[], None));
         assert_eq!((st.divergences, st.a_nondet), (1, 1));
         // M18 (a): una variante que diverge con el mismo kind que su base no se reporta.
         let mut sk = Stats { skip_kind: Some(oracle::Kind::Stdout), ..Stats::default() };
         let real = r.run(js);
-        assert!(compare_and_report(&ctx, &r, &mut sk, rel, js, "console.log(2);\n", real, false, false, &[], None));
+        assert!(compare_and_report(&ctx, &r, &mut sk, rel, js, "console.log(2);\n", real, false, None, false, &[], None));
         assert_eq!((sk.inherited, sk.divergences, sk.last_div), (1, 0, Some(oracle::Kind::Stdout)));
         std::fs::remove_dir_all(&d).unwrap();
     }
@@ -2352,10 +2401,10 @@ mod tests {
         // `coercion` es un flag estatico de todo el programa (05-coercion-miente).
         let o = "class P { toString() { return \"p\"; } }\nconsole.log(1);\n";
         let mut st = Stats::default();
-        assert!(compare_and_report(&ctx, &r, &mut st, Path::new("valido/input.js"), o, "console.log(2);\n", r.run(o), false, false, &["coercion"], None));
+        assert!(compare_and_report(&ctx, &r, &mut st, Path::new("valido/input.js"), o, "console.log(2);\n", r.run(o), false, None, false, &["coercion"], None));
         assert_eq!((st.known, st.divergences), (1, 0));
         let mut st = Stats::default();
-        assert!(compare_and_report(&ctx, &r, &mut st, Path::new("invalido/input.js"), o, "console.log(1;\n", r.run(o), false, false, &["coercion"], None));
+        assert!(compare_and_report(&ctx, &r, &mut st, Path::new("invalido/input.js"), o, "console.log(1;\n", r.run(o), false, None, false, &["coercion"], None));
         assert_eq!((st.known, st.divergences), (0, 1));
         let meta = std::fs::read_to_string(d.join("div/invalido/meta.txt")).unwrap();
         assert!(meta.contains("known: no\n") && meta.contains("nota: node --check rechaza el minificado"), "{meta}");
@@ -2720,7 +2769,7 @@ mod tests {
         let a = r.run(o);
         assert_eq!(a.flags, ["extends"], "sin esto el test no prueba nada");
         let mut st = Stats::default();
-        assert!(compare_and_report(&ctx, &r, &mut st, Path::new("x/input.js"), o, "console.log(2);\n", a, false, false, &["extends"], None));
+        assert!(compare_and_report(&ctx, &r, &mut st, Path::new("x/input.js"), o, "console.log(2);\n", a, false, None, false, &["extends"], None));
         assert_eq!(st.known + st.divergences, 1);
         let dest = if st.known == 1 { "known" } else { "div" };
         let meta = std::fs::read_to_string(d.join(dest).join("x/meta.txt")).unwrap();

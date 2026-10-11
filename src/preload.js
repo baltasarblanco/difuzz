@@ -52,8 +52,76 @@
       Object.defineProperty(obj, key, { value, writable: true, configurable: true, enumerable: true });
     } catch {}
   };
-  fix(process, 'pid', 4242);
-  fix(process, 'ppid', 4241);
+  // 7.2: pid y ppid inventados e IMPOSIBLES: mas que PID_MAX_LIMIT de Linux de 64 bits
+  // (4194304, include/linux/threads.h; pid_max no puede pasarlo), asi que ningun proceso
+  // los tiene y lo que se los pase al sistema (`process._debugProcess`, `os.getPriority`,
+  // `/proc/<pid>`) da ESRCH/ENOENT en vez de llegar a un proceso ajeno. Antes eran 4242 y
+  // 4241: sin --sandbox, `process.kill(process.pid, 'SIGTERM')` le pegaba al proceso 4242
+  // de la maquina, y con --sandbox el filtro de senales lo negaba (EPERM) y marcaba el caso.
+  // Enteros de 32 bits: `process.kill` rechaza un pid que no lo es.
+  const PID_FICTICIO = 4204242;
+  const PPID_FICTICIO = 4204241;
+  const pidReal = process.pid;
+  fix(process, 'pid', PID_FICTICIO);
+  fix(process, 'ppid', PPID_FICTICIO);
+  // 7.2: `process.kill` llama a `process._kill(pid, senal)` (node 24, la busca en cada
+  // llamada: MEDIDO con process.kill.toString()), que devuelve 0 o -errno. Se envuelve
+  // `_kill` y no `kill`: asi `process.kill` queda intacto (su toString, length, name y
+  // sus errores, que arma node con lo que devuelve `_kill`) y el camino directo por
+  // `process._kill` tambien pasa por aca. El pid ficticio (y su grupo, el negativo) pasa
+  // a ser el real: matarse, la senal 0 a si mismo y un handler propio andan como en node,
+  // y con --sandbox el filtro lo deja (no marca). El ppid ficticio (y su negativo) da
+  // ESRCH sin llamar al sistema: NUNCA el padre real (difuzz); es lo que da un pid que no
+  // existe aunque la senal sea invalida (MEDIDO: `_kill(<pid inexistente>, 999)` = -3).
+  // El resto, incluido 0 (el grupo propio), va tal cual. El pid se convierte como lo hace
+  // node (ToNumber y despues a int32: `_kill(pid + 2 ** 32, 0)` es `_kill(pid, 0)`,
+  // MEDIDO), una sola vez, y la senal la convierte node despues, en el mismo orden.
+  // Lo que el programa puede ver de `_kill` queda igual: nombre, length 0, sin
+  // `prototype`, no es constructor, el mismo descriptor y el toString nativo (ver el
+  // toString de abajo). Diferencia aceptada: un error al convertir el pid (un Symbol) trae
+  // un marco del preload en el stack.
+  let killReal = null;
+  let killPropio = null;
+  try {
+    const d = Object.getOwnPropertyDescriptor(process, '_kill');
+    if (d && 'value' in d && typeof d.value === 'function') {
+      const real = d.value;
+      const aplicar = Reflect.apply;
+      let esrch = -3;
+      try {
+        esrch = -require('os').constants.errno.ESRCH;
+      } catch {}
+      // 7.7 (MENOR 4): -EPERM del `_kill` nativo (UV_EPERM, -1 en Linux).
+      let eperm = -1;
+      try {
+        eperm = -require('os').constants.errno.EPERM;
+      } catch {}
+      const propio = {
+        _kill(pid, sig) {
+          let p = +pid | 0;
+          if (p !== pidReal && p !== -pidReal) {
+            if (p === PID_FICTICIO) p = pidReal;
+            else if (p === -PID_FICTICIO) p = -pidReal;
+            else if (p === PPID_FICTICIO || p === -PPID_FICTICIO) {
+              void +sig;
+              return esrch;
+            }
+          }
+          const r = aplicar(real, this, [p, sig]);
+          // 7.7 (MENOR 4): con --permission, un EPERM del `_kill` nativo es el filtro seccomp
+          // que nego la senal (runner::encerrar_senales): marca el caso aunque el programa no
+          // lance (`_kill` directo) o atrape el `kill EPERM` sin el sensor. `conPermisos` y
+          // `ctl` se definen mas abajo; aca solo se leen en la llamada, despues del preload.
+          if (r === eperm && conPermisos) ctl('sandbox');
+          return r;
+        },
+      }._kill;
+      Object.defineProperty(propio, 'length', { value: real.length });
+      Object.defineProperty(process, '_kill', { ...d, value: propio });
+      killReal = real;
+      killPropio = propio;
+    }
+  } catch {}
   // hrtime avanza 1 ms por llamada (un programa que mide un intervalo ve algo > 0).
   let hrNow = 0n;
   const HR_STEP = 1000000n;
@@ -167,7 +235,8 @@
     write(s);
   };
   // n-sandbox (`--sandbox`): un permiso que el modelo de permisos de node nego (ERR_ACCESS_DENIED;
-  // ERR_DLOPEN_DISABLED, el addon nativo; kill EPERM, una senal) va al canal como `sandbox`: si le paso al original,
+  // ERR_DLOPEN_DISABLED, el addon nativo; kill EPERM, una senal; uv_os_setpriority EPERM, la prioridad de otro
+  // proceso) va al canal como `sandbox`: si le paso al original,
   // runner::Exec::toco_sandbox lo ve y el caso va a descartes. Solo con --permission
   // (`process.permission` no existe sin el, MEDIDO node 24): sin el flag no se lee nada mas.
   // Sin getters ni trampas del programa: el descriptor propio (node pone `code` como dato, MEDIDO)
@@ -182,11 +251,47 @@
       const d = descriptorPropio(e, 'code');
       if (d && (d.value === 'ERR_ACCESS_DENIED' || d.value === 'ERR_DLOPEN_DISABLED')) ctl('sandbox');
       // 2b: una senal a otro proceso que el filtro seccomp nego (runner::encerrar_senales):
-      // `code` EPERM y `syscall` kill, los dos datos propios (MEDIDO node 24.14.1).
+      // `code` EPERM y `syscall` kill, los dos datos propios (MEDIDO node 24.14.1; tambien
+      // `process._debugProcess`, que lanza `EPERM, Operation not permitted` con `syscall` kill).
       const s = descriptorPropio(e, 'syscall');
       if (d && d.value === 'EPERM' && s && s.value === 'kill') ctl('sandbox');
+      // 7.7: `os.setPriority` a otro proceso, negado por el mismo filtro: SystemError con
+      // `code` ERR_SYSTEM_ERROR e `info` { code: 'EPERM', syscall: 'uv_os_setpriority' },
+      // todos datos propios (MEDIDO node 24.14.1; `errno` y `syscall` del error son getters).
+      const info = descriptorPropio(e, 'info');
+      const i = info && info.value;
+      if (d && d.value === 'ERR_SYSTEM_ERROR' && i !== null && typeof i === 'object' && !esProxy(i)) {
+        const ic = descriptorPropio(i, 'code');
+        const is = descriptorPropio(i, 'syscall');
+        if (ic && ic.value === 'EPERM' && is && is.value === 'uv_os_setpriority') ctl('sandbox');
+      }
     } catch {}
   };
+  // 7.7 (revision fe0cd86, MENOR 4): las senales negadas que el programa atrapa sin el
+  // sensor. `process._kill` (que no lanza) marca en su envoltorio (7.2, arriba).
+  // `process._debugProcess` (SIGUSR1 a otro pid) lanza `EPERM, Operation not permitted`
+  // con `syscall` kill. Envuelto solo con --permission (sin el, ni se toca), con los mismos
+  // atributos y `length` (0) que el de node.
+  if (conPermisos) {
+    const aplicar = Reflect.apply;
+    const envolver = (key, hacer) => {
+      try {
+        const desc = descriptorPropio(process, key);
+        if (!desc || typeof desc.value !== 'function') return;
+        Object.defineProperty(process, key, { ...desc, value: hacer(desc.value) });
+      } catch {}
+    };
+    envolver('_debugProcess', (real) => ({
+      _debugProcess(...args) {
+        try {
+          return aplicar(real, this, args);
+        } catch (e) {
+          notarSandbox(e);
+          throw e;
+        }
+      },
+    })._debugProcess);
+  }
 
   // --- Sensor de asunciones ---------------------------------------------------
   const flags = new Set();
@@ -204,7 +309,8 @@
     value: {
       toString() {
         flags.add('fn_tostring');
-        const s = realToString.call(this);
+        // 7.2: `process._kill` envuelto se ve como el nativo.
+        const s = realToString.call(killPropio !== null && this === killPropio ? killReal : this);
         if (FIJO) return 'function () { [native code] }';
         return SALT ? `${s}/*dz*/` : s;
       },
@@ -1091,6 +1197,11 @@
       ['symbol', /^TypeError: Cannot convert a Symbol value to a/],
       ['extends', /^TypeError: Class extends value/],
     ];
+    // n-sandbox: el comienzo de la descripcion (el stack) de un error que el sandbox provoco.
+    // La del SystemError de `os.setPriority` llega sin el `[ERR_SYSTEM_ERROR]` (MEDIDO node
+    // 24.14.1: `SystemError: A system error occurred: uv_os_setpriority returned EPERM ...`).
+    const SANDBOX_DESC =
+      /^(Error: (Access to this API has been restricted|kill EPERM)|SystemError( \[ERR_SYSTEM_ERROR\])?: A system error occurred: uv_os_setpriority returned EPERM)/;
     // `callFrames[].url` llega vacio (MEDIDO, node 24): la url sale de scriptParsed. Solo
     // los file: (el programa, el envoltorio del carril B y este preload); eval no.
     const urls = new Map();
@@ -1110,7 +1221,8 @@
         // n-sandbox: un permiso denegado que el programa atrapa (lo lanza node desde adentro:
         // el marco de arriba no es file:, por eso va antes del filtro de url). 2b: y una senal
         // a otro proceso que el filtro seccomp nego (`Error: kill EPERM`, MEDIDO node 24.14.1).
-        if (conPermisos && (p.reason === 'exception' || p.reason === 'promiseRejection') && /^Error: (Access to this API has been restricted|kill EPERM)/.test(desc)) ctl('sandbox');
+        // 7.7: y `os.setPriority` a otro proceso, negado por el mismo filtro.
+        if (conPermisos && (p.reason === 'exception' || p.reason === 'promiseRejection') && SANDBOX_DESC.test(desc)) ctl('sandbox');
         if ((p.reason === 'exception' || p.reason === 'promiseRejection') && url && url !== PRELOAD_URL) {
           for (const [k, re] of DESC) {
             if (re.test(desc)) {
