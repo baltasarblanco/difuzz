@@ -238,7 +238,15 @@ se comparte con las corridas sin sandbox y al terminar se imprime (y queda en `C
 línea `sandbox: modo=... descartados=N solo_original=M ambos=K corto=J` (`N`: casos descartados por eso;
 `M` y `K`: pasadas en que solo el original, o los dos, tocaron el sandbox y se compararon, también
 las de las variantes de `--mutaciones`; en el carril B, un módulo mudo puede sumar dos: la pasada
-cruda y la del envoltorio de módulos; `J`: casos y variantes descartados con causa
+cruda y la del envoltorio de módulos; un mudo, una por cada pasada que lo tocó entre la cruda, la
+observada, la de `--invocar` y la de bloques, porque cada una corre A y B de nuevo. Con
+`--sandbox-red`, "tocó" incluye una salida que imprime el nombre de un error de red
+(`ECONNREFUSED`, `EHOSTUNREACH`, `ENETUNREACH`, `ENOTFOUND`, `EAI_AGAIN`): es una sobre-aproximación
+por texto. Por ejemplo, un mudo que guarda `require('node:constants')` en un binding (los nombres de
+errno están entre sus claves) suma 1 por la pasada observada y 1 más con `--invocar`, que lo vuelve
+a imprimir: así da `ambos=2` con `--invocar --stubs --sandbox-red` el caso `cjs/00490` del corpus real
+(`signal-exit/all-signals.js`; 9.4, medido).
+Esas pasadas se comparan igual, con la nota; `J`: casos y variantes descartados con causa
 `sandbox_corto`, que también cuentan en `K` porque los dos tocaron el sandbox). Una variante
 `sandbox_corto` tiene su fila en `descartes.tsv`, cuenta en `original=` de las mutaciones y no
 cuenta como comparada.
