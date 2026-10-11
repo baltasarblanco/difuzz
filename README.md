@@ -615,6 +615,15 @@ Principios:
   `//# sourceURL=x.js` que lanza y atrapa queda anotado aunque el programa nunca lea un stack, y
   una línea impresa con `x.js:L:C` da `iguales` aunque la posición cambie (MEDIDO, revisión de la
   integración del bloque 7).
+- **Los nombres de funciones y clases que imprime `util.inspect`** (`[Function: f]`,
+  `[class A]`, ...): la comparación los borra en todas las celdas (`oracle::normalize_names`,
+  `src/oracle.rs:90`, desde `compare` en `src/oracle.rs:53`), porque `hoist_props` y los nombres
+  inferidos los cambian sin que sea un bug. Con keep_names (carril_a) eso tapa un bug de
+  keep_names impreso así: `console.log(handler)` con `handler` un parámetro con default anónimo
+  que oxc 0.153.0 manglea da `[Function: handler]` contra `[Function: e]` y va a `iguales` en las 4
+  celdas de oxc (MEDIDO, H3 de la revisión del bloque 8, repro `b03-keepnames-inspect-previo`). Es
+  previo al bloque 8 y no se cambió: hacerlo depende del preset y toca el oráculo entero. El mismo
+  bug impreso como texto (`handler.name`) sí va a `div/` en carril_a.
 - **El sensor de violaciones atrapadas se apaga a las 256 pausas** (`MAX_PAUSAS` en el preload):
   cada excepción atrapada lo pausa y cuesta de 0,5 ms (sin marcos) a 1,4 ms (50 marcos de
   profundidad); sin tope, 10 000 excepciones atrapadas tardan de 5 a 15 s y llegan al timeout por
