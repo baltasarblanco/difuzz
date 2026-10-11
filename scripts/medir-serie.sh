@@ -25,9 +25,15 @@
 #               de los fixtures de SWC es <clon de swc>/crates/swc_ecma_minifier/tests
 #   -h, --help  esta ayuda (sale con 0)
 # Escribe en dir_salida: bin-<c>, build-<c>.log, run-<c>.log, stats-<c>.txt, out-<c>/.
+# Sale con 2 por argumentos (9.4: antes una opcion o un argumento de mas se tomaban en silencio) y con
+# 1 si un commit no se pudo medir (no compila, no recompilo o su binario salio con error; 9.4: antes 0).
 set -u
-case ${1:-} in -h|--help) rg '^#( |$)' -N "$0" | rg -v '^#!'; exit 0;; esac
+case ${1:-} in
+  -h|--help) rg '^#( |$)' -N "$0" | rg -v '^#!'; exit 0;;
+  -*) echo "opcion desconocida: $1 (ver --help)" >&2; exit 2;;
+esac
 [ -n "${1:-}" ] || { echo "falta RANGO: uso: medir-serie.sh RANGO [dir_salida] (ver --help)" >&2; exit 2; }
+(($# <= 2)) || { echo "sobra: ${*:3} (uso: medir-serie.sh RANGO [dir_salida]; ver --help)" >&2; exit 2; }
 RANGO=$1
 OUT=${2:-out-serie}
 REPO=${REPO:-$(dirname "$0")/..}
@@ -40,6 +46,7 @@ TARGET=${TARGET:-$OUT/target}
 
 commits=$(git -C "$REPO" rev-list --reverse "$RANGO") || exit 1
 [ -n "$commits" ] || { echo "rango vacio: $RANGO"; exit 1; }
+fallos=0
 for c in $commits; do
   c=$(git -C "$REPO" rev-parse --short "$c")
   echo "=== $c $(git -C "$REPO" log -1 --format=%s "$c")"
@@ -47,12 +54,12 @@ for c in $commits; do
   rm -rf "$src" && mkdir -p "$src"
   # -m: mtime de ahora, no la del commit (si no, cargo puede dar por fresco un
   # src-<c> re-extraido y no recompilar).
-  git -C "$REPO" archive "$c" | tar -x -m -C "$src" || { echo "  git archive fallo"; break; }
+  git -C "$REPO" archive "$c" | tar -x -m -C "$src" || { echo "  git archive fallo"; fallos=1; break; }
   if ! CARGO_TARGET_DIR="$TARGET" cargo build --release --manifest-path "$src/Cargo.toml" > "$OUT/build-$c.log" 2>&1; then
-    echo "  NO COMPILA: ver $OUT/build-$c.log"; tail -20 "$OUT/build-$c.log"; break
+    echo "  NO COMPILA: ver $OUT/build-$c.log"; tail -20 "$OUT/build-$c.log"; fallos=1; break
   fi
   if [[ $(< "$OUT/build-$c.log") != *"Compiling difuzz"* ]]; then
-    echo "  NO RECOMPILO difuzz: el binario seria el de otro commit"; break
+    echo "  NO RECOMPILO difuzz: el binario seria el de otro commit"; fallos=1; break
   fi
   cp "$TARGET/release/difuzz" "$OUT/bin-$c"
   # ARGS sin comillas a proposito: se parte en palabras.
@@ -62,7 +69,9 @@ for c in $commits; do
   if [ "$rc" -ne 0 ]; then
     echo "  el binario salio con $rc (opcion que ese commit no conoce?): ver $OUT/run-$c.log"
     tail -3 "$OUT/run-$c.log"
+    fallos=1
     continue
   fi
   printf '%s\n' "$(< "$OUT/stats-$c.txt")"
 done
+exit "$fallos"

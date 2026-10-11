@@ -13,8 +13,14 @@
 #   CORPUS  obligatoria (si falta, se usa DIFUZZ_CORPUS; sin ninguna de las dos sale con 2). El de los
 #           fixtures de SWC es <clon de swc>/crates/swc_ecma_minifier/tests
 #   -h, --help  esta ayuda (sale con 0)
+# Sale con 2 por argumentos (9.4: antes una opcion o un argumento de mas se tomaban en silencio), con
+# 1 si difuzz fallo en alguna celda (9.4: antes solo contaba el --cruce) y si no, con el del --cruce.
 set -u
-case ${1:-} in -h|--help) rg '^#( |$)' -N "$0" | rg -v '^#!'; exit 0;; esac
+case ${1:-} in
+  -h|--help) rg '^#( |$)' -N "$0" | rg -v '^#!'; exit 0;;
+  -*) echo "opcion desconocida: $1 (este script no pasa opciones a difuzz; ver --help)" >&2; exit 2;;
+esac
+(($# <= 1)) || { echo "sobra: ${*:2} (uso: matriz.sh [dir_salida]; ver --help)" >&2; exit 2; }
 BIN=${BIN:-$(dirname "$0")/../target/release/difuzz}
 CORPUS=${CORPUS:-${DIFUZZ_CORPUS:-}}
 [ -n "$CORPUS" ] || { echo "falta el corpus: CORPUS=DIR o DIFUZZ_CORPUS=DIR (ver --help)" >&2; exit 2; }
@@ -22,16 +28,22 @@ MIN=${MIN:-oxc}
 CARRIL=${CARRIL:-a}
 OUT=${1:-out-matriz}
 CELLS=(core_defaults+en_funcion core_defaults+tal_cual carril_a+en_funcion carril_a+tal_cual)
-mkdir -p "$OUT"
+mkdir -p "$OUT" || exit 2
+fallos=0
 for cell in "${CELLS[@]}"; do
   echo "=== $MIN $cell carril $CARRIL"
   "$BIN" "$CORPUS" --minifier "$MIN" --carril "$CARRIL" --config "${cell%+*}" --forma "${cell#*+}" \
     --out "$OUT" --cache "$OUT/cache-a" --indice "$OUT/indice" \
     2> "$OUT/$cell.log" > "$OUT/$cell.stats"
+  rc=$?
   printf '%s\n' "$(< "$OUT/$cell.stats")"
+  ((rc == 0)) || { echo "  difuzz salio con $rc: ver $OUT/$cell.log"; fallos=$((fallos + 1)); }
 done
 
 echo
 echo "=== <backend> C=core_defaults, A=carril_a; fn=en_funcion, tc=tal_cual; B=carril_b"
 echo "    letra por celda = kind (ver la leyenda de --cruce); C.fn o C.tc = uso comun por construccion"
 "$BIN" --cruce "$OUT/indice"
+rc=$?
+((fallos == 0)) || { echo "difuzz fallo en $fallos de ${#CELLS[@]} celdas" >&2; exit 1; }
+exit "$rc"
