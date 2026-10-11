@@ -207,6 +207,10 @@ una nota en `meta.txt`:
   addons, WASI, señales, carril B y `--invocar`; red, DNS y `fetch` con `--sandbox-red`), en oxc y
   swc, 3 veces cada uno: ninguno fue a `div/` por el sandbox. Uno que imprime `e.stack` va a `div/`
   en `core_defaults` igual que sin sandbox (lo cambian los nombres acortados, no el sandbox).
+  Límite: si el permiso negado no se atrapa y mata a los dos en el mismo punto, A y B dan lo
+  mismo y el caso cuenta como igual (y en `ambos=`) aunque el resto del programa no haya corrido
+  en ninguno de los dos; antes de 7.9 iba a `descartes.tsv`. No inventa divergencias, pero lo que
+  sigue a ese punto queda sin probar.
 - **solo el original** (`sandbox: solo el original toco el sandbox`): con el bug, el minificado no
   llega a abrir el archivo. Es un cambio de comportamiento.
 
@@ -433,9 +437,13 @@ Principios:
     (`function max() { [native code] }`): es el mismo en A y en B.
   - para contenido y solo sloppy, que no tienen un sensor de uso completo (el texto de una
     función del programa es justo lo que lee un positivo como `String(f)`; el `arguments` atado a
-    los parámetros), un `Explica` se confirma con el original **salado**: cada literal de cadena
+    los parámetros; profundidad no tiene ninguno: ver Límites conocidos), un `Explica` se confirma con el original **salado**: cada literal de cadena
     en posición de dato con `dz` al final, minificado igual, y el mismo re-chequeo tiene que dar
-    `Explica` también ahí (con otro valor por defecto la coincidencia se rompe). Sin literales que
+    `Explica` también ahí (con otro valor por defecto la coincidencia se rompe). La sal toca solo
+    literales de cadena (y plantillas sin expresiones) que sean elemento de un arreglo, valor de
+    una propiedad, inicializador de una declaración, lado derecho de una asignación u objeto de un
+    acceso (`"abc".substring`); no toca los demás (argumentos, comparaciones, claves, `return`,
+    ramas de `?:` o de `||`) ni números, booleanos o `null` (ver Límites conocidos). Sin literales que
     salar, no cambia nada. Si el original salado ya no diverge, la sal cambió el camino (un
     literal que guarda la rama del bug, `modo === "x" ? bug : ...`): inconcluso, porque el salado
     no confirma nada.
@@ -462,13 +470,26 @@ Principios:
     `"abc".substring(1, undefined)`) y borra la rama entera; B ya no toca la asunción y da el valor
     por defecto, como un minificado que la aprovechó. Desde B no se distingue.
   - una dependencia por datos de una asunción sin sensor de uso completo cuyo valor por defecto
-    no sale de un literal de cadena: el `arguments` atado o el texto de una función del programa
-    elegidos por datos contra un valor calculado (`[].join()`); la sal no lo cambia. Medido con
+    la sal no cambia: un valor calculado (`[].join()`), un literal fuera de las posiciones que se
+    salan (`elegir("", bug, cond)`) o un número, booleano o `null` (`[0, bug.length]`); la asunción
+    es el `arguments` atado o el texto de una función del programa, elegidos por datos. Medido con
     oxc 0.153.0 en las 8 celdas de la revisión de 7.1b, con B ejecutando el bug, en `known/`: el
     `arguments` atado contra `[].join()` (4 filas: las de carril A), el texto de una función (8) y,
     de sloppy, una función declarada en un bloque (Anexo B: `typeof fb` fuera del bloque, 4 filas;
-    otra diferencia de sloppy sin sensor, además del `this`). Con un literal en lugar de
-    `[].join()` van a `div/`.
+    otra diferencia de sloppy sin sensor, además del `this`). En la revisión final del bloque 7
+    (oxc 0.153.0, 8 celdas, B ejecutando el bug, igual que `fe0cd86`), también en `known/`: el
+    texto de una función con `""` como argumento (8 filas), el `arguments` atado con `""` como
+    argumento (4) y el texto de una función con valor por defecto `0` (8). Con un literal de cadena
+    en posición de dato (`["", bug][i]`) van a `div/`.
+  - la profundidad, cuando la salida depende como dato de un desborde de pila **nativo** (por
+    ejemplo, si `JSON.stringify` de un arreglo anidado 7000 veces lanzó o no): el re-chequeo de
+    profundidad no tiene sensor de uso ni confirmación salada, y con una recursión nativa B
+    recorre los mismos bloques con y sin más pila, así que su camino no cambia. Si el bug deja en
+    B el mismo valor que A con más pila, se explica por el límite de pila y va a `known/` (medido
+    en la revisión final del bloque 7: con `.then(JSON.stringify)` en las 8 celdas y con
+    `try`/`throw` en `a/core_defaults`, la única en que se probó, también con `--sandbox`,
+    `--sandbox-red` e `--invocar`; igual que `fe0cd86`). Con una recursión de JS la cobertura
+    cambia y va a `div/`.
   - el sensor de uso de `global_conocido` ve lecturas (`typeof`, `window`, `globalThis.window`),
     no `"window" in globalThis` ni `hasOwnProperty`; el de `builtins`, lecturas después de pisar
     (si el programa redefine o borra la propiedad, inconcluso); el de coerción, las definiciones
@@ -691,8 +712,9 @@ Con `--sandbox-red`, un `require` de un directorio (`require('..')`, `require('.
 lea un `package.json` fuera de lo permitido y lance `ERR_ACCESS_DENIED` (no `MODULE_NOT_FOUND`, así
 que `--stubs` no lo cubre). Pasa igual en el original y en el minificado: el caso se compara con la
 nota de los dos y cuenta en `ambos=` (ver [Sandbox](#sandbox)); si el programa no atrapa el error,
-lo que sigue al `require` no corre. En el pool local son 968 de 18 749 casos, que antes de 7.9 iban
-a `descartes.tsv` con causa `sandbox`.
+lo que sigue al `require` no corre en ninguno de los dos y el caso cuenta como igual sin que se
+pruebe lo que sigue (el límite de la sección Sandbox). En el pool local son 968 de 18 749 casos,
+que antes de 7.9 iban a `descartes.tsv` con causa `sandbox`.
 
 Para triar un `div/` contra los bugs ya conocidos, el método que se usó es neutralizar cada familia
 del catálogo (pasar el valor por una identidad opaca para oxc) y volver a correr: la familia que,
