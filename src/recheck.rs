@@ -301,7 +301,9 @@ pub fn camino_sensor_i3(sin: &runner::Runner, con: &runner::Runner, minified: &s
         Ok(t) => t,
         Err(c) => return c,
     };
-    let c = con.run_con_cobertura(&texto, &[], &con_ganchos(&[("DIFUZZ_MAX_PAUSAS", runner::MAX_PAUSAS_MAYOR)], ganchos));
+    // 8.7: con el sensor entero (sin el pre-filtro perezoso): perezosa, una TDZ que B atrapa con
+    // algo que `puede_atrapar` no ve en el texto no dejaba `viol` y el camino daba Igual.
+    let c = con.sensor_entero().run_con_cobertura(&texto, &[], &con_ganchos(&[("DIFUZZ_MAX_PAUSAS", runner::MAX_PAUSAS_MAYOR)], ganchos));
     if let Some(d) = c.sensor_degradado() {
         return Camino::NoSe(format!(
             "A y B se compararon sin el sensor (I3) y B con el sensor (tope {}) tampoco corrio entero ({d})",
@@ -326,9 +328,15 @@ pub fn camino_sensor_i3(sin: &runner::Runner, con: &runner::Runner, minified: &s
 
 /// Integracion 7.1 + 7.4: el camino de B por el sensor. `i3`: el runner con el sensor y el
 /// minificado, si A y B se compararon sin el sensor (I3); `r` es entonces el runner sin el.
-pub fn camino_de_b(r: &runner::Runner, i3: Option<(&runner::Runner, &str)>, b: &runner::Exec, clases: Option<&[&str]>) -> Camino {
+/// 8.7: si B corrio con el sensor perezoso (`runner::puede_atrapar(minified)` dio false, ver
+/// `Runner::run_inner`), sus lineas `viol` no son las del sensor entero: un falso negativo del
+/// pre-filtro (algo que atrapa armado en runtime) mandaba a known/ un bug en el catch de la
+/// violacion (MEDIDO, 8.7/repro p01). Se busca como en I3: B otra vez con el sensor entero y
+/// sin el, con cobertura (`camino_sensor_i3`). 2 node, solo cuando lo demas ya daba Explica.
+pub fn camino_de_b(r: &runner::Runner, i3: Option<&runner::Runner>, minified: &str, b: &runner::Exec, clases: Option<&[&str]>) -> Camino {
     match i3 {
-        Some((con, minified)) if !r.con_sensor() => camino_sensor_i3(r, con, minified, b, clases),
+        Some(con) if !r.con_sensor() => camino_sensor_i3(r, con, minified, b, clases),
+        _ if r.con_sensor() && !runner::puede_atrapar(minified) => camino_sensor_i3(&r.sin_sensor(), r, minified, b, clases),
         _ => camino_sensor(b, r.con_sensor(), clases),
     }
 }
@@ -1256,15 +1264,17 @@ pub fn violaciones(a: &runner::Exec) -> Vec<&str> {
 /// divergiendo por otra y el veredicto dependeria del orden.
 /// n-principio (n06/n07/n10/n11/n12/n17/n18: el bug en el catch de la violacion, que en
 /// A' no corre): rige `veredicto_neutralizado`, B tiene que dar lo mismo que A'.
-/// `i3` (integracion 7.1 + 7.4): el runner con el sensor y el minificado si A y B se
-/// compararon sin el sensor (`camino_de_b`).
+/// `i3` (integracion 7.1 + 7.4): el runner con el sensor si A y B se compararon sin el
+/// sensor (`camino_de_b`). 8.7: `minified`, el texto de B (para su camino).
+#[allow(clippy::too_many_arguments)]
 pub fn violaciones_matter(
     r: &runner::Runner,
     recheck: (backend::Minifier, minify::Preset, SourceKind),
     original: &str,
+    minified: &str,
     a: &runner::Exec,
     b: &runner::Exec,
-    i3: Option<(&runner::Runner, &str)>,
+    i3: Option<&runner::Runner>,
 ) -> Recheck {
     let (minifier, preset, kind) = recheck;
     let v = violaciones(a);
@@ -1296,7 +1306,7 @@ pub fn violaciones_matter(
     let b2 = r.run(&m2);
     // b7-1 (r01/r03/r09: la TDZ o la coercion de Symbol que B todavia hace, con el bug en el
     // catch): el sensor no tiene que ver en B ninguna violacion.
-    veredicto_neutralizado(a, b, &a2, &b2, None, || camino_de_b(r, i3, b, None))
+    veredicto_neutralizado(a, b, &a2, &b2, None, || camino_de_b(r, i3, minified, b, None))
 }
 
 /// b4-a: el programa con cada violacion de `spec` (`<clase> <linea>:<columna>`,
@@ -2745,9 +2755,19 @@ mod tests {
         let (o, m, a, b) = ab(&format!("let s = \"\";\nconst o = {{ valueOf() {{ {bug} return 1; }} }};\nif (o + 1 === 0) s = \"q\";\nconsole.log(JSON.stringify(s));\n"));
         let c = coercion_matters(&r, rc, &o, &m, &a, &b);
         assert!(todavia(c.clone()), "r07: {c:?}");
-        let (o, _, a, b) = ab(&format!("let s = \"\";\ntry {{ if (String(x) === \"zz\") s = \"q\"; }} catch (e) {{ {bug} }}\nconsole.log(JSON.stringify(s));\nlet x = 1;\n"));
-        let v = violaciones_matter(&r, rc, &o, &a, &b, None);
+        let (o, m, a, b) = ab(&format!("let s = \"\";\ntry {{ if (String(x) === \"zz\") s = \"q\"; }} catch (e) {{ {bug} }}\nconsole.log(JSON.stringify(s));\nlet x = 1;\n"));
+        let v = violaciones_matter(&r, rc, &o, &m, &a, &b, None);
         assert!(todavia(v.clone()), "r01: {v:?}");
+        // 8.7: r01 con el try armado en runtime (`atob`) y un try muerto que oxc borra: A corre
+        // con el sensor entero y B perezoso (`puede_atrapar` no ve nada en el minificado). B
+        // perezoso no deja `viol`; antes Explica (known/), ahora el camino sale de B con el
+        // sensor entero.
+        let oculto = "(() => {}).constructor(\"f\", \"h\", atob(\"dHJ5IHsgZigpOyB9IGNhdGNoIChlKSB7IGgoKTsgfQ==\"))(f, h);";
+        let (o, m, a, b) = ab(&format!("if (false) {{ try {{}} catch (e) {{}} }}\nlet s = \"\";\nconst f = () => {{ if (String(x) === \"zz\") s = \"q\"; }};\nconst h = () => {{ {bug} }};\n{oculto}\nconsole.log(JSON.stringify(s));\nlet x = 1;\n"));
+        assert!(crate::runner::puede_atrapar(&o) && !crate::runner::puede_atrapar(&m), "{m}");
+        assert!(!b.ctl.lines().any(|l| l.starts_with("viol ")) && a.flags.iter().any(|f| f == "tdz_atrapada"), "{}\n{}", a.ctl, b.ctl);
+        let v = violaciones_matter(&r, rc, &o, &m, &a, &b, None);
+        assert!(todavia(v.clone()), "8.7 p01: {v:?}");
         // Positivos (03-global-positivo y keep_comparisons): B ya no depende de la asuncion.
         let o = "try { window; console.log(\"hay window\"); } catch (e) { console.log(\"no hay\"); }\n";
         let m = "console.log(`hay window`);\n";
@@ -2937,7 +2957,7 @@ mod tests {
                 panic!("no minifica: {src}");
             };
             let (a, b) = (r.run(&original), r.run(&minified));
-            let rc = violaciones_matter(&r, (Minifier::Oxc, Preset::CoreDefaults, SourceKind::Script), &original, &a, &b, None);
+            let rc = violaciones_matter(&r, (Minifier::Oxc, Preset::CoreDefaults, SourceKind::Script), &original, &minified, &a, &b, None);
             (a, b, rc)
         };
         let bug = "console.log(delete (0 / 0));\n";
@@ -2982,7 +3002,7 @@ mod tests {
         // Sin violacion ubicada (coercion de Symbol no atrapada sin marcos) no hay
         // re-chequeo posible: inconcluso.
         let a = r.run("console.log(1);\n");
-        let rc = violaciones_matter(&r, (Minifier::Oxc, Preset::CoreDefaults, SourceKind::Script), "console.log(1);\n", &a, &a, None);
+        let rc = violaciones_matter(&r, (Minifier::Oxc, Preset::CoreDefaults, SourceKind::Script), "console.log(1);\n", "console.log(1);\n", &a, &a, None);
         assert!(matches!(rc, Recheck::Inconcluso(_)), "{rc:?}");
     }
 

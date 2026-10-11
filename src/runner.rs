@@ -401,6 +401,9 @@ pub struct Runner {
     sandbox: Sandbox,
     /// b7-8: sin el sensor por el patron del bug de V8 (`sin_sensor_por_riesgo`).
     omitido: bool,
+    /// 8.7: con el sensor prendido desde el arranque aunque `puede_atrapar` diga que no
+    /// (`sensor_entero`). No prende nada si `sensor` es false (ni con `omitido`).
+    entero: bool,
     /// Copia que comparte los archivos del runner original (`observing`,
     /// `sin_sensor`): al soltarse no borra nada.
     prestado: bool,
@@ -426,6 +429,7 @@ impl Runner {
             sensor: true,
             sandbox: Sandbox::Apagado,
             omitido: false,
+            entero: false,
             prestado: false,
         }
     }
@@ -490,6 +494,16 @@ impl Runner {
         self.omitido
     }
 
+    /// 8.7: el mismo runner con el sensor prendido desde el arranque, sin el pre-filtro
+    /// perezoso (`puede_atrapar`). Para el camino de B (`recheck::camino_de_b`): un falso
+    /// negativo del pre-filtro sobre el minificado (nombres armados en runtime) dejaba a B sin
+    /// las lineas `viol` de lo que atrapa. Sin el sensor (`sin_sensor`, `omitido`) no cambia nada.
+    pub fn sensor_entero(&self) -> Runner {
+        let mut r = self.prestar();
+        r.entero = true;
+        r
+    }
+
     /// Copia que usa los mismos archivos y no los borra al soltarse.
     fn prestar(&self) -> Runner {
         Runner {
@@ -506,6 +520,7 @@ impl Runner {
             sensor: self.sensor,
             sandbox: self.sandbox,
             omitido: self.omitido,
+            entero: self.entero,
             prestado: true,
         }
     }
@@ -671,7 +686,7 @@ impl Runner {
             return e;
         }
         let opts = Opts { sin_sensor: opts.sin_sensor || !self.sensor, ..opts };
-        let opts = Opts { perezoso: !opts.sin_sensor && !puede_atrapar(js), ..opts };
+        let opts = Opts { perezoso: !opts.sin_sensor && !self.entero && !puede_atrapar(js), ..opts };
         let e = self.run_once(js, opts);
         if !matches!(e.status, Status::Signal | Status::Timeout) || opts.sin_sensor {
             return e;

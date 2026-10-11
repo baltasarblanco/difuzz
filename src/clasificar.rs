@@ -137,7 +137,6 @@ pub fn clasificar<'a>(
     // camino de B sale de ahi (`recheck::camino_de_b`).
     i3_con: Option<&runner::Runner>,
 ) -> Clasificacion<'a> {
-    let i3 = i3_con.map(|c| (c, minified));
     let mut traza = Traza::default();
     let mut flags: Vec<&str> = a.flags.iter().map(String::as_str).collect();
     flags.extend_from_slice(static_flags);
@@ -261,7 +260,7 @@ pub fn clasificar<'a>(
     let rc = ctx.medido.filter(|m| m.rechequea(Rechequeo::Extends));
     if flags.contains(&"extends") {
         if let Some(rc) = rc {
-            let r = extends_matters(runner, rc, original, a, b, || recheck::camino_de_b(runner, i3, b, Some(&["extends"])));
+            let r = extends_matters(runner, rc, original, a, b, || recheck::camino_de_b(runner, i3_con, minified, b, Some(&["extends"])));
             rechequear(&mut flags, &mut notes, &mut traza, "extends", ("extends_irrelevante", "extends_inconcluso"), r);
         }
     }
@@ -288,7 +287,7 @@ pub fn clasificar<'a>(
         let nombres: Vec<&'static str> =
             recheck::FLAGS_VIOLACION.iter().map(|(f, _)| *f).filter(|f| flags.contains(f)).collect();
         if !nombres.is_empty() && rc.rechequea(Rechequeo::Violaciones) {
-            let r = recheck::violaciones_matter(runner, (rc.minifier, rc.preset, rc.kind), original, a, b, i3);
+            let r = recheck::violaciones_matter(runner, (rc.minifier, rc.preset, rc.kind), original, minified, a, b, i3_con);
             let t = match &r {
                 recheck::Recheck::Explica => format!("Explica (quedan {})", nombres.join(", ")),
                 recheck::Recheck::NoExplica => format!("NoExplica -> {}_irrelevante", nombres.join("_irrelevante, ")),

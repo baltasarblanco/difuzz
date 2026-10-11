@@ -636,6 +636,13 @@ Principios:
   (inconcluso). Cuesta 2 node más, uno de ellos con el sensor y hasta 4096 pausas: con muchos
   marcos puede llegar al timeout (y entonces node se repite sin el sensor, un node más) y el
   positivo se pierde. Una violación de A atrapada después del tope no se ve: el caso va a `div/`.
+  Lo mismo cuando B corrió con el sensor **perezoso** (8.7): si el minificado no tiene a la vista
+  nada que pueda atrapar (`runner::puede_atrapar`), B corre sin prender el sensor y no deja líneas
+  `viol`, y un `try` armado en runtime que atrapa la violación no se veía: un bug en ese `catch`
+  iba a `known/`. Ahora, si todo lo demás ya da `Explica`, el camino de ese B se busca como acá
+  (B con el sensor entero, sin el pre-filtro, y B sin el sensor, con la misma cobertura): los
+  mismos 2 node más. La corrida con el sensor de este camino, también la de I3, va siempre con el
+  sensor entero (`Runner::sensor_entero`).
 - **Un minificado que node no acepta nunca se explica con una asunción**: ninguna permite
   producir código inválido.
 - **Una conocida que cambia de síntoma vuelve a `div/`** (se compara contra
@@ -689,8 +696,8 @@ Sin `node` en el `PATH`, los tests que lo necesitan fallan con un mensaje claro.
 
 - **Golden de detección** (`tests/golden/`): 16 casos con bugs conocidos de oxc y swc, en 8
   celdas, más `--invocar` y `--stubs`; la clase esperada de cada caso está en `esperado.tsv`.
-- **Aceptación de los re-chequeos** (`tests/aceptacion/rechequeos/`): 151 casos que combinan un
-  bug real de oxc con un flag de asunción, en las 4 celdas de oxc (604 comparaciones).
+- **Aceptación de los re-chequeos** (`tests/aceptacion/rechequeos/`): 153 casos que combinan un
+  bug real de oxc con un flag de asunción, en las 4 celdas de oxc (612 comparaciones).
 
 ```sh
 tests/golden/verificar.sh --jobs 4                    # sale con 0 y "comparaciones=N fallas=0"

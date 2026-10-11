@@ -726,3 +726,16 @@
 24-b83h1-n03-name-sin-palabra	oxc-a-carril_a	div:Stdout
 24-b83h1-n03-name-sin-palabra	oxc-b-core_defaults	known
 24-b83h1-n03-name-sin-palabra	oxc-b-carril_a	div:Stdout
+# 8.7 (sensor perezoso en B): la TDZ atrapada por un try armado en runtime (atob + (() => {}).constructor) y un
+# try muerto que oxc borra: A corre con el sensor entero, B perezoso (runner::puede_atrapar no ve nada en el
+# minificado) y sin lineas viol. El bug F (substring) en el catch deja B == A' == B'. Con 90cd16b: known/ en las 4
+# celdas (n01 por camino_sensor, n02 por I3: 300 TDZ atrapadas, sensor_tope). Ahora el camino de B sale de B con
+# el sensor entero (recheck::camino_de_b, camino_sensor_i3): div/.
+24-b87-n01-tdz-catch-oculto	oxc-a-core_defaults	div:Stdout
+24-b87-n01-tdz-catch-oculto	oxc-a-carril_a	div:Stdout
+24-b87-n01-tdz-catch-oculto	oxc-b-core_defaults	div:Stdout
+24-b87-n01-tdz-catch-oculto	oxc-b-carril_a	div:Stdout
+24-b87-n02-tdz-catch-oculto-tope	oxc-a-core_defaults	div:Stdout
+24-b87-n02-tdz-catch-oculto-tope	oxc-a-carril_a	div:Stdout
+24-b87-n02-tdz-catch-oculto-tope	oxc-b-core_defaults	div:Stdout
+24-b87-n02-tdz-catch-oculto-tope	oxc-b-carril_a	div:Stdout
