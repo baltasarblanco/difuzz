@@ -9,7 +9,8 @@
 //! 1. contenido de toString/.stack (A con los contenidos cambiados; t-principio:
 //!    y A'/B' con el contenido fijo),
 //! 2. profundidad (M16, A con mas pila; t-principio: y B con mas pila; 8.1: un
-//!    Explica se confirma con los literales salados),
+//!    Explica se confirma con los literales salados; 9.2: con la sal amplia, que tiene que
+//!    llegar a lo que B imprime distinto de A, y sin literales que salar es inconcluso),
 //! 3. nombres (core_defaults: minificar preservando nombres),
 //!    y 8.3: el nombre local en un mensaje de V8 (`mensaje_nombre`, si la politica lo pide),
 //! 4. re-chequeos de la politica (`extends`, `global_conocido`, `with`,
@@ -157,16 +158,23 @@ pub fn clasificar<'a>(
             // contenido fijo, y `veredicto`.
             // b7-1b (revision 7.1, H2, opcion (c)): sin sensor de uso para el texto de una funcion
             // del programa (17-tostring-positivo lo usa), un Explica se confirma salado.
-            let r = match (recheck::contenido_matters(runner, original, minified, a, b, &salted), ctx.medido) {
-                (recheck::Recheck::Explica, Some(m)) => recheck::con_literales_salados(runner, (m.minifier, m.preset, m.kind), original, |o2, m2, a2, b2| {
-                    recheck::contenido_matters(runner, o2, m2, a2, b2, &runner.run_salted(o2))
-                }),
-                (r, _) => r,
+            // 9.2 (M1): la traza dice si la sal confirmo o si no habia literales que salar.
+            let (r, salado) = match (recheck::contenido_matters(runner, original, minified, a, b, &salted), ctx.medido) {
+                (recheck::Recheck::Explica, Some(m)) => {
+                    match recheck::con_literales_salados(runner, (m.minifier, m.preset, m.kind), original, recheck::Sal::Dato, |o2, m2, a2, b2| {
+                        recheck::contenido_matters(runner, o2, m2, a2, b2, &runner.run_salted(o2))
+                    }) {
+                        Ok(s) => (recheck::Recheck::Explica, Some(s)),
+                        Err(n) => (recheck::Recheck::Inconcluso(n), None),
+                    }
+                }
+                (r, _) => (r, None),
             };
             match r {
-                recheck::Recheck::Explica => {
-                    traza.paso("contenido", "Explica (A depende del contenido y con el contenido fijo la divergencia desaparece)")
-                }
+                recheck::Recheck::Explica => traza.paso(
+                    "contenido",
+                    format!("Explica (A depende del contenido y con el contenido fijo la divergencia desaparece{})", con_sal(salado)),
+                ),
                 r => {
                     let t = match &r {
                         recheck::Recheck::Inconcluso(n) => format!("Inconcluso -> contenido_inconcluso: {n}"),
@@ -209,18 +217,39 @@ pub fn clasificar<'a>(
     // sensor de uso, un Explica se confirma salado, como contenido. El mismo M16 sobre el
     // original salado: si A salado ya no depende de la pila (o la corrida honda falla), no
     // confirma nada.
+    // 9.2 (H2 de la revision del bloque 8: la tabla con `String("")`, sin nada que salar, o con
+    // un literal salado que no es el de la coincidencia, seguia en known/): la sal es la amplia
+    // (`Sal::Amplia`: tambien argumentos, ramas de `?:`, `return`...); sin literales que salar,
+    // Inconcluso; y la sal tiene que llegar a las lineas en que B difiere de A
+    // (`recheck::sal_alcanza`). Sin eso, que el salado de Explica no prueba nada.
+    let mut salado = None;
     let r = match depth_recheck(a, b, &deep, a_otra_vez, || runner.run_with_args(minified, &[runner::DEEP_STACK]), camino) {
         Some(recheck::Recheck::Explica) => Some(match ctx.medido {
-            Some(m) => recheck::con_literales_salados(runner, (m.minifier, m.preset, m.kind), original, |o2, m2, a2, b2| {
-                let deep2 = runner.run_with_args(o2, &[runner::DEEP_STACK]);
-                let camino2 = |b3: &runner::Exec| recheck::camino_entorno(runner, m2, b2, b3, (&[runner::DEEP_STACK], &[]), &[]);
-                depth_recheck(a2, b2, &deep2, || runner.run(o2), || runner.run_with_args(m2, &[runner::DEEP_STACK]), camino2)
-                    .unwrap_or_else(|| {
-                        recheck::Recheck::Inconcluso(
-                            "A con mas pila da lo mismo que A (o la corrida honda fallo): la divergencia ya no depende de la pila".into(),
-                        )
-                    })
-            }),
+            Some(m) => {
+                let c = recheck::con_literales_salados(runner, (m.minifier, m.preset, m.kind), original, recheck::Sal::Amplia, |o2, m2, a2, b2| {
+                    if let Err(n) = recheck::sal_alcanza(a, b, b2) {
+                        return recheck::Recheck::Inconcluso(n);
+                    }
+                    let deep2 = runner.run_with_args(o2, &[runner::DEEP_STACK]);
+                    let camino2 = |b3: &runner::Exec| recheck::camino_entorno(runner, m2, b2, b3, (&[runner::DEEP_STACK], &[]), &[]);
+                    depth_recheck(a2, b2, &deep2, || runner.run(o2), || runner.run_with_args(m2, &[runner::DEEP_STACK]), camino2)
+                        .unwrap_or_else(|| {
+                            recheck::Recheck::Inconcluso(
+                                "A con mas pila da lo mismo que A (o la corrida honda fallo): la divergencia ya no depende de la pila".into(),
+                            )
+                        })
+                });
+                match c {
+                    Ok(recheck::Salado::Confirmado) => {
+                        salado = Some(recheck::Salado::Confirmado);
+                        recheck::Recheck::Explica
+                    }
+                    Ok(recheck::Salado::SinLiterales) => recheck::Recheck::Inconcluso(
+                        "no hay literales que salar (ni de dato ni de argumento, ramas de ?: o return): la coincidencia de B con A con mas pila no se puede confirmar con otro valor".into(),
+                    ),
+                    Err(n) => recheck::Recheck::Inconcluso(n),
+                }
+            }
             None => recheck::Recheck::Explica,
         }),
         otro => otro,
@@ -228,7 +257,7 @@ pub fn clasificar<'a>(
     match r {
         None => traza.paso("profundidad", "no aplica (A con mas pila da lo mismo, o la corrida honda fallo)"),
         Some(recheck::Recheck::Explica) => {
-            traza.recheck("profundidad", &recheck::Recheck::Explica, par);
+            traza.paso("profundidad", format!("Explica (queda el flag profundidad{})", con_sal(salado)));
             flags.push("profundidad");
         }
         Some(r) => rechequear(&mut flags, &mut notes, &mut traza, "profundidad", par, r),
@@ -334,9 +363,11 @@ pub fn clasificar<'a>(
     if let (None, Some((m, razon))) = (&why, sloppy) {
         // b7-1b (revision 7.1, H2, opcion (c)): el sensor de uso de sloppy solo ve el `this`; un
         // Explica por el estricto (`Si`, `SiRenombrando`) se confirma con los literales salados.
+        // 9.2 (M1): la traza dice si la sal confirmo o si no habia literales que salar.
+        let mut salado = None;
         let s = match sloppy_only(runner, (m.minifier, m.preset), original, minified, a, b) {
             Ok(si @ (Sloppy::Si | Sloppy::SiRenombrando)) => {
-                let r = recheck::con_literales_salados(runner, (m.minifier, m.preset, m.kind), original, |o2, m2, a2, b2| {
+                let r = recheck::con_literales_salados(runner, (m.minifier, m.preset, m.kind), original, recheck::Sal::Dato, |o2, m2, a2, b2| {
                     match sloppy_only(runner, (m.minifier, m.preset), o2, m2, a2, b2) {
                         Ok(Sloppy::No) => recheck::Recheck::NoExplica,
                         Ok(_) => recheck::Recheck::Explica,
@@ -344,9 +375,11 @@ pub fn clasificar<'a>(
                     }
                 });
                 match r {
-                    recheck::Recheck::Explica => Ok(si),
-                    recheck::Recheck::NoExplica => Err("re-chequeo sloppy inconcluso: con los literales salados ya no explica".into()),
-                    recheck::Recheck::Inconcluso(n) => Err(format!("re-chequeo sloppy inconcluso: {n}")),
+                    Ok(c) => {
+                        salado = Some(c);
+                        Ok(si)
+                    }
+                    Err(n) => Err(format!("re-chequeo sloppy inconcluso: {n}")),
                 }
             }
             otro => otro,
@@ -355,7 +388,7 @@ pub fn clasificar<'a>(
             Ok(Sloppy::Si) => {
                 flags.push("solo_sloppy");
                 why = Some(razon.into());
-                traza.paso("solo_sloppy", "Explica (con \"use strict\" la divergencia desaparece)");
+                traza.paso("solo_sloppy", format!("Explica (con \"use strict\" la divergencia desaparece{})", con_sal(salado)));
             }
             Ok(Sloppy::SiRenombrando) => {
                 flags.push("solo_sloppy");
@@ -363,8 +396,9 @@ pub fn clasificar<'a>(
                 traza.paso(
                     "solo_sloppy",
                     format!(
-                        "Explica (`arguments` ligado no compila en estricto; con el binding renombrado a {} y \"use strict\" la divergencia desaparece)",
-                        recheck::ARGUMENTS_RENOMBRADO
+                        "Explica (`arguments` ligado no compila en estricto; con el binding renombrado a {} y \"use strict\" la divergencia desaparece{})",
+                        recheck::ARGUMENTS_RENOMBRADO,
+                        con_sal(salado)
                     ),
                 );
             }
@@ -449,6 +483,12 @@ pub fn sin_repetidos(flags: &mut Vec<&str>) {
 }
 
 /// `apply_recheck` con su linea en la traza.
+/// 9.2 (M1 de la revision del bloque 8): lo que la traza de un `Explica` salado agrega antes del
+/// `)`. Vacio si no paso por la sal (sin backend medido, solo en los tests).
+fn con_sal(s: Option<recheck::Salado>) -> String {
+    s.map(|s| format!("; {}", s.traza())).unwrap_or_default()
+}
+
 fn rechequear(
     flags: &mut Vec<&str>,
     notes: &mut Vec<String>,
@@ -874,12 +914,14 @@ mod tests {
         // El `arguments` atado como dato: ni el camino ni el sensor lo ven (Si); con la sal, no.
         let (o, m, a, b) = ab(&format!("function al(a) {{ arguments[0] = 2; return a; }}\nconst t = [\"\", {bug}];\nconsole.log(JSON.stringify(t[+(al(1) === 2)]));\n"));
         assert_eq!(sloppy_only(&r, rc, &o, &m, &a, &b), Ok(Sloppy::Si), "sloppy-args-tabla sin la sal");
-        let c = recheck::con_literales_salados(&r, (rc.0, rc.1, minify::SourceKind::Script), &o, |o2, m2, a2, b2| match sloppy_only(&r, rc, o2, m2, a2, b2) {
-            Ok(Sloppy::No) => recheck::Recheck::NoExplica,
-            Ok(_) => recheck::Recheck::Explica,
-            Err(n) => recheck::Recheck::Inconcluso(n),
+        let c = recheck::con_literales_salados(&r, (rc.0, rc.1, minify::SourceKind::Script), &o, recheck::Sal::Dato, |o2, m2, a2, b2| {
+            match sloppy_only(&r, rc, o2, m2, a2, b2) {
+                Ok(Sloppy::No) => recheck::Recheck::NoExplica,
+                Ok(_) => recheck::Recheck::Explica,
+                Err(n) => recheck::Recheck::Inconcluso(n),
+            }
         });
-        assert!(matches!(c, recheck::Recheck::Inconcluso(ref n) if n.contains("literales salados")), "sloppy-args-tabla salado: {c:?}");
+        assert!(matches!(c, Err(ref n) if n.contains("literales salados")), "sloppy-args-tabla salado: {c:?}");
     }
 
     /// R2-H10: un original que liga `arguments` no compila en estricto. El
@@ -1082,6 +1124,53 @@ mod tests {
         assert!(meta.contains("\nknown: sensor, asuncion: oxc: No TDZ Violation\n") && meta.contains("  violaciones: Explica (quedan tdz)\n"), "{meta}");
         let meta = std::fs::read_to_string(d.join("div/neg-nc/meta.txt")).unwrap();
         assert!(meta.contains("tdz_irrelevante") && meta.contains("  violaciones: NoExplica"), "{meta}");
+        std::fs::remove_dir_all(&d).unwrap();
+    }
+
+    /// 9.2 (H2 y M1 de la revision del bloque 8), de punta a punta con oxc: un desborde de pila
+    /// nativo usado como dato y un bug (`Number.isInteger(5e-324)` -> `true`, `"abc".substring(1,
+    /// undefined)` -> `""`) que deja en B el valor de A con mas pila. Sin literales que salar
+    /// (`[true, bug]`) o con la sal sin llegar a la linea (`[0, bug.length]`), con 9e52cef iban a
+    /// known/; ahora div/ con nota. El positivo con la tabla en las ramas de un `?:` (la sal amplia)
+    /// sigue en known/ y la traza dice que se confirmo con la sal.
+    #[test]
+    fn profundidad_salada_de_punta_a_punta() {
+        use super::Medido;
+        use crate::{backend::Minifier, cache, compare_and_report, known, minify, oracle, runner, triage, Ctx, Stats};
+        use std::path::Path;
+        if !crate::test_util::requiere_node() {
+            return;
+        }
+        let d = std::env::temp_dir().join(format!("difuzz-test-b92-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        let reporter = oracle::Reporter::new(&d, "test".into(), runner::PRELOAD);
+        let known = known::Known::load(&d, &d, 0, Minifier::Oxc);
+        let cache = cache::CacheA::new(None, &[]);
+        let triage = triage::Triage::load(&d);
+        let (preset, kind) = (minify::Preset::CarrilA, minify::SourceKind::Script);
+        let medido = Some(Medido { minifier: Minifier::Oxc, preset, kind });
+        let ctx = Ctx { reporter: &reporter, known: &known, cache: &cache, triage: &triage, medido };
+        let preload = runner::Preload::write_tagged("b92-pap").unwrap();
+        let r = runner::Runner::new(&preload, crate::test_util::id_runner(), std::time::Duration::from_secs(20));
+        let cfg = preset.build(Minifier::Oxc, kind);
+        let neg = |tabla: &str| {
+            format!("let a = [];\nfor (let i = 0; i < 7000; i++) a = [a];\nfunction h(v) {{\n  const t = {tabla};\n  console.log(t[+(typeof v !== \"string\")]);\n}}\nPromise.resolve(a).then(JSON.stringify).then(h, h);\n")
+        };
+        let pos = "let a = [];\nfor (let i = 0; i < 1500; i++) a = [a];\nfunction rec(n) {\n  var x1 = n + 1, x2 = x1 * 2, x3 = x2 - 3, x4 = x3 ^ 5, x5 = x4 | 7, x6 = x5 & 9, x7 = x6 + x1, x8 = x7 * x2;\n  if (n === 0) { try { JSON.stringify(a); return 0; } catch (e) { return 1; } }\n  return rec(n - 1);\n}\nconsole.log(rec(4800) ? \"desbordo\" : \"cupo\");\n";
+        for (rel, src, known_div, en, linea) in [
+            ("sin-sal", neg("[true, Number.isInteger(5e-324)]"), (0, 1), "div", "profundidad: Inconcluso -> profundidad_inconcluso: no hay literales que salar"),
+            ("no-llega", neg("[0, \"abc\".substring(1, undefined).length]"), (0, 1), "div", "la sal no llega a la linea 1 de B"),
+            ("positivo", pos.to_string(), (1, 0), "known", "profundidad: Explica (queda el flag profundidad; confirmado con los literales salados)\n"),
+        ] {
+            let minify::Outcome::Ok { original, minified, .. } = minify::prepare(&src, &cfg) else { panic!("no minifica") };
+            let mut st = Stats::default();
+            let p = format!("{rel}/input.js");
+            assert!(compare_and_report(&ctx, &r, &mut st, Path::new(&p), &original, &minified, r.run(&original), false, None, false, &[], None));
+            assert_eq!((st.known, st.divergences), known_div, "{rel}");
+            let meta = std::fs::read_to_string(d.join(format!("{en}/{rel}/meta.txt"))).unwrap();
+            assert!(meta.contains(linea), "{rel}: {meta}");
+        }
         std::fs::remove_dir_all(&d).unwrap();
     }
 

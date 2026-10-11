@@ -788,3 +788,33 @@
 25-b93-p04-paren-destino	oxc-a-carril_a	known
 25-b93-p04-paren-destino	oxc-b-core_defaults	known
 25-b93-p04-paren-destino	oxc-b-carril_a	known
+# 9.2 (H2 y M1 de la revision del bloque 8, rev-b8-A corpus3): profundidad con un desborde de pila NATIVO usado como
+# dato, como 24-f1, pero con una tabla que la sal de 8.1 no confirmaba. n01: los valores salen de argumentos
+# (`String("")`), sin nada que salar; n02: un literal salable (`etiqueta`) que no es el de la coincidencia; n03: un
+# booleano (el bug `Number.isInteger(5e-324)` -> `true`), sin literales de cadena; n04: el residuo de 8.1 (d06), un
+# numero (`[0, bug.length]`) con el literal del bug salado. Con 9e52cef: known/ en las 4 celdas (la sal confirmaba o no
+# habia nada que salar, y eso era Explica). Ahora la profundidad sala tambien argumentos, ramas de `?:`, `return`...
+# (recheck::Sal::Amplia), sin literales que salar es Inconcluso, y la sal tiene que llegar a cada linea en que B
+# difiere de A (recheck::sal_alcanza): div/. p01: el positivo de 24-f1-p01 con los valores en las ramas de un `?:`
+# (la sal de 8.1 no las tocaba); con la amplia la sal llega a la linea y sigue en known/ (depende del limite de pila,
+# como 24-f1-p01). MEDIDO con el binario de 9.2 y con el de 9e52cef.
+25-b92-n01-tabla-argumentos	oxc-a-core_defaults	div:Stdout
+25-b92-n01-tabla-argumentos	oxc-a-carril_a	div:Stdout
+25-b92-n01-tabla-argumentos	oxc-b-core_defaults	div:Stdout
+25-b92-n01-tabla-argumentos	oxc-b-carril_a	div:Stdout
+25-b92-n02-sal-parcial	oxc-a-core_defaults	div:Stdout
+25-b92-n02-sal-parcial	oxc-a-carril_a	div:Stdout
+25-b92-n02-sal-parcial	oxc-b-core_defaults	div:Stdout
+25-b92-n02-sal-parcial	oxc-b-carril_a	div:Stdout
+25-b92-n03-booleano	oxc-a-core_defaults	div:Stdout
+25-b92-n03-booleano	oxc-a-carril_a	div:Stdout
+25-b92-n03-booleano	oxc-b-core_defaults	div:Stdout
+25-b92-n03-booleano	oxc-b-carril_a	div:Stdout
+25-b92-n04-numero	oxc-a-core_defaults	div:Stdout
+25-b92-n04-numero	oxc-a-carril_a	div:Stdout
+25-b92-n04-numero	oxc-b-core_defaults	div:Stdout
+25-b92-n04-numero	oxc-b-carril_a	div:Stdout
+25-b92-p01-ternario	oxc-a-core_defaults	known
+25-b92-p01-ternario	oxc-a-carril_a	known
+25-b92-p01-ternario	oxc-b-core_defaults	known
+25-b92-p01-ternario	oxc-b-carril_a	known

@@ -397,8 +397,13 @@ pub fn interruptores_sloppy(src: &str) -> Result<Option<Option<String>>, String>
 }
 
 /// b7-1b (revision 7.1, H2, opcion (c)): `recheck::salar_literales`, como `interruptores_with`.
-pub fn salar(src: &str, kind: SourceKind) -> Result<Option<Option<String>>, String> {
-    correr("salar", kind, &[src]).map(|v| v.map(|mut v| v.pop()))
+/// 9.2: `sal` elige la operacion (`salar` o `salar_amplia`).
+pub fn salar(src: &str, kind: SourceKind, sal: crate::recheck::Sal) -> Result<Option<Option<String>>, String> {
+    let op = match sal {
+        crate::recheck::Sal::Dato => "salar",
+        crate::recheck::Sal::Amplia => "salar_amplia",
+    };
+    correr(op, kind, &[src]).map(|v| v.map(|mut v| v.pop()))
 }
 
 /// 8.3: `recheck::alfa_equivalentes` (el minificado sin mangle y el minificado).
@@ -475,7 +480,8 @@ fn ejecutar(op: &str, kind: SourceKind, p: &[&str]) -> Option<Vec<String>> {
         ("int_coercion", [src]) => crate::recheck::interruptores_coercion(src, kind).map(|s| s.into_iter().collect()),
         ("int_ramas", [src]) => crate::recheck::instrumentar_ramas(src, kind).map(|s| s.into_iter().collect()),
         ("int_sloppy", [src]) => crate::recheck::interruptores_sloppy(src).map(|s| s.into_iter().collect()),
-        ("salar", [src]) => crate::recheck::salar_literales(src, kind).map(|s| s.into_iter().collect()),
+        ("salar", [src]) => crate::recheck::salar_literales(src, kind, crate::recheck::Sal::Dato).map(|s| s.into_iter().collect()),
+        ("salar_amplia", [src]) => crate::recheck::salar_literales(src, kind, crate::recheck::Sal::Amplia).map(|s| s.into_iter().collect()),
         ("violaciones", [src, spec]) => crate::recheck::neutralize_violaciones(src, kind, spec).map(|s| vec![s]),
         ("alfa", [b0, b]) => crate::recheck::alfa_equivalentes(b0, b, kind).map(|r| match r {
             Ok(renombres) => std::iter::once("si".to_string()).chain(renombres).collect(),

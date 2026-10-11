@@ -41,8 +41,8 @@ tests/golden/verificar.sh [--jobs N] [BINARIO] [DIR_SALIDA]
 
 ## Aceptación de los re-chequeos — `tests/aceptacion/rechequeos/`
 
-165 casos que combinan un bug real de oxc con un flag de asunción (o con la forma en que se imprime), en las 4
-celdas de oxc (165 × 4 = 660 comparaciones): 21 de la revisión 1 (C4, `00-` a `10-`), 9 adversariales del revisor de la fase R (`r01` a
+170 casos que combinan un bug real de oxc con un flag de asunción (o con la forma en que se imprime), en las 4
+celdas de oxc (170 × 4 = 680 comparaciones): 21 de la revisión 1 (C4, `00-` a `10-`), 9 adversariales del revisor de la fase R (`r01` a
 `r10`, sin `r05`), `14-tdz-positivo`, 11 de los flags que antes no tenían re-chequeo (`15-` coerción, `16-`
 built-ins, `17-` contenido de `toString`/`.stack`, `18-` profundidad: positivos y adversariales con el Issue A),
 15 de la revisión de t-int (`19-`: el bug adentro del código que el re-chequeo neutraliza; r03, r06 y r13 son
@@ -70,12 +70,17 @@ cambia; van a `div/` en carril_a y a `known/` en core_defaults, donde keep_names
 por un `try` armado en runtime, que `runner::puede_atrapar` no ve en el minificado; con el bug en el catch van
 a `div/`), 6 de los nombres que imprime `util.inspect` (`25-b91-`, ítem 9.1: el mismo bug de keep_names que
 `24-b83h1-`, visto como `[Function: handler]` contra `[Function: e]`, con clase, `bound`, privado y `catch`;
-`c01` es el control con las formas que keep_names cubre) y 6 de los menores de `mensaje_nombre` (`25-b93-`,
+`c01` es el control con las formas que keep_names cubre), 6 de los menores de `mensaje_nombre` (`25-b93-`,
 ítem 9.3: V8 escribe una llamada como `(...)` y el acceso opcional como `?.`, `cb(...) is not a function`; los
 positivos `p01` y `p02` van a `known/`; `p03`, un parámetro con default anónimo, a `div/` en carril_a por H1;
 `p04` fija `(h) = function () {}`, que el codegen de oxc imprime sin paréntesis; `n01` y `n02`, con un bug
-real al lado o en un argumento que V8 no escribe, a `div/`). Los `19-`, `20-` y `22-` esperan `div/` en todas
-las celdas; los `21-`, `23-`, `24-` y `25-b93-`, `div/` salvo los positivos (menos `24-b83-p02` en
+real al lado o en un argumento que V8 no escribe, a `div/`) y 5 de H2 de la revisión del bloque 8 (`25-b92-`,
+ítem 9.2: la profundidad nativa de `24-f1-` con una tabla que la sal de 8.1 no confirmaba: valores en
+argumentos, un literal salado que no es el de la coincidencia, un booleano y un número; van a `div/` porque
+la profundidad sala también argumentos y ramas de `?:`, sin nada que salar es inconcluso y la sal tiene que
+llegar a la línea en que B difiere de A; `p01`, el positivo de `24-f1-p01` con la tabla en las ramas de un
+`?:`, sigue en `known/` y depende del mismo límite de pila). Los `19-`, `20-` y `22-` esperan `div/` en todas
+las celdas; los `21-`, `23-`, `24-`, `25-b92-` y `25-b93-`, `div/` salvo los positivos (menos `24-b83-p02` en
 core_defaults, que sigue en `div/`: el marco del stack cambia de nombre; y `25-b93-p03` en carril_a) y los
 `24-b83h1-` en core_defaults. Los `25-b91-p` esperan `div/` en carril_a e igual en core_defaults (sin
 keep_names los nombres se borran); `25-b91-c01`, igual en las 4.

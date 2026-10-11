@@ -533,9 +533,23 @@ Principios:
     una propiedad, inicializador de una declaración, lado derecho de una asignación u objeto de un
     acceso (`"abc".substring`); no toca los demás (argumentos, comparaciones, claves, `return`,
     ramas de `?:` o de `||`) ni números, booleanos o `null` (ver Límites conocidos). Sin literales que
-    salar, no cambia nada. Si el original salado ya no diverge, la sal cambió el camino (un
+    salar, contenido y solo sloppy no cambian nada. Si el original salado ya no diverge, la sal cambió el camino (un
     literal que guarda la rama del bug, `modo === "x" ? bug : ...`): inconcluso, porque el salado
-    no confirma nada. La confirmación salada de profundidad (8.1) no depende de la política del
+    no confirma nada. Profundidad (9.2) es más estricta: sala además los argumentos de una llamada o
+    de `new` (no el especificador de `require` ni de `import()`), las ramas de `?:`, el lado
+    derecho de `||`, `&&` y `??`, el de `return`, el cuerpo expresión de una flecha y los valores
+    por defecto; sin literales que salar es inconcluso; y la sal tiene que **llegar** a lo que B
+    imprime distinto de A: cada línea de B que difiere de la de A tiene que traer, en B salado,
+    más `dz` que en B (sin distinguir mayúsculas), con las mismas líneas. "Difiere" es con la
+    comparación de la celda: con keep_names (carril_a, 9.1) una línea que difiere solo en un
+    nombre que imprime `util.inspect` también cuenta, y como la sal no llega a un nombre, es
+    inconclusa (un positivo que imprime una función elegida por el desborde va a `div/` en
+    carril_a). Si la sal toca otra
+    cosa (una etiqueta, otra línea, un literal que el programa convierte en número), que el
+    salado siga dando `Explica` no prueba que la coincidencia de B con A con más pila venga de
+    un dato: inconcluso. La traza de meta.txt dice cómo terminó la sal en los tres: `Explica (...;
+    confirmado con los literales salados)` o `Explica (...; sin literales que salar: no se
+    confirmo con la sal)` (en profundidad, esto último ya no pasa: es inconcluso, con su nota). La confirmación salada de profundidad (8.1) no depende de la política del
     backend: vale en las celdas de swc también, y un `Explica` de profundidad en swc paga el
     salado y puede ir a `div/` como en oxc (en el corpus de tests de SWC ninguna divergencia de
     swc llega ahí: sin cambios en `swc a`, `swc b` ni `swc a --sandbox`, medido en la revisión del
@@ -546,7 +560,10 @@ Principios:
     solo sloppy y profundidad con literales, 1 minificación y 2 node más el re-chequeo sobre el
     salado (en profundidad, hasta 5 node más: A salado con más pila, A salado otra vez, B salado
     con más pila y las 2 corridas de B salado con cobertura, más una instrumentación del
-    minificado salado).
+    minificado salado). 9.2: si la sal no llega a las líneas de B, esas 5 no corren; sin
+    literales que salar, ninguna. Lo que la sal amplia agrega es que un `Explica` de profundidad
+    con los literales solo en argumentos o en ramas de `?:` ahora paga el salado (MEDIDO con
+    `strace`, a/core_defaults: 12 → 19 node).
 
   En oxc todos los flags de su tabla tienen re-chequeo. En swc, `proxy`, `tdz`, `callee`,
   `redefine_global`, el backlog y la asunción por ruta (`issue_2719`) clasifican directo, sin
@@ -579,14 +596,21 @@ Principios:
     en posición de dato (`["", bug][i]`) van a `div/`.
   - la profundidad, cuando la salida depende como dato de un desborde de pila **nativo** (por
     ejemplo, si `JSON.stringify` de un arreglo anidado 7000 veces lanzó o no) y el bug deja en B
-    un valor por defecto que la sal no cambia. El re-chequeo de profundidad no tiene sensor de
-    uso, y con una recursión nativa B recorre los mismos bloques con y sin más pila, así que su
-    camino no cambia; desde 8.1 su `Explica` se confirma salado, como contenido. Medido con oxc
-    0.153.0 en las 8 celdas: los dos programas de la revisión final del bloque 7 (con
-    `.then(JSON.stringify)` y con `try`/`throw`, el valor por defecto `""` en un arreglo), que con
-    `90cd16b` y `fe0cd86` iban a `known/`, van a `div/`; con el valor por defecto `0` en el arreglo
-    (`[0, bug.length]`) sigue en `known/` (8 filas), el mismo residuo de la sal que en el punto
-    anterior. Con una recursión de JS la cobertura cambia y va a `div/`.
+    el valor de A con más pila en la misma línea que un literal salado que el programa imprime
+    tal cual (`console.log(etiqueta, [1, +bug][i])`: la sal llega a la línea por la etiqueta, no
+    por la coincidencia). El re-chequeo de profundidad no tiene sensor de uso, y con una recursión
+    nativa B recorre los mismos bloques con y sin más pila, así que su camino no cambia; desde 8.1
+    su `Explica` se confirma salado y desde 9.2 la sal tiene que llegar a la línea (ver arriba).
+    Medido con oxc 0.153.0 en las 4 celdas de oxc: con `9e52cef` iban a `known/` la tabla con los
+    valores en argumentos (`[String(""), String("abc").substring(1, undefined)]`, sin nada que
+    salar), la misma con un literal salable que no es el de la coincidencia, un booleano
+    (`[true, Number.isInteger(5e-324)]`), un número (`[0, bug.length]`, el residuo de 8.1), la
+    etiqueta en otra línea y la tabla en las ramas de un `?:`; con 9.2 van a `div/`. La forma de
+    la etiqueta en la misma línea sigue en `known/`. El costo: un positivo de verdad (el original
+    desborda y el minificado no) que imprime un número o un booleano (`console.log(rec(4800))`)
+    no tiene nada que salar y va a `div/` como `profundidad_inconcluso`; con la tabla en un
+    arreglo, en las ramas de un `?:`, en un `return`, en un argumento, en una plantilla o pasada
+    por `toUpperCase`, sigue en `known/`. Con una recursión de JS la cobertura cambia y va a `div/`.
   - el sensor de uso de `global_conocido` ve lecturas (`typeof`, `window`, `globalThis.window`),
     no `"window" in globalThis` ni `hasOwnProperty`; el de `builtins`, lecturas después de pisar
     (si el programa redefine o borra la propiedad, inconcluso); el de coerción, las definiciones
@@ -746,9 +770,9 @@ Sin `node` en el `PATH`, los tests que lo necesitan fallan con un mensaje claro.
 
 - **Golden de detección** (`tests/golden/`): 16 casos con bugs conocidos de oxc y swc, en 8
   celdas, más `--invocar` y `--stubs`; la clase esperada de cada caso está en `esperado.tsv`.
-- **Aceptación de los re-chequeos** (`tests/aceptacion/rechequeos/`): 165 casos que combinan un
+- **Aceptación de los re-chequeos** (`tests/aceptacion/rechequeos/`): 170 casos que combinan un
   bug real de oxc con un flag de asunción (o con la forma en que se imprime), en las 4 celdas de oxc
-  (660 comparaciones).
+  (680 comparaciones).
 
 ```sh
 tests/golden/verificar.sh --jobs 4                    # sale con 0 y "comparaciones=N fallas=0"

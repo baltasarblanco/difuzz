@@ -2115,10 +2115,14 @@ pub const SAL_LITERAL: &str = "dz";
 /// DATO (elemento de un arreglo, valor de una propiedad, inicializador de una declaracion, lado
 /// derecho de una asignacion, objeto de un acceso a miembro como `"abc".substring(...)`) con
 /// `SAL_LITERAL` al final; tambien las plantillas sin expresiones (`\`x\``, como las imprime
-/// oxc). No se tocan las comparaciones (`typeof x === "u"`), los argumentos ni las claves.
+/// oxc). No se tocan las comparaciones (`typeof x === "u"`), las claves ni (con `Sal::Dato`) los
+/// argumentos. 9.2: con `Sal::Amplia`, tambien los de otras posiciones (ver `Sal`).
 /// `Some(None)` si no hay ninguno; `None` si no se pudo (`instrumentar`).
-pub fn salar_literales(src: &str, kind: SourceKind) -> Option<Option<String>> {
-    use swc_ecma_ast::{ArrayLit, AssignExpr, KeyValueProp, MemberExpr, VarDeclarator};
+pub fn salar_literales(src: &str, kind: SourceKind, sal: Sal) -> Option<Option<String>> {
+    use swc_ecma_ast::{
+        ArrayLit, ArrowExpr, AssignExpr, AssignPat, BinExpr, BinaryOp, ArrowFunctionBody, CallExpr, Callee, CondExpr, KeyValueProp, MemberExpr, NewExpr,
+        ReturnStmt, VarDeclarator,
+    };
     fn salar(e: &mut Expr) -> bool {
         match e {
             Expr::Lit(Lit::Str(x)) => {
@@ -2141,8 +2145,58 @@ pub fn salar_literales(src: &str, kind: SourceKind) -> Option<Option<String>> {
             _ => false,
         }
     }
-    struct S(bool);
+    // `.0`: salo algo; `.1`: `Sal::Amplia`.
+    struct S(bool, bool);
     impl VisitMut for S {
+        fn visit_mut_call_expr(&mut self, n: &mut CallExpr) {
+            n.visit_mut_children_with(self);
+            // El especificador de `require`/`import()` no: el modulo dejaria de resolver.
+            let require = matches!(&n.callee, Callee::Expr(e) if matches!(&**e, Expr::Ident(i) if &*i.sym == "require"));
+            if self.1 && !require && !matches!(n.callee, Callee::Import(_)) {
+                for a in n.args.iter_mut().filter(|a| a.spread.is_none()) {
+                    self.0 |= salar(&mut a.expr);
+                }
+            }
+        }
+        fn visit_mut_new_expr(&mut self, n: &mut NewExpr) {
+            n.visit_mut_children_with(self);
+            if self.1 {
+                for a in n.args.iter_mut().flatten().filter(|a| a.spread.is_none()) {
+                    self.0 |= salar(&mut a.expr);
+                }
+            }
+        }
+        fn visit_mut_cond_expr(&mut self, n: &mut CondExpr) {
+            n.visit_mut_children_with(self);
+            if self.1 {
+                self.0 |= salar(&mut n.cons);
+                self.0 |= salar(&mut n.alt);
+            }
+        }
+        fn visit_mut_bin_expr(&mut self, n: &mut BinExpr) {
+            n.visit_mut_children_with(self);
+            if self.1 && matches!(n.op, BinaryOp::LogicalOr | BinaryOp::LogicalAnd | BinaryOp::NullishCoalescing) {
+                self.0 |= salar(&mut n.right);
+            }
+        }
+        fn visit_mut_return_stmt(&mut self, n: &mut ReturnStmt) {
+            n.visit_mut_children_with(self);
+            if let (true, Some(e)) = (self.1, &mut n.arg) {
+                self.0 |= salar(e);
+            }
+        }
+        fn visit_mut_arrow_expr(&mut self, n: &mut ArrowExpr) {
+            n.visit_mut_children_with(self);
+            if let (true, ArrowFunctionBody::Expr(e)) = (self.1, &mut *n.body) {
+                self.0 |= salar(e);
+            }
+        }
+        fn visit_mut_assign_pat(&mut self, n: &mut AssignPat) {
+            n.visit_mut_children_with(self);
+            if self.1 {
+                self.0 |= salar(&mut n.right);
+            }
+        }
         fn visit_mut_array_lit(&mut self, n: &mut ArrayLit) {
             n.visit_mut_children_with(self);
             for e in n.elems.iter_mut().flatten().filter(|e| e.spread.is_none()) {
@@ -2169,10 +2223,76 @@ pub fn salar_literales(src: &str, kind: SourceKind) -> Option<Option<String>> {
         }
     }
     instrumentar(src, kind, |p| {
-        let mut s = S(false);
+        let mut s = S(false, sal == Sal::Amplia);
         p.visit_mut_with(&mut s);
         s.0
     })
+}
+
+/// 9.2 (H2 de la revision del bloque 8): que literales sala `salar_literales`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Sal {
+    /// Los de posicion de dato (b7-1b). Contenido y solo sloppy.
+    Dato,
+    /// Ademas los argumentos de una llamada o de `new` (no el especificador de `require` ni de
+    /// `import()`), las ramas de `?:`, el lado derecho de `||`, `&&` y `??`, el de `return`, el
+    /// cuerpo expresion de una flecha y el valor por defecto de un parametro o de un patron.
+    /// Profundidad: `String("")` y `c ? "a" : "b"` tambien son la tabla de la coincidencia.
+    Amplia,
+}
+
+/// 9.2 (M1 de la revision del bloque 8): como dio `Explica` `con_literales_salados`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Salado {
+    /// El re-chequeo sobre el original salado tambien dio `Explica`.
+    Confirmado,
+    /// No habia literales que salar: no se confirmo nada.
+    SinLiterales,
+}
+
+impl Salado {
+    /// Lo que se agrega a la linea de la traza (meta.txt) de un `Explica` salado.
+    pub fn traza(self) -> &'static str {
+        match self {
+            Salado::Confirmado => "confirmado con los literales salados",
+            Salado::SinLiterales => "sin literales que salar: no se confirmo con la sal",
+        }
+    }
+}
+
+/// 9.2 (H2 de la revision del bloque 8, profundidad): la sal tiene que LLEGAR a lo que B imprime
+/// distinto de A. Cada linea de B (con los nombres de la celda, `oracle::nombres_de_celda`, como
+/// `localizada_con_marca`) que difiere de la de A en el mismo lugar (o que A no tiene) tiene que
+/// traer, en B salado (`bs`), mas `dz` que en
+/// B (sin distinguir mayusculas: `toUpperCase` la conserva), y B salado tiene que imprimir las
+/// mismas lineas que B. Si no, la sal toco otra cosa (una etiqueta, otra linea) o nada, y que el
+/// salado siga dando `Explica` no prueba que la coincidencia de B con A' venga de un dato: un bug
+/// que deja en B un numero, un booleano o un valor calculado que no cambia con la sal la sigue
+/// dando (MEDIDO con oxc 0.153.0: `[0, bug.length][i]`, `[true, Number.isInteger(5e-324)][i]`).
+/// Sin lineas distintas (A y B difieren solo en el estado o en lo que A imprime de mas), tampoco.
+/// Integracion 9.1 + 9.2: con keep_names (9.1) una linea que difiere solo en un nombre que imprime
+/// `util.inspect` tambien difiere, y la sal no llega a un nombre: Inconcluso, como un numero (lado
+/// seguro; MEDIDO: el positivo b9-int/sonda-sal k2, la funcion impresa elegida por el desborde, pasa
+/// de known/ a div/ en carril_a). Sin keep_names los nombres se borran, como antes.
+/// `Err(nota)`: no llega.
+pub fn sal_alcanza(a: &runner::Exec, b: &runner::Exec, bs: &runner::Exec) -> Result<(), String> {
+    let lines = |e: &runner::Exec| oracle::nombres_de_celda(&e.stdout).lines().map(String::from).collect::<Vec<_>>();
+    let (la, lb, ls) = (lines(a), lines(b), lines(bs));
+    if ls.len() != lb.len() {
+        return Err(format!("B salado imprime {} lineas y B {}: la sal cambio lo que B imprime y no se alinea", ls.len(), lb.len()));
+    }
+    let distintas: Vec<usize> = (0..lb.len()).filter(|&i| la.get(i) != Some(&lb[i])).collect();
+    if distintas.is_empty() {
+        return Err("B no imprime ninguna linea distinta de A (difieren en el estado o en lo que A imprime de mas): la sal no puede llegar a la coincidencia".into());
+    }
+    let sales = |l: &str| l.to_lowercase().matches(SAL_LITERAL).count();
+    match distintas.iter().find(|&&i| sales(&ls[i]) <= sales(&lb[i])) {
+        Some(i) => Err(format!(
+            "la sal no llega a la linea {} de B, que difiere de A: la coincidencia de B con el original modificado no sale de un literal salado",
+            i + 1
+        )),
+        None => Ok(()),
+    }
 }
 
 /// b7-1b (revision 7.1, H2, opcion (c)): para las familias sin sensor de uso completo (contenido:
@@ -2180,28 +2300,32 @@ pub fn salar_literales(src: &str, kind: SourceKind) -> Option<Option<String>> {
 /// confirma con el original SALADO (`salar_literales`): se minifica igual, se corren A y B
 /// salados y `recheck` (el mismo re-chequeo) tiene que dar Explica tambien ahi. Si el bug deja
 /// justo el valor por defecto, con otro valor ya no coincide (B != A'). Sin literales que salar,
-/// no hay nada que mirar: Explica. b7-1c (revision 7.1b, S1): si el salado no diverge, Inconcluso
-/// (la sal cambio el camino; antes, Explica). 1 minify + 2 node + el re-chequeo,
-/// solo en los candidatos a Explica de esas familias. Heuristica: un valor por defecto que no
-/// viene de un literal (`[].join()`) no cambia con la sal.
+/// no hay nada que mirar: `Ok(Salado::SinLiterales)` (contenido y solo sloppy lo toman como
+/// Explica; 9.2: profundidad, como Inconcluso). b7-1c (revision 7.1b, S1): si el salado no
+/// diverge, Inconcluso (la sal cambio el camino; antes, Explica). 1 minify + 2 node + el
+/// re-chequeo, solo en los candidatos a Explica de esas familias. Heuristica: un valor por
+/// defecto que no viene de un literal (`[].join()`) no cambia con la sal.
+/// 9.2 (M1): `Ok(Salado)` es el Explica, confirmado o sin literales; `Err(nota)`, el Inconcluso
+/// (el NoExplica del salado tambien es Inconcluso). `sal`: que literales se salan.
 pub fn con_literales_salados(
     r: &runner::Runner,
     (minifier, preset, kind): (backend::Minifier, minify::Preset, SourceKind),
     original: &str,
+    sal: Sal,
     recheck: impl FnOnce(&str, &str, &runner::Exec, &runner::Exec) -> Recheck,
-) -> Recheck {
-    let salado = match crate::analisis::salar(original, kind) {
+) -> Result<Salado, String> {
+    let salado = match crate::analisis::salar(original, kind, sal) {
         Ok(Some(Some(s))) => s,
-        Ok(Some(None)) => return Recheck::Explica,
-        Ok(None) => return Recheck::Inconcluso("no pude salar los literales del original (no parsea con SWC)".into()),
+        Ok(Some(None)) => return Ok(Salado::SinLiterales),
+        Ok(None) => return Err("no pude salar los literales del original (no parsea con SWC)".into()),
         Err(e) => {
             crate::analisis::registrar("re-chequeo (literales salados)", &e);
-            return Recheck::Inconcluso(format!("fallo el analisis de difuzz: {}", e.lines().next().unwrap_or_default()));
+            return Err(format!("fallo el analisis de difuzz: {}", e.lines().next().unwrap_or_default()));
         }
     };
     let cfg = preset.build(minifier, kind);
     let minify::Outcome::Ok { original: o2, minified: m2, .. } = minify::prepare(&salado, &cfg) else {
-        return Recheck::Inconcluso("no pude minificar el original con los literales salados".into());
+        return Err("no pude minificar el original con los literales salados".into());
     };
     let (a2, b2) = (r.run(&o2), r.run(&m2));
     // b7-1c (revision 7.1b, S1): esto se llama solo con un Explica del original, asi que el
@@ -2209,16 +2333,14 @@ pub fn con_literales_salados(
     // del bug: `modo === "x" ? bug : ...`) y el salado no confirma nada: antes daba Explica y el
     // bug real iba a known/ (x5-sloppyargs-sal-guarda, x5b-tostring-sal-guarda).
     if matches!(oracle::compare(&a2, &b2), oracle::Verdict::Same) {
-        return Recheck::Inconcluso(
-            "con los literales salados (otro valor por defecto) el original ya no diverge: la sal cambio el camino y no se puede confirmar".into(),
-        );
+        return Err("con los literales salados (otro valor por defecto) el original ya no diverge: la sal cambio el camino y no se puede confirmar".into());
     }
     match recheck(&o2, &m2, &a2, &b2) {
-        Recheck::Explica => Recheck::Explica,
-        Recheck::NoExplica => Recheck::Inconcluso(
+        Recheck::Explica => Ok(Salado::Confirmado),
+        Recheck::NoExplica => Err(
             "con los literales salados (otro valor por defecto) la asuncion ya no explica la divergencia: la coincidencia con el valor por defecto no prueba nada".into(),
         ),
-        Recheck::Inconcluso(n) => Recheck::Inconcluso(format!("con los literales salados (otro valor por defecto): {n}")),
+        Recheck::Inconcluso(n) => Err(format!("con los literales salados (otro valor por defecto): {n}")),
     }
 }
 
@@ -2649,12 +2771,70 @@ mod tests {
         use super::salar_literales;
         let k = SourceKind::Script;
         let src = "const t = [\"\", \"abc\".substring(1, undefined)], u = `x`;\nx = { k: 'v', \"c\": 1 };\nif (typeof window === \"undefined\") f(\"arg\");\n";
-        let out = salar_literales(src, k).unwrap().unwrap();
+        let out = salar_literales(src, k, super::Sal::Dato).unwrap().unwrap();
         for n in ["\"dz\"", "\"abcdz\".substring(1, undefined)", "u = `xdz`", "k: \"vdz\"", "\"c\": 1", "typeof window === \"undefined\"", "f(\"arg\")"] {
             assert!(out.contains(n), "{n}: {out}");
         }
-        assert_eq!(salar_literales("if (a === \"x\") f(\"y\");", k), Some(None));
-        assert_eq!(salar_literales("let = ;", k), None);
+        assert_eq!(salar_literales("if (a === \"x\") f(\"y\");", k, super::Sal::Dato), Some(None));
+        assert_eq!(salar_literales("let = ;", k, super::Sal::Dato), None);
+    }
+
+    /// 9.2 (H2 de la revision del bloque 8): la sal amplia de profundidad toca ademas argumentos
+    /// (no el de `require` ni el de `import()`), ramas de `?:`, el lado derecho de `||`/`&&`/`??`,
+    /// `return`, el cuerpo de una flecha y los valores por defecto; sigue sin tocar comparaciones,
+    /// claves ni accesos calculados.
+    #[test]
+    fn literales_salados_amplia() {
+        use super::{salar_literales, Sal};
+        let k = SourceKind::Script;
+        let src = "const t = [String(\"\"), String(\"abc\").substring(1, undefined)], e = c ? \"a\" : `b`;\nconst r = require(\"fs\"), m = import(\"x\");\nfunction f(p = \"d\") { return \"r\"; }\nconst g = () => \"flecha\";\nx = y || \"o\";\nif (typeof w === \"undefined\") h(\"arg\", ...q);\nnew C(\"n\");\nz = o[\"k\"];\n";
+        let out = salar_literales(src, k, Sal::Amplia).unwrap().unwrap();
+        for n in [
+            "String(\"dz\")",
+            "String(\"abcdz\").substring(1, undefined)",
+            "\"adz\" : `bdz`",
+            "require(\"fs\")",
+            "import(\"x\")",
+            "\"ddz\"",
+            "return \"rdz\"",
+            "\"flechadz\"",
+            "y || \"odz\"",
+            "typeof w === \"undefined\"",
+            "h(\"argdz\", ...q)",
+            "new C(\"ndz\")",
+            "o[\"k\"]",
+        ] {
+            assert!(out.contains(n), "{n}: {out}");
+        }
+        // Con la de dato, nada de eso (los argumentos y las ramas quedan como estan).
+        assert_eq!(salar_literales("console.log(c ? String(\"\") : \"x\");", k, Sal::Dato), Some(None));
+        assert!(salar_literales("console.log(c ? String(\"\") : \"x\");", k, Sal::Amplia).unwrap().is_some());
+        assert_eq!(salar_literales("if (a === \"x\" && o[\"k\"]) f(1, true, null, require(\"y\"));", k, Sal::Amplia), Some(None));
+    }
+
+    /// 9.2 (H2 de la revision del bloque 8): la sal tiene que llegar a cada linea en que B difiere
+    /// de A (mas `dz` en B salado que en B, sin distinguir mayusculas), con las mismas lineas.
+    #[test]
+    fn la_sal_alcanza() {
+        use super::sal_alcanza;
+        let ok = |s: &str| ex(Status::Exited(0), s);
+        // p01: la linea distinta trae la sal (tambien en mayusculas).
+        assert_eq!(sal_alcanza(&ok("desbordo\n"), &ok("cupo\n"), &ok("cupodz\n")), Ok(()));
+        assert_eq!(sal_alcanza(&ok("r:\nDESBORDO\n"), &ok("r:\nCUPO\n"), &ok("r:dz\nCUPODZ\n")), Ok(()));
+        // n02/n06: la sal toca otra cosa de la misma linea que no es `dz` (una cuenta), o un numero.
+        let n = sal_alcanza(&ok("1 \"bc\"\n"), &ok("1 \"\"\n"), &ok("3 \"\"\n"));
+        assert!(n.as_ref().is_err_and(|n| n.contains("linea 1")), "{n:?}");
+        assert!(sal_alcanza(&ok("2\n"), &ok("0\n"), &ok("0\n")).is_err());
+        // n05: la sal llega a otra linea (la etiqueta), no a la que difiere.
+        let n = sal_alcanza(&ok("x\n\"bc\"\n"), &ok("x\n\"\"\n"), &ok("xdz\n\"\"\n"));
+        assert!(n.as_ref().is_err_and(|n| n.contains("linea 2")), "{n:?}");
+        // Una `dz` que ya estaba no cuenta; otra cantidad de lineas, o ninguna linea distinta, no.
+        assert!(sal_alcanza(&ok("adz 1\n"), &ok("adz 2\n"), &ok("adz 2\n")).is_err());
+        assert!(sal_alcanza(&ok("a\n"), &ok("b\n"), &ok("bdz\nc\n")).is_err_and(|n| n.contains("lineas")));
+        assert!(sal_alcanza(&ex(Status::Exited(1), "a\n"), &ok("a\n"), &ok("adz\n")).is_err_and(|n| n.contains("ninguna linea")));
+        // Una linea que A no tiene tambien tiene que traer la sal.
+        assert_eq!(sal_alcanza(&ok("a\n"), &ok("a\ncupo\n"), &ok("adz\ncupodz\n")), Ok(()));
+        assert!(sal_alcanza(&ok("a\n"), &ok("a\n7\n"), &ok("adz\n7\n")).is_err());
     }
 
     /// b7-1b (revision 7.1, H2 d07): el sensor del `this` de sloppy, en cada funcion sloppy que
@@ -2935,8 +3115,8 @@ mod tests {
         let (o, m, a, b) = prep(src);
         assert_eq!((a.stdout.as_str(), b.stdout.as_str()), ("\"bc\"\n", "\"\"\n"), "{m}");
         assert_eq!(contenido(&o, &m, &a, &b), Recheck::Explica, "x5b sin la sal");
-        let s = con_literales_salados(&r, (Minifier::Oxc, Preset::CarrilA, SourceKind::Script), &o, |o2, m2, a2, b2| contenido(o2, m2, a2, b2));
-        assert!(matches!(s, Recheck::Inconcluso(ref n) if n.contains("la sal cambio el camino")), "x5b: {s:?}");
+        let s = con_literales_salados(&r, (Minifier::Oxc, Preset::CarrilA, SourceKind::Script), &o, super::Sal::Dato, |o2, m2, a2, b2| contenido(o2, m2, a2, b2));
+        assert!(matches!(s, Err(ref n) if n.contains("la sal cambio el camino")), "x5b: {s:?}");
         // S2: los ganchos solo con el texto instrumentado.
         let g = "console.log(typeof __difuzzNeutroRama, typeof __difuzzNeutroThis);\n";
         assert_eq!(r.run_con_cobertura(g, &[], &[]).stdout, "undefined undefined\n");
