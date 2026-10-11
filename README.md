@@ -600,7 +600,7 @@ reintento.
 |---|---|
 | 0 | corrida entera (con o sin hallazgos; `CORRIDA.txt: completa`); `--cruce`, `--emitir` y `--help` sin error |
 | 1 | error de entrada o de entorno: corpus inexistente, que no es directorio o sin `input.js`; `--out` que no se puede escribir; escrituras perdidas o casos sin contar; el oráculo se reescribió a mitad de corrida (ver [Compilar](#compilar)); `--cruce` sin índices; `--emitir` que no puede leer o minificar |
-| 2 | error de uso: opción desconocida, valor o combinación inválida (con la ayuda en stderr) |
+| 2 | error de uso: opción desconocida, valor o combinación inválida (con la ayuda en stderr); también `-h`, `--help` u otra opción de difuzz como valor de `--out`, `--cache`, `--indice`, `--emitir` o `--cruce` (para una ruta con ese nombre: `./-h`) |
 | 130 | interrumpida por SIGINT o SIGTERM (`CORRIDA.txt: interrumpida`) |
 
 ## Tests y verificaciones

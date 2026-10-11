@@ -98,14 +98,15 @@ fn codigo_1_entrada_o_entorno() {
     let out = b.join("out");
     let o = out.to_str().unwrap();
     let (no_existe, no_existe_js) = (b.join("no-existe"), b.join("no-existe.js"));
+    // E4: `--emitir -h` ya no es el archivo `-h` (1): es un error de uso (codigo_2_uso).
     let casos: [(&str, Vec<&str>); 6] = [
         ("corpus sin input.js", vec![vacio.to_str().unwrap(), "--out", o]),
         ("corpus inexistente", vec![no_existe.to_str().unwrap(), "--out", o]),
         ("--out es un archivo", vec![corpus.to_str().unwrap(), "--out", archivo.to_str().unwrap(), "--no-cache"]),
         ("--cruce sin indices", vec!["--cruce", vacio.to_str().unwrap()]),
         ("--emitir sin archivo", vec!["--emitir", no_existe_js.to_str().unwrap()]),
-        // `-h` como valor de --emitir es el archivo `-h` (que no existe), no la ayuda.
-        ("--emitir -h", vec!["--emitir", "-h"]),
+        // `./-h` como valor de --emitir es el archivo `-h` (que no existe), no la ayuda.
+        ("--emitir ./-h", vec!["--emitir", "./-h"]),
     ];
     for (que, args) in casos {
         let r = difuzz(&b, &args);
@@ -141,6 +142,12 @@ fn codigo_2_uso() {
         // y un --minifier invalido.
         vec!["--out", "-h"],
         vec![c, "--minifier", "-h"],
+        // E4: -h, --help u otra opcion como valor de una opcion de ruta (antes: la ruta).
+        vec![c, "--out", "--help"],
+        vec![c, "--cache", "-h"],
+        vec![c, "--indice", "--jobs"],
+        vec!["--emitir", "-h"],
+        vec!["--cruce", "--help"],
     ] {
         let r = difuzz(&b, &args);
         assert_eq!(rc(&r), Some(2), "{args:?}: {}", err(&r));
@@ -148,6 +155,51 @@ fn codigo_2_uso() {
     }
     assert!(celda.join("div/viejo").is_dir(), "--limit 0 borro la salida anterior");
     assert_eq!(std::fs::read_to_string(celda.join("CORRIDA.txt")).unwrap(), "estado: completa\n");
+    std::fs::remove_dir_all(&b).unwrap();
+}
+
+/// E4 (decisiones del 10-oct, fila 8): `corpus --out -h` y `corpus --out --help` salen con 2,
+/// con el mensaje, y no crean nada (antes: el directorio `-h` o `--help` y 0). Corre en un
+/// directorio propio, porque la ruta es relativa. `--out ./-h` sigue creando el directorio `-h`.
+#[test]
+fn codigo_2_opcion_como_ruta_no_crea_nada() {
+    let b = base("ruta");
+    let corpus = b.join("corpus");
+    caso(&corpus, "uno", b"console.log(1);\n");
+    let c = corpus.to_str().unwrap();
+    let en_b = |args: &[&str]| {
+        Command::new(BIN)
+            .args(args)
+            .current_dir(&b)
+            .env("TMPDIR", b.join("tmp"))
+            .env("DIFUZZ_ORACULO", "ninguno")
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .output()
+            .unwrap()
+    };
+    for (opcion, valor, que) in [
+        ("--out", "-h", "un directorio"),
+        ("--out", "--help", "un directorio"),
+        ("--cache", "-h", "un directorio"),
+        ("--indice", "--help", "un directorio"),
+    ] {
+        let r = en_b(&[c, opcion, valor, "--jobs", "1"]);
+        assert_eq!(rc(&r), Some(2), "{opcion} {valor}: {}", err(&r));
+        let msg = format!("error: {opcion} espera una ruta y recibio la opcion {valor}; para {que} con ese nombre usa ./{valor}\n");
+        assert!(err(&r).starts_with(&msg) && err(&r).contains("uso: difuzz"), "{opcion} {valor}: {}", err(&r));
+        assert!(!b.join(valor).exists(), "{opcion} {valor}: creo {}", b.join(valor).display());
+        assert!(r.stdout.is_empty(), "{opcion} {valor}: {}", String::from_utf8_lossy(&r.stdout));
+    }
+    let mut hay: Vec<String> = std::fs::read_dir(&b).unwrap().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect();
+    hay.sort();
+    assert_eq!(hay, ["corpus", "tmp"], "una corrida rechazada dejo algo");
+    // `./-h` es la ruta: la corrida entera necesita node.
+    if test_util::requiere_node() {
+        let r = en_b(&[c, "--out", "./-h", "--minifier", "oxc", "--no-cache", "--jobs", "1"]);
+        assert_eq!(rc(&r), Some(0), "{}", err(&r));
+        assert!(b.join("-h/oxc+carril_a+tal_cual/CORRIDA.txt").is_file(), "{}", err(&r));
+    }
     std::fs::remove_dir_all(&b).unwrap();
 }
 

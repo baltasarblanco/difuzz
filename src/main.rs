@@ -102,7 +102,9 @@ uso: difuzz <corpus_dir> [--out DIR] [--minifier M] [--config C] [--forma F] [--
   esta (DIFUZZ_ORACULO=ninguno lo apaga). Si no hay, un aviso al arrancar y los panics van a
   panic/ como siempre
   --help, -h     imprimir esta ayuda (stdout) y salir con 0, en cualquier posicion menos como valor
-                 de otra opcion (`--out -h` es el directorio -h)
+                 de otra opcion. Como valor de --out, --cache, --indice, --emitir o --cruce, -h,
+                 --help u otra opcion de la linea uso: es un error de uso (2); para una ruta con
+                 ese nombre, ./-h
 
   salida (R2-H06): cada caso termina en un destino, div/ known/ panic/ recursos/ (un directorio por
   caso), en iguales (sin archivo) o con una fila en descartes.tsv (caso, causa, elapsed_ms), incluidos
@@ -148,7 +150,8 @@ const OPCIONES_CON_VALOR: [&str; 15] = [
 ];
 
 /// R2-H09: `--help`/`-h` solo como argumento propio, no como el valor de una
-/// opcion: `--out -h` es el directorio `-h` (antes pedia la ayuda y salia con 0).
+/// opcion (antes `--out -h` pedia la ayuda y salia con 0). E4 (decisiones del 10-oct,
+/// fila 8): como valor de una opcion de ruta, `Cli::parse` lo rechaza (`valor_de_ruta`).
 fn pide_ayuda(args: &[String]) -> bool {
     let mut it = args.iter();
     while let Some(a) = it.next() {
@@ -160,6 +163,35 @@ fn pide_ayuda(args: &[String]) -> bool {
         }
     }
     false
+}
+
+/// E4 (decisiones del 10-oct, fila 8): las opciones cuyo valor es una ruta. Antes tomaban
+/// cualquier valor: `corpus --out --help` creaba el directorio `--help` y salia con 0.
+const OPCIONES_DE_RUTA: [&str; 5] = ["--out", "--cache", "--indice", "--emitir", "--cruce"];
+
+/// E4: si `v` es `-h` o una opcion que nombran las lineas `uso:` del USAGE (hasta la primera
+/// linea en blanco; las mismas que cuenta el test de `tests/salida_usuario.rs`). Sale del
+/// USAGE, como `opciones_con_valor_al_dia`: no hay otra lista a mano.
+fn es_opcion_de_difuzz(v: &str) -> bool {
+    v == "-h"
+        || USAGE
+            .split("\n\n")
+            .next()
+            .unwrap_or_default()
+            .split(|c: char| !(c.is_ascii_alphanumeric() || c == '-'))
+            .any(|t| t.len() > 2 && t.starts_with("--") && t == v)
+}
+
+/// E4: el valor de una opcion de ruta. `-h`, `--help` u otra opcion de difuzz es un error de
+/// uso (lo mas probable es que falte el valor); cualquier otro valor es la ruta, tal cual
+/// (`./-h` sigue sirviendo).
+fn valor_de_ruta(opcion: &str, v: String) -> Result<PathBuf, String> {
+    debug_assert!(OPCIONES_DE_RUTA.contains(&opcion), "{opcion}");
+    if es_opcion_de_difuzz(&v) {
+        let que = if opcion == "--emitir" { "un archivo" } else { "un directorio" };
+        return Err(format!("{opcion} espera una ruta y recibio la opcion {v}; para {que} con ese nombre usa ./{v}"));
+    }
+    Ok(PathBuf::from(v))
 }
 
 /// Las opciones con valor repetidas (`--jobs 2 --jobs 4`): gana la ultima, como
@@ -277,7 +309,7 @@ impl Cli {
         let mut it = args.into_iter();
         while let Some(arg) = it.next() {
             match arg.as_str() {
-                "--out" => out = PathBuf::from(it.next().ok_or("--out necesita un valor")?),
+                "--out" => out = valor_de_ruta("--out", it.next().ok_or("--out necesita un valor")?)?,
                 "--timeout-ms" => {
                     let v = it.next().ok_or("--timeout-ms necesita un valor")?;
                     timeout = Duration::from_millis(
@@ -310,9 +342,9 @@ impl Cli {
                     minifier = backend::Minifier::parse(&v)
                         .ok_or_else(|| format!("--minifier invalido: {v} ({})", backend::Minifier::ALL))?;
                 }
-                "--cache" => cache = Some(PathBuf::from(it.next().ok_or("--cache necesita un valor")?)),
+                "--cache" => cache = Some(valor_de_ruta("--cache", it.next().ok_or("--cache necesita un valor")?)?),
                 "--no-cache" => no_cache = true,
-                "--indice" => indice = Some(PathBuf::from(it.next().ok_or("--indice necesita un valor")?)),
+                "--indice" => indice = Some(valor_de_ruta("--indice", it.next().ok_or("--indice necesita un valor")?)?),
                 "--invocar" => invocar = true,
                 "--en-proceso" => subproceso = false,
                 "--mem-hijo" => {
@@ -323,8 +355,8 @@ impl Cli {
                     }
                     mem_hijo = Some(m);
                 }
-                "--emitir" => emitir = Some(PathBuf::from(it.next().ok_or("--emitir necesita un archivo")?)),
-                "--cruce" => cruce = Some(PathBuf::from(it.next().ok_or("--cruce necesita un directorio")?)),
+                "--emitir" => emitir = Some(valor_de_ruta("--emitir", it.next().ok_or("--emitir necesita un archivo")?)?),
+                "--cruce" => cruce = Some(valor_de_ruta("--cruce", it.next().ok_or("--cruce necesita un directorio")?)?),
                 "--mutaciones" => {
                     let v = it.next().ok_or("--mutaciones necesita un valor")?;
                     mutaciones = v.parse().map_err(|_| format!("--mutaciones invalido: {v}"))?;
@@ -2812,8 +2844,8 @@ mod tests {
     }
 
     /// R2-H09: `--help`/`-h` cuenta como ayuda en cualquier posicion, menos como el
-    /// valor de una opcion. `--out -h` sigue por Cli::parse: sin corpus, error de
-    /// uso (2); con corpus, el directorio `-h`.
+    /// valor de una opcion. `--out -h` sigue por Cli::parse, que lo rechaza (E4): error
+    /// de uso (2), con o sin corpus; `./-h` es el directorio.
     #[test]
     fn ayuda_solo_como_argumento_propio() {
         use super::{pide_ayuda, Cli};
@@ -2824,9 +2856,69 @@ mod tests {
         for a in [&["--out", "-h"][..], &["c", "--out", "--help"], &["--emitir", "-h"], &["c", "--minifier", "-h"], &["c", "--out"], &[]] {
             assert!(!pide_ayuda(&v(a)), "{a:?}");
         }
-        assert_eq!(Cli::parse(v(&["--out", "-h"])).err().as_deref(), Some("falta <corpus_dir>"));
-        assert_eq!(Cli::parse(v(&["c", "--out", "-h"])).unwrap().out, std::path::PathBuf::from("-h"));
+        let rechazo = "--out espera una ruta y recibio la opcion -h; para un directorio con ese nombre usa ./-h";
+        assert_eq!(Cli::parse(v(&["--out", "-h"])).err().as_deref(), Some(rechazo));
+        assert_eq!(Cli::parse(v(&["c", "--out", "-h"])).err().as_deref(), Some(rechazo));
+        assert_eq!(Cli::parse(v(&["c", "--out", "./-h"])).unwrap().out, std::path::PathBuf::from("./-h"));
         assert!(Cli::parse(v(&["c", "--minifier", "-h"])).err().is_some_and(|e| e.starts_with("--minifier invalido: -h")));
+    }
+
+    /// E4 (decisiones del 10-oct, fila 8): el valor de una opcion de ruta no puede ser `-h`,
+    /// `--help` ni otra opcion de la linea `uso:` (error de uso, con el mensaje que dice como
+    /// nombrar esa ruta). Cualquier otro valor no cambia: `./-h`, `./--help`, un `--rara` que
+    /// difuzz no conoce, `--permission` (una opcion de node que el USAGE nombra solo en el texto)
+    /// o `-x` siguen siendo la ruta.
+    #[test]
+    fn opcion_como_valor_de_ruta() {
+        use super::{Cli, OPCIONES_DE_RUTA};
+        let v = |a: &[&str]| a.iter().map(|s| s.to_string()).collect::<Vec<String>>();
+        for o in OPCIONES_DE_RUTA {
+            let que = if o == "--emitir" { "un archivo" } else { "un directorio" };
+            for val in ["-h", "--help", "--jobs", "--out", "--no-cache", "--sandbox-red", "--emitir", "--cruce"] {
+                // Con y sin corpus: el rechazo llega antes que "falta <corpus_dir>" o que la
+                // combinacion invalida de --emitir/--cruce con un corpus.
+                for args in [vec![o, val], vec!["c", o, val]] {
+                    let e = Cli::parse(v(&args)).err();
+                    let esperado = format!("{o} espera una ruta y recibio la opcion {val}; para {que} con ese nombre usa ./{val}");
+                    assert_eq!(e.as_deref(), Some(esperado.as_str()), "{args:?}");
+                }
+            }
+            for val in ["./-h", "./--help", "--rara", "--permission", "-x", "--", "dir"] {
+                let cli = Cli::parse(v(&[o, val])).or_else(|_| Cli::parse(v(&["c", o, val])));
+                let ruta = cli.map(|c| match o {
+                    "--out" => Some(c.out),
+                    "--cache" => c.cache,
+                    "--indice" => c.indice,
+                    "--emitir" => c.emitir,
+                    _ => c.cruce,
+                });
+                assert_eq!(ruta.ok().flatten(), Some(std::path::PathBuf::from(val)), "{o} {val}");
+            }
+        }
+    }
+
+    /// E4: `es_opcion_de_difuzz` (las opciones de la linea `uso:` del USAGE) al dia con
+    /// Cli::parse: de cada `--algo` que nombra el USAGE entero, es opcion de difuzz si y solo si
+    /// Cli::parse la conoce (o es `--help`). Asi una opcion nueva que falte en la linea `uso:`, o
+    /// una de node nombrada en el texto (`--permission`), no se cuela.
+    #[test]
+    fn opciones_de_la_linea_uso_al_dia() {
+        use super::{es_opcion_de_difuzz, Cli, USAGE};
+        let mut opciones: Vec<&str> = USAGE
+            .split(|c: char| !(c.is_ascii_alphanumeric() || c == '-'))
+            .filter(|t| t.starts_with("--") && t.len() > 2)
+            .collect();
+        opciones.sort_unstable();
+        opciones.dedup();
+        let mut de_difuzz = 0;
+        for o in opciones {
+            let conocida = o == "--help" || !Cli::parse(vec![o.to_string()]).err().unwrap_or_default().starts_with("opcion desconocida");
+            assert_eq!(es_opcion_de_difuzz(o), conocida, "{o}");
+            de_difuzz += usize::from(conocida);
+        }
+        // 22 opciones de Cli::parse mas --help (recontar si se agrega una).
+        assert_eq!(de_difuzz, 23);
+        assert!(es_opcion_de_difuzz("-h") && !es_opcion_de_difuzz("-x") && !es_opcion_de_difuzz("--"));
     }
 
     /// Opciones con valor repetidas: Cli::parse se queda con la ultima (como antes)
@@ -2842,11 +2934,13 @@ mod tests {
         assert_eq!(cli.jobs, 3);
         assert_eq!(cli.minifier.name(), "swc");
         // Sin aviso: una sola vez cada una, flags sin valor repetidos, y el valor de
-        // una opcion que parece opcion (`--out --jobs` es el directorio --jobs).
+        // una opcion que parece opcion (`--out --jobs`: no cuenta como --jobs repetida;
+        // E4: Cli::parse lo rechaza, y `./--jobs` es el directorio).
         for a in [&["c", "--jobs", "2", "--out", "x"][..], &["c", "--no-cache", "--no-cache"], &["c", "--jobs", "2", "--out", "--jobs"], &[]] {
             assert!(opciones_repetidas(&v(a)).is_empty(), "{a:?}");
         }
-        assert_eq!(Cli::parse(v(&["c", "--jobs", "2", "--out", "--jobs"])).unwrap().out, std::path::PathBuf::from("--jobs"));
+        assert!(Cli::parse(v(&["c", "--jobs", "2", "--out", "--jobs"])).err().is_some_and(|e| e.starts_with("--out espera una ruta")));
+        assert_eq!(Cli::parse(v(&["c", "--jobs", "2", "--out", "./--jobs"])).unwrap().out, std::path::PathBuf::from("./--jobs"));
     }
 
     /// OPCIONES_CON_VALOR al dia con Cli::parse: de cada opcion que nombra el USAGE
