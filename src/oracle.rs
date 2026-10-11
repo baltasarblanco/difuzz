@@ -50,7 +50,7 @@ pub fn compare(a: &Exec, b: &Exec) -> Verdict {
     // entero, con su posicion, para reconocerlo como marco.
     // 7.5: solo de los archivos de marcos que V8 formateo en A o en B (y los de difuzz).
     let archivos = archivos_de_marco(a, b);
-    let n = |s: &str| normalize_stack_positions(&normalize_names(s), &archivos);
+    let n = |s: &str| normalize_stack_positions(&nombres_de_celda(s), &archivos);
     let (na, nb) = (n(&a.stdout), n(&b.stdout));
     if na == nb {
         Verdict::Same
@@ -69,8 +69,53 @@ pub fn compare(a: &Exec, b: &Exec) -> Verdict {
 /// `recheck::mensaje_con_nombre_localizado`).
 pub fn normalizadas(a: &Exec, b: &Exec) -> (String, String) {
     let archivos = archivos_de_marco(a, b);
-    let n = |s: &str| normalize_stack_positions(&normalize_names(s), &archivos);
+    let n = |s: &str| normalize_stack_positions(&nombres_de_celda(s), &archivos);
     (n(&a.stdout), n(&b.stdout))
+}
+
+thread_local! {
+    /// 9.1: ver `con_nombres_crudos`. Por hilo: cada worker procesa un caso a la vez y todas
+    /// las comparaciones del caso (la de main y las de los re-chequeos) corren en su hilo.
+    static NOMBRES_CRUDOS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// 9.1 (H3 de la revision del bloque 8): mientras viva lo que devuelve, las comparaciones de
+/// este hilo (`compare`, `normalizadas`, `symptom`, `nombres_de_celda`) conservan, si `crudos`,
+/// los nombres que imprime `util.inspect` en vez de borrarlos con `normalize_names`. Lo fija
+/// `main::process_case` para todo el caso con `Minifier::preserva_nombres` de la celda: con
+/// keep_names (carril_a) el minifier promete el `.name` de funciones y clases, y
+/// `[Function: handler]` contra `[Function: e]` es un bug suyo, no ruido. Sin keep_names
+/// (core_defaults) se borran como siempre. Un hilo que no lo fija (tests) los borra.
+pub fn con_nombres_crudos(crudos: bool) -> NombresDeCelda {
+    NombresDeCelda(NOMBRES_CRUDOS.with(|c| c.replace(crudos)))
+}
+
+/// Restaura el modo anterior del hilo al salir (tambien si el caso entra en panico).
+pub struct NombresDeCelda(bool);
+
+impl Drop for NombresDeCelda {
+    fn drop(&mut self) {
+        NOMBRES_CRUDOS.with(|c| c.set(self.0));
+    }
+}
+
+/// 9.1: `compare` da Same si se borran los nombres de `util.inspect` (como en una celda sin
+/// keep_names). Con los nombres crudos y una divergencia, es que A y B solo difieren en esos
+/// nombres: la traza lo dice (`main::compare_and_report`).
+pub fn solo_nombres_de_inspect(a: &Exec, b: &Exec) -> bool {
+    let _borrados = con_nombres_crudos(false);
+    matches!(compare(a, b), Verdict::Same)
+}
+
+/// `s` con los nombres de `util.inspect` borrados (`normalize_names`), salvo que el caso en
+/// curso los compare crudos (`con_nombres_crudos`). Para comparar A con B, o con algo que
+/// hace las veces de B; A contra A (`main::same_exec`) sigue con `normalize_names`.
+pub fn nombres_de_celda(s: &str) -> String {
+    if NOMBRES_CRUDOS.with(std::cell::Cell::get) {
+        s.to_string()
+    } else {
+        normalize_names(s)
+    }
 }
 
 fn throw_line(s: &str) -> Option<&str> {
@@ -87,6 +132,9 @@ fn throw_line(s: &str) -> Option<&str> {
 /// `hoist_props` la mueve a una variable mangleada pasa a llamarse `o`. Eso no
 /// es un bug (casos 2508_5/6, unsafe_evaluate_object_2). Una funcion sigue sin
 /// ser igual a un numero: `[Function]` contra `6` diverge igual.
+///
+/// 9.1: las comparaciones de A con B pasan por `nombres_de_celda`, que con keep_names en la
+/// celda no llama a esta funcion.
 pub fn normalize_names(s: &str) -> String {
     const OPENERS: [&str; 5] = [
         "[Function",
@@ -264,13 +312,14 @@ pub fn normalize_paths(s: &str) -> String {
 }
 
 /// M4: el hash de sintoma de una divergencia, uno solo para known-sintomas.tsv,
-/// el reporter y el indice. Sin nombres de funciones (normalize_names), sin
+/// el reporter y el indice. Sin nombres de funciones (normalize_names; 9.1: salvo con
+/// keep_names en la celda, `nombres_de_celda`), sin
 /// rutas por proceso (normalize_paths) y sin el prefijo de `temp_dir()` (puede
 /// cambiar entre corridas con TMPDIR).
 pub fn symptom(kind: Kind, a: &Exec, b: &Exec) -> u64 {
     let tmp = std::env::temp_dir().to_string_lossy().trim_end_matches('/').to_string();
     let n = |s: &str| {
-        let s = normalize_names(&normalize_paths(s));
+        let s = nombres_de_celda(&normalize_paths(s));
         if tmp.is_empty() {
             s
         } else {
@@ -695,6 +744,64 @@ mod tests {
         assert_ne!(n("[Function \n1\n]"), n("[Function \n2\n]"));
         assert_ne!(n("[class [1] 2]"), n("[class [3] 4]"));
         assert_eq!(n("[Function: f]\n[class A]"), "[Function]\n[class]");
+    }
+
+    /// 9.1 (H3 de la revision del bloque 8): con los nombres crudos (keep_names en la celda),
+    /// `[Function: handler]` contra `[Function: e]` diverge; sin ellos (default del hilo, y
+    /// core_defaults) se borran como antes. El modo vuelve al anterior al soltar la guarda.
+    #[test]
+    fn nombres_crudos_por_celda() {
+        use super::{compare, con_nombres_crudos, nombres_de_celda, normalizadas, solo_nombres_de_inspect, symptom, Exec, Kind, Status, Verdict};
+        let ex = |out: &str| Exec {
+            status: Status::Exited(0),
+            stdout: out.into(),
+            stderr: String::new(),
+            flags: Vec::new(),
+            elapsed: std::time::Duration::ZERO,
+            ctl: String::new(),
+        };
+        let same = |a: &str, b: &str| matches!(compare(&ex(a), &ex(b)), Verdict::Same);
+        let pares = [
+            ("[Function: handler]\n", "[Function: e]\n"),
+            ("[class Handler]\n", "[class e]\n"),
+            ("[Function: bound handler]\n", "[Function: bound e]\n"),
+            ("[Function: #handler]\n", "[Function: #e]\n"),
+            ("[AsyncFunction: h] { a: 1 }\n", "[AsyncFunction: e] { a: 1 }\n"),
+            ("[class B extends A]\n", "[class B extends e]\n"),
+            ("[Function: f]\n", "[Function (anonymous)]\n"),
+        ];
+        for (a, b) in pares {
+            assert!(same(a, b), "borrados: {a:?}");
+        }
+        {
+            let _g = con_nombres_crudos(true);
+            for (a, b) in pares {
+                assert!(matches!(compare(&ex(a), &ex(b)), Verdict::Divergence(Kind::Stdout)), "crudos: {a:?}");
+                assert!(solo_nombres_de_inspect(&ex(a), &ex(b)), "{a:?}");
+                // solo_nombres_de_inspect no cambia el modo del hilo.
+                assert!(!same(a, b), "crudos despues de solo_nombres_de_inspect: {a:?}");
+                let (na, nb) = normalizadas(&ex(a), &ex(b));
+                assert_ne!(na, nb);
+                assert_ne!(symptom(Kind::Stdout, &ex(a), &ex("x\n")), symptom(Kind::Stdout, &ex(b), &ex("x\n")));
+            }
+            assert!(same("[Function: f]\n", "[Function: f]\n"));
+            assert_eq!(nombres_de_celda("[Function: f]"), "[Function: f]");
+            // Una diferencia que no es de nombres no es "solo nombres".
+            assert!(!solo_nombres_de_inspect(&ex("[Function: f]\n1\n"), &ex("[Function: e]\n2\n")));
+            {
+                let _h = con_nombres_crudos(false);
+                assert!(same("[Function: handler]\n", "[Function: e]\n"), "anidada");
+            }
+            assert!(!same("[Function: handler]\n", "[Function: e]\n"), "la anidada restaura crudos");
+        }
+        assert!(same("[Function: handler]\n", "[Function: e]\n"), "la guarda restaura el default");
+        assert_eq!(nombres_de_celda("[Function: f]"), "[Function]");
+        assert_eq!(symptom(Kind::Stdout, &ex("[Function: a]\n"), &ex("x\n")), symptom(Kind::Stdout, &ex("[Function: b]\n"), &ex("x\n")));
+        // Una funcion sigue sin ser igual a un numero, en los dos modos.
+        assert!(!same("[Function: f]\n", "6\n"));
+        let _g = con_nombres_crudos(true);
+        assert!(!same("[Function: f]\n", "6\n"));
+        assert!(!solo_nombres_de_inspect(&ex("[Function: f]\n"), &ex("6\n")));
     }
 
     /// n-ruido (t-real): las posiciones de los marcos se borran; el nombre, la cantidad y

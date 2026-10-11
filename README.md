@@ -624,14 +624,29 @@ Principios:
   una línea impresa con `x.js:L:C` da `iguales` aunque la posición cambie (MEDIDO, revisión de la
   integración del bloque 7).
 - **Los nombres de funciones y clases que imprime `util.inspect`** (`[Function: f]`,
-  `[class A]`, ...): la comparación los borra en todas las celdas (`oracle::normalize_names`,
-  `src/oracle.rs:90`, desde `compare` en `src/oracle.rs:53`), porque `hoist_props` y los nombres
-  inferidos los cambian sin que sea un bug. Con keep_names (carril_a) eso tapa un bug de
-  keep_names impreso así: `console.log(handler)` con `handler` un parámetro con default anónimo
-  que oxc 0.153.0 manglea da `[Function: handler]` contra `[Function: e]` y va a `iguales` en las 4
-  celdas de oxc (MEDIDO, H3 de la revisión del bloque 8, repro `b03-keepnames-inspect-previo`). Es
-  previo al bloque 8 y no se cambió: hacerlo depende del preset y toca el oráculo entero. El mismo
-  bug impreso como texto (`handler.name`) sí va a `div/` en carril_a.
+  `[class A]`, `bound f`, `#f`, ...) **se comparan según la celda** (9.1). Sin keep_names
+  (core_defaults) la comparación los borra (`oracle::normalize_names`): el mangle y los nombres
+  inferidos los cambian sin que sea un bug. Con keep_names (carril_a, `Minifier::preserva_nombres`)
+  el minifier promete el `.name`, y todas las comparaciones del caso los ven crudos: la de A con B,
+  las de los re-chequeos (B == A', las líneas de `localizada_con_marca`, `mensaje_nombre`) y el
+  síntoma de `known-sintomas.tsv` (por eso su encabezado pasó a `sintoma v3`: las tablas viejas se
+  descartan una vez). `console.log(handler)` con `handler` un parámetro con default anónimo que oxc
+  0.153.0 manglea da `[Function: handler]` contra `[Function: e]` y va a `div/` con el paso
+  `nombres_inspect` en la traza (antes de 9.1 iba a `iguales` en las 4 celdas: H3 de la revisión
+  del bloque 8; casos `25-b91-`). El modo lo fija `main::process_case` por caso
+  (`oracle::con_nombres_crudos`, por hilo). Lo que cuesta, MEDIDO en el corpus de SWC (3119 casos,
+  9e52cef contra 9.1): en oxc carril_a y core_defaults ningún caso cambia de destino; en swc
+  carril_a, 3: `hoist_props/issue_2508_5` y `_6` pasan de `iguales` a `div/` (`o.f = function
+  (){}` movida a una variable mangleada: `[Function: f]` contra `[Function: n]`) y
+  `reduce_vars/unsafe_evaluate_object_2` a `known/` (backlog de SWC; `[Function: cube]` contra una
+  anónima). Son los casos por los que se agregó `normalize_names` en septiembre: el `.name`
+  cambia aunque swc tenga `keep_fnames`; si eso es un bug de swc o algo que `keep_fnames` no
+  promete no está decidido, y quedan en `div/` (la dirección segura). Sigue borrándolos A contra
+  A (`main::same_exec`: el determinismo, la caché envenenada y el renombre de `arguments` del
+  re-chequeo sloppy): ahí los nombres no salen del minifier. B contra B con contadores o con el
+  sensor (`recheck::comparar_caminos`, `camino_sensor_i3`) pasa por `compare` y también los ve
+  crudos: si el texto instrumentado cambiara un nombre inferido, el camino queda sin probar y el
+  caso va a `div/` (la dirección segura; no medido aparte).
 - **El sensor de violaciones atrapadas se apaga a las 256 pausas** (`MAX_PAUSAS` en el preload):
   cada excepción atrapada lo pausa y cuesta de 0,5 ms (sin marcos) a 1,4 ms (50 marcos de
   profundidad); sin tope, 10 000 excepciones atrapadas tardan de 5 a 15 s y llegan al timeout por
@@ -718,8 +733,9 @@ Sin `node` en el `PATH`, los tests que lo necesitan fallan con un mensaje claro.
 
 - **Golden de detección** (`tests/golden/`): 16 casos con bugs conocidos de oxc y swc, en 8
   celdas, más `--invocar` y `--stubs`; la clase esperada de cada caso está en `esperado.tsv`.
-- **Aceptación de los re-chequeos** (`tests/aceptacion/rechequeos/`): 153 casos que combinan un
-  bug real de oxc con un flag de asunción, en las 4 celdas de oxc (612 comparaciones).
+- **Aceptación de los re-chequeos** (`tests/aceptacion/rechequeos/`): 159 casos que combinan un
+  bug real de oxc con un flag de asunción (o con la forma en que se imprime), en las 4 celdas de oxc
+  (636 comparaciones).
 
 ```sh
 tests/golden/verificar.sh --jobs 4                    # sale con 0 y "comparaciones=N fallas=0"

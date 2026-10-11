@@ -394,7 +394,7 @@ pub const SAL_TOSTRING: &str = "/*dz*/";
 /// que imprima a proposito una linea con forma de marco o el toString entero en la rama
 /// del contenido fijo.
 pub fn localizada_con_marca(a: &runner::Exec, b: &runner::Exec, a2: &runner::Exec, salada: &runner::Exec) -> bool {
-    let lines = |e: &runner::Exec| oracle::normalize_names(&e.stdout).lines().map(String::from).collect::<Vec<_>>();
+    let lines = |e: &runner::Exec| oracle::nombres_de_celda(&e.stdout).lines().map(String::from).collect::<Vec<_>>();
     let (la, lb, l2, ls) = (lines(a), lines(b), lines(a2), lines(salada));
     let throw = format!("{}throw ", runner::DZ);
     let cubre = |i: usize, x: &str, y: &str, z: &str| {

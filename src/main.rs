@@ -917,8 +917,9 @@ fn main() {
         &cli.corpus,
         &cell_out,
         // M4: "sintoma v2" (sin rutas por proceso): las tablas viejas se
-        // descartan por el encabezado en vez de dar drift masivo.
-        known::fnv1a(&[runner::PRELOAD, cell.as_str(), "sintoma v2"]),
+        // descartan por el encabezado en vez de dar drift masivo. 9.1: "v3", con keep_names
+        // en la celda el sintoma conserva los nombres de util.inspect (oracle::symptom).
+        known::fnv1a(&[runner::PRELOAD, cell.as_str(), "sintoma v3"]),
         cli.minifier,
     );
     let ctx = Ctx {
@@ -1180,6 +1181,9 @@ fn process_case(
 ) {
     stats.total += 1;
     let rel = path.strip_prefix(&cli.corpus).unwrap_or(path);
+    // 9.1 (H3 de la revision del bloque 8): con keep_names en la celda, todas las comparaciones
+    // del caso (tambien las de los re-chequeos) ven los nombres de `util.inspect`.
+    let _nombres = oracle::con_nombres_crudos(ctx.medido.is_some_and(|m| m.minifier.preserva_nombres(m.preset, m.kind)));
 
     let raw = match std::fs::read_to_string(path) {
         Ok(s) => s,
@@ -2052,6 +2056,14 @@ fn compare_and_report(
             if let Some(p) = paso_sensor {
                 traza.anteponer("sensor", p);
             }
+            // 9.1: solo puede pasar con los nombres crudos (keep_names en la celda): con los
+            // nombres borrados `compare` ya habria dado Same arriba.
+            if oracle::solo_nombres_de_inspect(&a, &b) {
+                traza.anteponer(
+                    "nombres_inspect",
+                    "A y B difieren solo en nombres que imprime util.inspect ([Function: x], [class X]); la celda promete keep_names (9.1)",
+                );
+            }
             if why.is_some() {
                 stats.known += 1;
             } else {
@@ -2868,6 +2880,66 @@ mod tests {
             .unwrap()
             .join()
             .unwrap();
+    }
+
+    /// 9.1 (H3 de la revision del bloque 8), de punta a punta: oxc 0.153.0 con keep_names manglea
+    /// un parametro con default anonimo y `console.log(handler)` da `[Function: handler]` contra
+    /// `[Function: e]`. Con la celda en `ctx.medido`, carril_a (keep_names) va a div/ con el paso
+    /// `nombres_inspect`; core_defaults (sin keep_names) y un ctx sin celda (`medido: None`)
+    /// borran los nombres como antes: iguales. El control (formas que keep_names cubre) es igual
+    /// en las dos. Al salir de `process_case` el hilo vuelve a borrar nombres.
+    #[test]
+    fn nombres_de_inspect_con_keep_names() {
+        use super::{backend::Minifier, cache, clasificar::Medido, known, minify, oracle, process_case, runner, triage, Cli, Ctx, Stats};
+        if !crate::test_util::requiere_node() {
+            return;
+        }
+        let d = std::env::temp_dir().join(format!("difuzz-test-b91-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        let corpus = d.join("corpus");
+        for (caso, js) in [
+            ("param", "function run(p) {\n  const check = (handler = () => {}) => { console.log(handler); };\n  check();\n  return p;\n}\nrun();\n"),
+            ("control", "function run(p) {\n  const handler = () => {};\n  class Klass {}\n  console.log(handler, Klass);\n  return p;\n}\nrun();\n"),
+        ] {
+            std::fs::create_dir_all(corpus.join(caso)).unwrap();
+            std::fs::write(corpus.join(caso).join("input.js"), js).unwrap();
+        }
+        let preload = runner::Preload::write_tagged("b91").unwrap();
+        let cache = cache::CacheA::new(None, &[]);
+        let triage = triage::Triage::load(&d);
+        let known = known::Known::load(&d, &d, 0, Minifier::Oxc);
+        let kind = minify::SourceKind::Script;
+        for (preset, con_celda, div) in [
+            (minify::Preset::CarrilA, true, 1),
+            (minify::Preset::CoreDefaults, true, 0),
+            (minify::Preset::CarrilA, false, 0),
+        ] {
+            let out = d.join(format!("out-{}-{con_celda}", preset.name()));
+            std::fs::create_dir_all(&out).unwrap();
+            let reporter = oracle::Reporter::new(&out, "test".into(), runner::PRELOAD);
+            let medido = con_celda.then_some(Medido { minifier: Minifier::Oxc, preset, kind });
+            let ctx = Ctx { reporter: &reporter, known: &known, cache: &cache, triage: &triage, medido };
+            let cli = Cli::parse(
+                [corpus.to_str().unwrap(), "--minifier", "oxc", "--config", preset.name(), "--no-cache"].iter().map(|s| s.to_string()).collect(),
+            )
+            .unwrap();
+            let cfg = preset.build(Minifier::Oxc, kind);
+            let r = runner::Runner::new(&preload, crate::test_util::id_runner(), std::time::Duration::from_secs(10));
+            let mut st = Stats::default();
+            process_case(&ctx, &r, &cfg, None, &cli, &mut st, &corpus.join("param/input.js"));
+            assert_eq!((st.divergences, st.known, st.same), (div, 0, 1 - div), "param {} {con_celda}: {}", preset.name(), st.line());
+            let mut st = Stats::default();
+            process_case(&ctx, &r, &cfg, None, &cli, &mut st, &corpus.join("control/input.js"));
+            assert_eq!((st.divergences, st.known, st.same), (0, 0, 1), "control {} {con_celda}: {}", preset.name(), st.line());
+            if div == 1 {
+                let meta = std::fs::read_to_string(out.join("div/param/meta.txt")).unwrap();
+                assert!(meta.contains("  nombres_inspect: A y B difieren solo en nombres"), "{meta}");
+                assert!(std::fs::read_to_string(out.join("div/param/b.stdout")).unwrap().starts_with("[Function: e]"));
+            }
+            // El modo no se queda en el hilo.
+            assert_eq!(oracle::nombres_de_celda("[Function: f]"), "[Function]");
+        }
+        std::fs::remove_dir_all(&d).unwrap();
     }
 
     /// R1-H12/A6, de punta a punta: con un panic forzado en todo el analisis de

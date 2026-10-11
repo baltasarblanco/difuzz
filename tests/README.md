@@ -41,8 +41,8 @@ tests/golden/verificar.sh [--jobs N] [BINARIO] [DIR_SALIDA]
 
 ## Aceptación de los re-chequeos — `tests/aceptacion/rechequeos/`
 
-153 casos que combinan un bug real de oxc con un flag de asunción, en las 4 celdas de oxc (153 × 4 = 612
-comparaciones): 21 de la revisión 1 (C4, `00-` a `10-`), 9 adversariales del revisor de la fase R (`r01` a
+159 casos que combinan un bug real de oxc con un flag de asunción (o con la forma en que se imprime), en las 4
+celdas de oxc (159 × 4 = 636 comparaciones): 21 de la revisión 1 (C4, `00-` a `10-`), 9 adversariales del revisor de la fase R (`r01` a
 `r10`, sin `r05`), `14-tdz-positivo`, 11 de los flags que antes no tenían re-chequeo (`15-` coerción, `16-`
 built-ins, `17-` contenido de `toString`/`.stack`, `18-` profundidad: positivos y adversariales con el Issue A),
 15 de la revisión de t-int (`19-`: el bug adentro del código que el re-chequeo neutraliza; r03, r06 y r13 son
@@ -66,11 +66,14 @@ contra `e is not a function`; 3 positivos y 3 con un bug real al lado, en el có
 o dentro de la expresión que V8 escribe), 3 de H1 de la revisión del bloque 8 (`24-b83h1-`: con keep_names
 oxc manglea un parámetro con default anónimo y el `.name` que el programa imprime con la forma del mensaje
 cambia; van a `div/` en carril_a y a `known/` en core_defaults, donde keep_names está apagado; `n03` lee el
-`.name` con una clave armada en runtime) y 2 del sensor perezoso en B (`24-b87-`, ítem 8.7: una TDZ atrapada
+`.name` con una clave armada en runtime), 2 del sensor perezoso en B (`24-b87-`, ítem 8.7: una TDZ atrapada
 por un `try` armado en runtime, que `runner::puede_atrapar` no ve en el minificado; con el bug en el catch van
-a `div/`). Los `19-`, `20-` y `22-` esperan `div/` en todas las celdas; los `21-`, `23-` y `24-`, `div/` salvo
-los positivos (menos `24-b83-p02` en core_defaults, que sigue en `div/`: el marco del stack cambia de
-nombre) y los `24-b83h1-` en core_defaults.
+a `div/`) y 6 de los nombres que imprime `util.inspect` (`25-b91-`, ítem 9.1: el mismo bug de keep_names que
+`24-b83h1-`, visto como `[Function: handler]` contra `[Function: e]`, con clase, `bound`, privado y `catch`;
+`c01` es el control con las formas que keep_names cubre). Los `19-`, `20-` y `22-` esperan `div/` en todas las
+celdas; los `21-`, `23-` y `24-`, `div/` salvo los positivos (menos `24-b83-p02` en core_defaults, que sigue en
+`div/`: el marco del stack cambia de nombre) y los `24-b83h1-` en core_defaults. Los `25-b91-p` esperan `div/`
+en carril_a e igual en core_defaults (sin keep_names los nombres se borran); `25-b91-c01`, igual en las 4.
 Destino esperado en `esperado.tsv` (mismo formato que el golden). Reutiliza `tests/golden/verificar.sh`.
 Lo que la aceptación no cubre: un programa en que oxc pliega mal la condición y borra la rama entera de la
 violación (B no depende de la asunción y no se distingue de un minificado que la aprovechó; ver "Límites

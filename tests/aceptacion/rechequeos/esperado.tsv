@@ -739,3 +739,21 @@
 24-b87-n02-tdz-catch-oculto-tope	oxc-a-carril_a	div:Stdout
 24-b87-n02-tdz-catch-oculto-tope	oxc-b-core_defaults	div:Stdout
 24-b87-n02-tdz-catch-oculto-tope	oxc-b-carril_a	div:Stdout
+# 9.1 (H3 de la revision del bloque 8, rev-b8-A b03): el mismo bug de keep_names que 24-b83h1 (oxc 0.153.0
+# manglea un parametro con default anonimo, el default de un patron en `catch` y un campo privado), visto con
+# util.inspect: `[Function: handler]` contra `[Function: e]`, `[class Handler]`, `bound handler`, `#handler`.
+# oracle::normalize_names borraba los nombres en todas las celdas: con 9e52cef iban a iguales en las 4. Ahora,
+# con keep_names en la celda (carril_a, `Minifier::preserva_nombres`), las comparaciones del caso los ven
+# crudos: div/ con el paso `nombres_inspect`. En core_defaults (sin keep_names) se siguen borrando: igual. c01
+# (control): las formas que keep_names cubre (declarador, declaracion, expresion con nombre) no cambian en
+# carril_a, y en core_defaults el mangle legitimo se borra: igual en las 4. MEDIDO con el binario de 9.1 y 9e52cef.
+25-b91-p01-inspect-param	oxc-a-carril_a	div:Stdout
+25-b91-p01-inspect-param	oxc-b-carril_a	div:Stdout
+25-b91-p02-inspect-clase	oxc-a-carril_a	div:Stdout
+25-b91-p02-inspect-clase	oxc-b-carril_a	div:Stdout
+25-b91-p03-inspect-bound	oxc-a-carril_a	div:Stdout
+25-b91-p03-inspect-bound	oxc-b-carril_a	div:Stdout
+25-b91-p04-inspect-privado	oxc-a-carril_a	div:Stdout
+25-b91-p04-inspect-privado	oxc-b-carril_a	div:Stdout
+25-b91-p05-inspect-catch	oxc-a-carril_a	div:Stdout
+25-b91-p05-inspect-catch	oxc-b-carril_a	div:Stdout
