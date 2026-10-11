@@ -631,6 +631,73 @@ corpus en la variable `CORPUS` (o `DIFUZZ_CORPUS`; el de tests de SWC es
 2). Las variables y sus defaults están en `scripts/subir-oxc.sh --help`. Es retomable: ante un
 corte, el mismo comando sigue desde el primer paso sin terminar.
 
+## Corpus
+
+difuzz recibe un directorio con archivos `input.js`. Los corpus de `tests/` sirven para verificar
+difuzz, no para buscar bugs; para eso se usan tres, cada uno con un rol (decisión D2,
+10-oct-2026):
+
+| Corpus | Rol | De dónde sale | Cuándo se corre |
+|---|---|---|---|
+| Fixtures de SWC (`<clon de swc>/crates/swc_ecma_minifier/tests`, ~3100 casos) | regresión de difuzz y comparabilidad entre binarios (el arnés, `scripts/comparar-binarios.sh`; la muestra fija de `tests/muestra/` sale de acá) | ya existe | con cada cambio de difuzz |
+| Sintético (`scripts/generar.cjs`) | exploración por familias de pasadas de oxc, y regresión de los bugs ya reportados | se genera en cada tanda, determinista por semilla | `regresion`: con cada versión nueva de oxc y antes de cada PR; `explorar`: al escribir o cambiar una familia |
+| Código real (`scripts/armar-corpus-real.py`) | barrido periódico: patrones de código publicado que el generador no imagina | se arma con lo que ya está en el disco (caché de npm, `node_modules`) | con cada versión nueva de oxc |
+
+**Sintético.** `scripts/barrido-sintetico.sh` genera la tanda y la corre (oxc, carril B por
+defecto). La semilla es obligatoria y queda en `OUT/TANDA.txt` junto con el sha256 del árbol
+generado (misma semilla, misma tanda, byte a byte):
+
+```sh
+scripts/barrido-sintetico.sh --semilla 59 regresion OUT/regresion [BIN]     # 1000 casos, --con-conocidos
+scripts/barrido-sintetico.sh --semilla 1010 explorar F3 OUT/explorar-f3 [BIN] # 5000 casos de una familia
+```
+
+`regresion` genera a propósito los patrones de los bugs reportados: **tiene** que dar `div/`; un bug
+que deja de aparecer está arreglado (o se rompió el generador). En `explorar` esos patrones no
+salen, así que cada `div/` es candidato a bug nuevo. Una familia que da 0 bugs nuevos en 5000 casos
+deja de explorarse y queda solo en la regresión. Las familias (F1-F10) y las opciones del generador
+están en `node scripts/generar.cjs --help`.
+
+**Código real.** `scripts/armar-corpus-real.py` lee las fuentes que se le pasan (no hace red),
+filtra (tamaño, forma CJS/ESM, minificados, capacidades peligrosas, `require` dinámico), deduplica
+por sha256, descarta lo que node no compila (Flow, JSX, TypeScript: un solo proceso de node que
+compila sin ejecutar) y deja `fuentes.tsv` con el origen de cada caso. Un corpus por forma y por
+tamaño:
+
+```sh
+F="--cacache $HOME/.npm/_cacache --dir OTRO_PROYECTO/node_modules"
+scripts/armar-corpus-real.py $F --forma cjs --requires externos --neutralizar si --n 100000 --out CORPUS/cjs
+scripts/armar-corpus-real.py $F --forma esm --requires externos --neutralizar si --n 100000 --out CORPUS/esm
+# archivos de 30 KB a 3 MB, minificados incluidos: --min 30001 --max 3000000 --minificados
+scripts/barrido-real.sh CORPUS/cjs OUT/cjs [BIN]    # el carril sale de fuentes.tsv: cjs -> a, esm -> b
+```
+
+`barrido-real.sh` corre la configuración que encontró bugs en código real (oxc, `--invocar
+--stubs`) y fija `--sandbox-red`, sin opción para apagarlo: el corpus es código ajeno. El corpus
+real no se versiona (las licencias son de sus autores); sí sus herramientas. Crecerlo bajando
+paquetes de npm necesita red y queda para decidir.
+
+Cuánto tarda (MEDIDO el 10-oct con `--jobs 8` y el binario de `fe0cd86`, antes del bloque 7, en
+una máquina de 32 núcleos con carga 25-45 de otros procesos):
+
+| Qué | Casos | Tiempo |
+|---|---|---|
+| `barrido-sintetico.sh regresion` | 1000 | 61 s |
+| `barrido-sintetico.sh explorar F3` | 5000 | 144 s |
+| `armar-corpus-real.py` (una pasada por ~33 000 archivos, con el pre-filtro) | — | ~56 s |
+| `barrido-real.sh`, pool local entero (4 corpus: CJS y ESM, chicos y de 30 KB a 3 MB) | 18 749 | 23 min 35 s (~13 casos/s; CJS ~12/s, ESM ~25/s) |
+
+Con `--sandbox-red`, un `require` de un directorio (`require('..')`, `require('../')`) hace que node
+lea un `package.json` fuera de lo permitido y lance `ERR_ACCESS_DENIED` (no `MODULE_NOT_FOUND`, así
+que `--stubs` no lo cubre). Pasa igual en el original y en el minificado: el caso se compara con la
+nota de los dos y cuenta en `ambos=` (ver [Sandbox](#sandbox)); si el programa no atrapa el error,
+lo que sigue al `require` no corre. En el pool local son 968 de 18 749 casos, que antes de 7.9 iban
+a `descartes.tsv` con causa `sandbox`.
+
+Para triar un `div/` contra los bugs ya conocidos, el método que se usó es neutralizar cada familia
+del catálogo (pasar el valor por una identidad opaca para oxc) y volver a correr: la familia que,
+sola, hace que original y minificado coincidan es la causa.
+
 ## Licencia
 
 difuzz todavía no tiene un archivo de licencia propio ni un campo `license` en `Cargo.toml`:
