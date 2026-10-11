@@ -212,10 +212,21 @@ una nota en `meta.txt`:
   addons, WASI, señales, carril B y `--invocar`; red, DNS y `fetch` con `--sandbox-red`), en oxc y
   swc, 3 veces cada uno: ninguno fue a `div/` por el sandbox. Uno que imprime `e.stack` va a `div/`
   en `core_defaults` igual que sin sandbox (lo cambian los nombres acortados, no el sandbox).
-  Límite: si el permiso negado no se atrapa y mata a los dos en el mismo punto, A y B dan lo
-  mismo y el caso cuenta como igual (y en `ambos=`) aunque el resto del programa no haya corrido
-  en ninguno de los dos; antes de 7.9 iba a `descartes.tsv`. No inventa divergencias, pero lo que
-  sigue a ese punto queda sin probar.
+  **Si el permiso negado no se atrapa y mata a los dos** (8.2): lo que seguía a ese punto no
+  corrió en ninguno. Si A y B dan lo mismo, el caso **no cuenta como igual**: va a
+  `descartes.tsv` con causa **`sandbox_corto`** y al contador `corto=` (con 7.9 contaba como
+  igual sin haber probado el resto; antes de 7.9 iba a descartes con causa `sandbox`). Si
+  divergen (un bug antes de ese punto, o en lo que cada uno imprime al morir), va a `div/` como
+  cualquier otro. Se mira solo el throw que terminó el programa: un permiso negado que el
+  programa atrapó antes no cuenta, y un programa que toca el sandbox y después muere por otra
+  cosa se compara como siempre. El throw cuenta como del sandbox si el preload ve en el objeto
+  lanzado el `code` de un permiso negado (aunque el stack no lo diga, como el de un addon) o si
+  su mensaje o su stack tienen uno de los textos de abajo (con `--sandbox-red`, también un error
+  de red sin atrapar; `node:sqlite`). Vale en cualquier pasada; en la de `--invocar` o en el
+  envoltorio de módulos descarta el caso entero, como antes de 7.9. Lo que **no** se ve: un
+  permiso negado que el programa atrapa y relanza como otro error sin su mensaje (cuenta como
+  igual, como con 7.9), y una función invocada por `--invocar` que lanza el permiso negado (el
+  preload la atrapa y sigue con las demás: no termina el programa).
 - **solo el original** (`sandbox: solo el original toco el sandbox`): con el bug, el minificado no
   llega a abrir el archivo. Es un cambio de comportamiento.
 
@@ -224,10 +235,13 @@ Si lo toca solo el minificado (el minifier cambió qué archivo abre), se compar
 pudo correr (falla del runner al lanzarlo: no se sabe si lo toca ni hay con qué comparar); en las
 variantes, eso cuenta en `original=`. La celda lleva `+sandbox` o `+sandbox_red`, la caché de A no
 se comparte con las corridas sin sandbox y al terminar se imprime (y queda en `CORRIDA.txt`) la
-línea `sandbox: modo=... descartados=N solo_original=M ambos=K` (`N`: casos descartados por eso;
+línea `sandbox: modo=... descartados=N solo_original=M ambos=K corto=J` (`N`: casos descartados por eso;
 `M` y `K`: pasadas en que solo el original, o los dos, tocaron el sandbox y se compararon, también
 las de las variantes de `--mutaciones`; en el carril B, un módulo mudo puede sumar dos: la pasada
-cruda y la del envoltorio de módulos).
+cruda y la del envoltorio de módulos; `J`: casos y variantes descartados con causa
+`sandbox_corto`, que también cuentan en `K` porque los dos tocaron el sandbox). Una variante
+`sandbox_corto` tiene su fila en `descartes.tsv`, cuenta en `original=` de las mutaciones y no
+cuenta como comparada.
 
 Cómo se reconoce que una ejecución tocó el sandbox: el preload anota `ERR_ACCESS_DENIED`,
 `ERR_DLOPEN_DISABLED`, el `EPERM` de `kill` y el de `os.setPriority` (`uv_os_setpriority`) en su
@@ -745,7 +759,12 @@ el original y en el minificado: con `fe0cd86` eran 968 de 18 749 casos del pool 
 sobre esos 968 con la configuración de `barrido-real.sh`: cada caso queda en la misma clase que sin
 el sandbox (939 iguales, 14 `enlace`, 11 `exit`, 2 `timeout` y 2 `observado_sin_salida` en
 `descartes.tsv`; 0 `div/`), y `lanzaron` baja de 941 a 74 (los que antes morían en el `require` y
-ahora corren el resto).
+ahora corren el resto). Con 8.2 encima (un caso en que A y B mueren igual por un permiso negado sin
+atrapar va a `sandbox_corto`, ver [Sandbox](#sandbox)) las cifras no cambian: `corto=0` en los 968.
+En los primeros 500 casos del corpus CJS (`barrido-real.sh --limit 500`, MEDIDO el 11-oct), 8.2 solo
+mandaba 32 casos de iguales a `sandbox_corto`, todos con un `require` de un directorio (`'..'`,
+`'../..'`, `'.'`); con 8.4 y 8.2 juntos quedan 0 en `sandbox_corto`: 29 iguales y 3 `enlace`, lo mismo
+que sin el sandbox.
 
 Para triar un `div/` contra los bugs ya conocidos, el método que se usó es neutralizar cada familia
 del catálogo (pasar el valor por una identidad opaca para oxc) y volver a correr: la familia que,

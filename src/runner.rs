@@ -61,6 +61,11 @@ pub const MAX_PAUSAS_MAYOR: &str = "4096";
 /// denegado: la escribe el preload, `notarSandbox`, o `run_file` si la salida lo muestra).
 pub const SANDBOX: &str = "sandbox";
 
+/// 8.2: linea del canal de control cuando el throw no atrapado que termino el programa es un
+/// permiso negado (la escribe el preload en `onThrow`, junto con `sandbox`). La usa
+/// `Runner::murio_por_sandbox`.
+pub const SANDBOX_SIN_ATRAPAR: &str = "sandbox_sin_atrapar";
+
 /// n-sandbox (`--sandbox`, `--sandbox-red`): con que encierro corre node. A, B,
 /// confirmaciones, re-chequeos y `--invocar` pasan todos por `run_file` con el mismo.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default)]
@@ -435,6 +440,19 @@ impl Runner {
     /// ni una linea `sandbox` que un programa escriba a mano en el canal cambia nada.
     pub fn toco_sandbox(&self, e: &Exec) -> bool {
         self.sandbox.activo() && e.toco_sandbox()
+    }
+
+    /// 8.2: `e` (corrida por este runner) termino por un throw no atrapado que es un permiso
+    /// negado del sandbox: lo que seguia a ese punto no corrio. El preload lo anota
+    /// (`SANDBOX_SIN_ATRAPAR`: el objeto lanzado tiene el `code` de un permiso negado, aunque el
+    /// stack no lo diga, como ERR_DLOPEN_DISABLED) o el mensaje y el stack del throw (la linea
+    /// `exc`) tienen uno de los textos de `marca_sandbox` (con `--sandbox-red`, tambien un error
+    /// de red; `node:sqlite` apagado). Mira solo el throw que mato al programa, no un permiso
+    /// negado y atrapado antes. Sin sandbox, false siempre.
+    pub fn murio_por_sandbox(&self, e: &Exec) -> bool {
+        self.toco_sandbox(e)
+            && e.threw()
+            && (e.ctl.lines().any(|l| l == SANDBOX_SIN_ATRAPAR) || e.exc().is_some_and(|x| marca_sandbox(&x, self.sandbox)))
     }
 
     /// Decision del usuario (09-oct): con `false`, node corre siempre sin el

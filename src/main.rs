@@ -72,7 +72,8 @@ uso: difuzz <corpus_dir> [--out DIR] [--minifier M] [--config C] [--forma F] [--
   --sandbox      node corre con su modelo de permisos (--permission de node 24): lee solo el
                  preload, el programa y su directorio de trabajo, escribe solo en ese directorio,
                  sin procesos hijos, workers, addons ni WASI. A y B igual; si tocan un permiso
-                 negado se comparan igual, con una nota en meta.txt (default: off).
+                 negado se comparan igual, con una nota en meta.txt; si los dos mueren por el
+                 sin atraparlo y dan lo mismo, descarte sandbox_corto (default: off).
                  NO frena la red ni los sockets unix: no es una barrera contra codigo hostil
   --sandbox-red  --sandbox mas namespaces de Linux sin root (usuario, red, montajes): sin red
                  (solo un loopback propio), /run tapado y los sockets unix del sistema tapados.
@@ -544,6 +545,10 @@ struct Stats {
     /// 7.9: pasadas en que el original y el minificado tocaron el sandbox (se comparan, con
     /// la nota). En la misma linea aparte (`ambos=`), con las de las variantes.
     ambos_sandbox: usize,
+    /// 8.2: casos descartados (causa `sandbox_corto`) porque A y B dieron lo mismo y los dos
+    /// terminaron por un permiso negado sin atrapar (`Runner::murio_por_sandbox`): lo que
+    /// seguia no corrio en ninguno. En la misma linea aparte (`corto=`), con las variantes.
+    sandbox_corto: usize,
     /// R1-H13: casos (pasada cruda) cuyo analisis con el parser de SWC necesito
     /// errores recuperados u otro carril, sin perder ningun texto.
     analisis_recuperado: usize,
@@ -607,6 +612,7 @@ impl Stats {
         self.a_sandbox += o.a_sandbox;
         self.solo_a_sandbox += o.solo_a_sandbox;
         self.ambos_sandbox += o.ambos_sandbox;
+        self.sandbox_corto += o.sandbox_corto;
         self.analisis_recuperado += o.analisis_recuperado;
         self.analisis_perdido += o.analisis_perdido;
         self.lint_sin_analisis += o.lint_sin_analisis;
@@ -1029,7 +1035,13 @@ fn main() {
     // 7.9: `ambos=` (al final, para no mover los campos de antes) cuenta pasadas, tambien
     // las de las variantes de --mutaciones.
     let ambos = stats.ambos_sandbox + stats.mutaciones.ambos_sandbox;
-    let linea_sandbox = cli.sandbox.activo().then(|| format!("sandbox: modo={} descartados={} solo_original={solo_original} ambos={ambos}", cli.sandbox.nombre(), stats.a_sandbox));
+    // 8.2: `corto=` (al final, por lo mismo) cuenta los casos y las variantes descartados
+    // porque A y B murieron igual por un permiso negado sin atrapar (causa `sandbox_corto`).
+    let corto = stats.sandbox_corto + stats.mutaciones.sandbox_corto;
+    let linea_sandbox = cli
+        .sandbox
+        .activo()
+        .then(|| format!("sandbox: modo={} descartados={} solo_original={solo_original} ambos={ambos} corto={corto}", cli.sandbox.nombre(), stats.a_sandbox));
     if let Some(l) = &linea_sandbox {
         println!("{l}");
     }
@@ -1711,6 +1723,8 @@ enum TocaSandbox {
     /// cambio de comportamiento. Las divergencias falsas que esto podria traer se midieron
     /// con programas sin bug que tocan el sandbox de muchas formas (45 programas, 3 veces cada
     /// uno, oxc y swc, `--sandbox` y `--sandbox-red`: 0 div/ atribuibles al sandbox; 7.9, 10-oct).
+    /// 8.2: si dan lo mismo y los dos murieron por el permiso negado sin atraparlo,
+    /// `compare_and_report` lo descarta (`sandbox_corto`): no cuenta como igual.
     AyB(Box<runner::Exec>),
     /// El original lo toco y el minificado no corrio (fallo del runner): no se sabe si lo
     /// toca ni se puede comparar. Es lo unico que va a descartes con causa `sandbox`.
@@ -1771,6 +1785,25 @@ fn con_nota_ambos(nota: Option<String>) -> String {
     }
 }
 
+/// 8.2: A y B (corridos por `runner`) terminaron los dos por un throw no atrapado que es un
+/// permiso negado del sandbox (`Runner::murio_por_sandbox`). Si ademas dan lo mismo, lo que
+/// seguia a ese punto no corrio en ninguno: la comparacion no prueba el resto del programa.
+/// Una divergencia (antes del punto, o en lo que se imprime al morir) se reporta igual.
+fn corto_por_sandbox(runner: &runner::Runner, a: &runner::Exec, b: &runner::Exec) -> bool {
+    runner.murio_por_sandbox(a) && runner.murio_por_sandbox(b)
+}
+
+/// 8.2: el caso (o la variante) cuyo A y B dieron lo mismo y murieron por el sandbox
+/// (`corto_por_sandbox`) va a descartes.tsv con causa `sandbox_corto`, no a iguales (con 7.9
+/// contaba como igual; antes de 7.9, como cualquier caso que tocaba el sandbox, iba a
+/// descartes con causa `sandbox`). Cierra la pasada: devuelve `true` (para
+/// `compare_and_report`, caso cerrado).
+fn descarte_corto(ctx: &Ctx, stats: &mut Stats, rel: &Path, elapsed: Duration) -> bool {
+    stats.sandbox_corto += 1;
+    ctx.reporter.discard(rel, "sandbox_corto", elapsed);
+    true
+}
+
 /// 7.9: la nota de la pasada sin la de A-y-B (como `sin_nota_solo_a`).
 fn sin_nota_ambos(nota: Option<String>) -> Option<String> {
     let n = nota?;
@@ -1814,6 +1847,9 @@ struct Ctx<'a> {
 /// significa "iguales"; el llamador decide si eso cuenta como `same` o si sigue
 /// a la pasada observada. `b_previo`: el B que ya corrio `toca_sandbox` con este
 /// mismo runner (2c, solo-A); si esta, no se vuelve a correr (7.7, MENOR 8).
+/// 8.2: si A y B dan lo mismo pero los dos murieron por un permiso negado sin atrapar, el
+/// caso va a descartes (`sandbox_corto`) y devuelve `true`; en cualquier pasada (tambien la de
+/// `--invocar` o el envoltorio de modulos: el caso entero se descarta, como antes de 7.9).
 #[allow(clippy::too_many_arguments)]
 fn compare_and_report(
     ctx: &Ctx,
@@ -1831,6 +1867,10 @@ fn compare_and_report(
 ) -> bool {
     // Mismo texto, mismo path, mismo preload: B daria lo mismo que A.
     if minified == original {
+        // 8.2: salvo que A (y el B que ya corrio, si esta) murio por el sandbox: descarte.
+        if runner.murio_por_sandbox(&a) && b_previo.as_ref().is_none_or(|b| runner.murio_por_sandbox(b)) {
+            return descarte_corto(ctx, stats, rel, a.elapsed);
+        }
         if !observed {
             stats.identical += 1;
         }
@@ -1884,8 +1924,10 @@ fn compare_and_report(
         eprintln!("runner: {e}");
         return true;
     }
+    let elapsed_a = a.elapsed;
     let (mut a, mut b) = match confirm(ctx, runner, stats, rel, original, minified, a, a_cached, b) {
-        Confirmed::Same => return false,
+        Confirmed::Same { corto: true } => return descarte_corto(ctx, stats, rel, elapsed_a),
+        Confirmed::Same { corto: false } => return false,
         Confirmed::Nondeterministic => return true,
         Confirmed::Divergence(ab) => *ab,
     };
@@ -1919,6 +1961,9 @@ fn compare_and_report(
     // la traza del omitido y el camino de B no se busca con el sensor (no se prende).
     let i3 = (paso_sensor.is_some() && !runner_con.sensor_omitido()).then_some(runner_con);
     match oracle::compare(&a, &b) {
+        // `confirm` ya compara (a, b) antes de devolver una divergencia: aca no deberia llegar
+        // un Same, pero si llega, con el mismo criterio de 8.2.
+        oracle::Verdict::Same if corto_por_sandbox(runner, &a, &b) => descarte_corto(ctx, stats, rel, a.elapsed),
         oracle::Verdict::Same => false,
         oracle::Verdict::Divergence(kind) => {
             stats.last_div = Some(kind);
@@ -1980,7 +2025,9 @@ fn compare_and_report(
 
 /// M3: resultado de confirmar una comparacion antes de clasificarla.
 enum Confirmed {
-    Same,
+    /// Iguales. 8.2: `corto`, si los dos (los ultimos A y B comparados) terminaron por un
+    /// permiso negado sin atrapar (`corto_por_sandbox`): no cuenta como igual, se descarta.
+    Same { corto: bool },
     /// A no se reproduce a si mismo: el caso se descarta (`no_determinista`).
     Nondeterministic,
     /// La divergencia sigue con este A y este B.
@@ -2014,7 +2061,7 @@ fn confirm(
     let diverges = |a: &runner::Exec, b: &runner::Exec| matches!(oracle::compare(a, b), oracle::Verdict::Divergence(_));
     let (mut a, mut b) = (a, b);
     if !diverges(&a, &b) {
-        return Confirmed::Same;
+        return Confirmed::Same { corto: corto_por_sandbox(runner, &a, &b) };
     }
     if b.status == Status::Timeout {
         let longer = (runner.timeout() * 4).max(a.elapsed * 20);
@@ -2022,7 +2069,7 @@ fn confirm(
         if !matches!(b2.status, Status::Timeout | Status::Failed(_)) {
             b = b2;
             if !diverges(&a, &b) {
-                return Confirmed::Same;
+                return Confirmed::Same { corto: corto_por_sandbox(runner, &a, &b) };
             }
         }
     }
@@ -2037,7 +2084,7 @@ fn confirm(
             ctx.cache.tombstone(runner, original);
             a = a1;
             if !diverges(&a, &b) {
-                return Confirmed::Same;
+                return Confirmed::Same { corto: corto_por_sandbox(runner, &a, &b) };
             }
         }
     }
@@ -2094,12 +2141,18 @@ struct MutStats {
     /// 7.9: variantes comparadas en que el original y el minificado tocaron el sandbox. Van
     /// a la linea `sandbox:` (`ambos=`), no a la de las mutaciones.
     ambos_sandbox: usize,
+    /// 8.2: variantes cuyo A y B dieron lo mismo y murieron por un permiso negado sin
+    /// atrapar (fila `sandbox_corto` en descartes.tsv). No cuentan como comparadas: suman a
+    /// `original=` de las mutaciones (su original no sirve para comparar el resto) y a
+    /// `corto=` de la linea `sandbox:`.
+    sandbox_corto: usize,
 }
 
 impl MutStats {
     fn merge(&mut self, o: &MutStats) {
         self.solo_a_sandbox += o.solo_a_sandbox;
         self.ambos_sandbox += o.ambos_sandbox;
+        self.sandbox_corto += o.sandbox_corto;
         self.variantes += o.variantes;
         self.comparadas += o.comparadas;
         self.iguales += o.iguales;
@@ -2314,9 +2367,15 @@ fn original_no_compila(runner: &runner::Runner, a: &runner::Exec, original: &str
 /// Devuelve `true` si hay hallazgo (div/ o known/) al que adjuntar la variante.
 /// Una variante cuyo A no se reproduce (`confirm` la descarto: `a_nondet`) no
 /// cuenta como comparada ni como igual: es un descarte con causa.
+/// 8.2: tampoco la que murio igual que su minificado por el sandbox (`sandbox_corto`).
 fn contar_variante(m: &mut MutStats, s: &Stats) -> bool {
     if s.a_nondet > 0 {
         m.no_determinista += 1;
+        return false;
+    }
+    if s.sandbox_corto > 0 {
+        m.original += 1;
+        m.sandbox_corto += 1;
         return false;
     }
     m.comparadas += 1;

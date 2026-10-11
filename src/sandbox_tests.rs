@@ -6,7 +6,8 @@
 //!   adentro del directorio de trabajo anda. Sin el sandbox, lo de siempre (y nunca marca).
 //! - El caso entero (`process_case`, como e2e_tests): 7.9, si el original y el minificado tocan
 //!   el sandbox, el caso se compara igual (con una nota en meta.txt): con un "bug" puesto a
-//!   mano va a div/, como sin el flag; sin bug, a iguales.
+//!   mano va a div/, como sin el flag; sin bug, a iguales. 8.2: si los dos mueren igual por
+//!   un permiso negado sin atrapar, a descartes con causa `sandbox_corto`.
 //! - Las senales (2b): con el sandbox, `process.kill` a otro proceso da EPERM (y marca); a si
 //!   mismo, a 0 y a su grupo anda (7.2: tambien con el `process.pid` ficticio, sin marcar).
 //! - La red (`--sandbox-red`, solo Linux con user namespaces): sin salida (ENETUNREACH), el
@@ -108,6 +109,23 @@ fn sandbox_bloquea_y_marca() {
     // Sin atrapar: lanza (exit 70) y tambien marca (el preload lo ve en onThrow).
     let e = con.run(&format!("{fs}.readFileSync({});\n", js_str(&senuelo)));
     assert!(e.threw() && e.toco_sandbox(), "{:?} {}", e.status, e.ctl);
+    // 8.2: y murio por el sandbox (el preload lo anota en el canal). Sin el sandbox, nunca.
+    assert!(con.murio_por_sandbox(&e) && e.ctl.lines().any(|l| l == crate::runner::SANDBOX_SIN_ATRAPAR), "{}", e.ctl);
+    assert!(!sin.murio_por_sandbox(&e));
+    // 8.2: el mismo error, atrapado, y despues otro sin atrapar: toco el sandbox pero no murio
+    // por el (se mira solo el throw que lo mata). Y atrapado sin mas: no lanzo.
+    let e = con.run(&format!("try {{ {fs}.readFileSync({}); }} catch (e) {{}}\nnull.x;\n", js_str(&senuelo)));
+    assert!(e.threw() && e.toco_sandbox() && !con.murio_por_sandbox(&e), "{:?} {}", e.status, e.ctl);
+    let e = con.run(&format!("try {{ {fs}.readFileSync({}); }} catch (e) {{ console.log(e.code); }}\n", js_str(&senuelo)));
+    assert!(e.toco_sandbox() && !con.murio_por_sandbox(&e), "{}", e.ctl);
+    // 8.2: un permiso negado relanzado con otro mensaje y otro stack: lo ve el preload por el
+    // `code` (el texto del throw ya no lo dice).
+    let e = con.run(&format!("try {{ {fs}.readFileSync({}); }} catch (e) {{ e.message = 'x'; e.stack = 'x'; throw e; }}\n", js_str(&senuelo)));
+    assert!(con.murio_por_sandbox(&e), "{:?} {}", e.status, e.ctl);
+    // 8.2 (limite documentado): relanzado como otro error, sin su `code` ni su mensaje, no se
+    // reconoce (cuenta como con 7.9).
+    let e = con.run(&format!("try {{ {fs}.readFileSync({}); }} catch (e) {{ throw new Error('x'); }}\n", js_str(&senuelo)));
+    assert!(e.threw() && e.toco_sandbox() && !con.murio_por_sandbox(&e), "{:?} {}", e.status, e.ctl);
     // Asincronico, atrapado por el programa: lo ve la salida.
     let e = con.run(&format!("{fs}.readFile({}, (err) => console.log(err && err.code));\n", js_str(&senuelo)));
     assert!(e.stdout.contains("ERR_ACCESS_DENIED") && e.toco_sandbox(), "{}", e.stdout);
@@ -272,7 +290,9 @@ fn sandbox_require_de_directorio() {
 /// tambien) se compara igual (7.9, revision fe0cd86 MENOR 3; antes iba a descartes con causa
 /// `sandbox` y se perdia el bug): con un "bug" despues del permiso negado y atrapado, div/
 /// con la nota de A-y-B en meta.txt, como sin el flag; sin bug (el mensaje entero del error
-/// impreso, o el mismo error sin atrapar), iguales. Y un minificado que toca el sandbox
+/// impreso), iguales. 8.2: si los dos mueren por el permiso negado sin atraparlo y dan lo
+/// mismo, descarte `sandbox_corto` (un addon y `node:sqlite` tambien); con el "bug" antes de
+/// ese punto, div/; si mueren por otra cosa despues de tocarlo, iguales. Y un minificado que toca el sandbox
 /// cuando el original no (el bug cambia la ruta) se compara: div/. 2c: y al reves, un original que lo toca cuando el minificado no (el
 /// bug hace que B no lea), tambien: div/, con la nota en meta.txt.
 #[test]
@@ -306,15 +326,32 @@ fn sandbox_destino_del_caso() {
     // (descarte `sandbox`; con 7.9, iguales sin correr el cuerpo).
     let dir = "var p = require('..');\nconsole.log(\"bug-no\", typeof p);\n".to_string();
     let dir_resolve = "var r; try { require.resolve('..'); r = 'si'; } catch (e) { r = e.code; }\nconsole.log(r, \"bug-no\");\n".to_string();
+    // 8.2: el "bug" ANTES del permiso negado sin atrapar: se ve aunque los dos mueran ahi.
+    let bug_antes = format!("console.log(\"bug-no\");\nrequire('fs').readFileSync({});\nconsole.log(2);\n", js_str(&senuelo));
+    // 8.2: un addon (ERR_DLOPEN_DISABLED, sin el codigo en el stack: solo lo ve el preload) y
+    // `node:sqlite` apagado (7.10: solo lo ve el texto del throw), sin atrapar.
+    let addon = format!("process.dlopen({{ exports: {{}} }}, {});\nconsole.log(\"bug-no\");\n", js_str(&senuelo));
+    let sqlite = "require('node:sqlite');\nconsole.log(\"bug-no\");\n".to_string();
+    // 8.2: toca el sandbox (atrapado) y despues muere por otra cosa: mira solo el throw que lo
+    // mata, asi que cuenta como igual.
+    let muere_por_otra = format!(
+        "var n = 1;\ntry {{ require('fs').readFileSync({}); }} catch (e) {{}}\nconsole.log(n);\nnull.x;\n",
+        js_str(&senuelo)
+    );
     // (caso, programa, (de, a) del "bug", flags, destino esperado)
     type Caso<'a> = (&'a str, String, (&'a str, String), &'a [&'a str], &'a str);
     let casos: Vec<Caso> = vec![
-        // Con el sandbox, A y B lanzan el mismo ERR_ACCESS_DENIED antes de llegar al "bug"
-        // (7.9: se comparan; antes, descarte): iguales. Sin el flag, el bug se ve: div/.
-        ("leer-con", leer.clone(), ("bug-no", "bug-si".into()), &["--sandbox"], "iguales"),
+        // Con el sandbox, A y B lanzan el mismo ERR_ACCESS_DENIED antes de llegar al "bug": lo
+        // que sigue no corre en ninguno. 8.2: descarte `sandbox_corto` (con 7.9 contaba como
+        // igual; antes de 7.9, descarte `sandbox`). Sin el flag, el bug se ve: div/.
+        ("leer-con", leer.clone(), ("bug-no", "bug-si".into()), &["--sandbox"], "descarte:sandbox_corto"),
         ("leer-sin", leer, ("bug-no", "bug-si".into()), &[], "div"),
-        ("hijo-con", hijo.clone(), ("bug-no", "bug-si".into()), &["--sandbox"], "iguales"),
+        ("hijo-con", hijo.clone(), ("bug-no", "bug-si".into()), &["--sandbox"], "descarte:sandbox_corto"),
         ("hijo-sin", hijo, ("bug-no", "bug-si".into()), &[], "div"),
+        ("corto-bug-antes", bug_antes, ("bug-no", "bug-si".into()), &["--sandbox"], "div"),
+        ("corto-addon", addon, ("bug-no", "bug-si".into()), &["--sandbox"], "descarte:sandbox_corto"),
+        ("corto-sqlite", sqlite, ("bug-no", "bug-si".into()), &["--sandbox"], "descarte:sandbox_corto"),
+        ("muere-por-otra", muere_por_otra, ("var n=1", "var n=0+1".into()), &["--sandbox"], "iguales"),
         ("ayb-bug", ayb_bug, ("bug-no", "bug-si".into()), &["--sandbox"], "div"),
         ("ambos-sin-bug", sin_bug, ("var n=1", "var n=0+1".into()), &["--sandbox"], "iguales"),
         // El original escribe adentro; el minificado (el bug) escribe afuera: B-solo.
@@ -366,11 +403,18 @@ fn sandbox_destino_del_caso() {
             causa.clone().unwrap_or_else(|| "iguales".into())
         };
         assert_eq!(donde, esperado, "{caso}: {} | {tsv}", st.line());
-        // 7.9: nada va a descartes por el sandbox (B corrio en todos).
-        let ambos = ["leer-con", "hijo-con", "ayb-bug", "ambos-sin-bug"].contains(&caso);
+        // 7.9: nada va a descartes con causa `sandbox` (B corrio en todos). 8.2: los que
+        // murieron igual por el sandbox van con `sandbox_corto`.
+        let ambos = ["leer-con", "hijo-con", "ayb-bug", "ambos-sin-bug", "corto-bug-antes", "corto-addon", "corto-sqlite", "muere-por-otra"]
+            .contains(&caso);
         assert_eq!(st.a_sandbox, 0, "{caso}");
         assert_eq!(st.solo_a_sandbox, usize::from(caso == "solo-a"), "{caso}");
         assert_eq!(st.ambos_sandbox, usize::from(ambos), "{caso}");
+        assert_eq!(st.sandbox_corto, usize::from(esperado == "descarte:sandbox_corto"), "{caso}: {}", st.line());
+        if esperado == "descarte:sandbox_corto" {
+            assert_eq!((st.same, st.divergences, st.known), (0, 0, 0), "{caso}: {}", st.line());
+            assert_eq!(tsv.lines().filter(|l| !l.starts_with('#')).count(), 1, "{caso}: {tsv}");
+        }
         if esperado == "div" {
             assert!(causa.is_none(), "{caso}: div/ y ademas descarte {causa:?}");
             let meta = std::fs::read_to_string(celda.join("div").join(caso).join("meta.txt")).unwrap();
@@ -547,6 +591,11 @@ fn sandbox_red() {
     let e = red.run(&conectar("9, '192.0.2.1'"));
     assert_eq!(e.stdout.trim(), "err ENETUNREACH");
     assert!(e.toco_sandbox());
+    // 8.2: atrapado, el programa no murio por el sandbox; sin el handler de `error`, si (el
+    // error de red sin atrapar: solo el texto del throw lo dice).
+    assert!(!red.murio_por_sandbox(&e));
+    let e = red.run("require('net').connect(9, '192.0.2.1');\n");
+    assert!(e.threw() && red.murio_por_sandbox(&e), "{:?} {}", e.status, e.ctl);
     // El loopback propio anda: un servidor y un cliente del mismo programa.
     let e = red.run(
         "const net = require('net');\
@@ -813,6 +862,80 @@ fn sandbox_ambos_modulo() {
     let meta = std::fs::read_to_string(celda.join("div").join(caso).join("meta.txt")).unwrap_or_default();
     assert_eq!(meta.matches("el original y el minificado tocaron el sandbox").count(), 1, "{} | {meta}", st.line());
     assert_eq!((st.ambos_sandbox, st.a_sandbox, st.divergences), (2, 0, 1), "{}", st.line());
+    drop(preload);
+    let _ = std::fs::remove_dir_all(&b);
+}
+
+/// 8.2: un permiso negado sin atrapar que mata al original y al minificado en el mismo punto.
+/// Carril B (el `readFileSync` en el cuerpo del modulo): descarte `sandbox_corto`, no iguales.
+/// Y las variantes de `--mutaciones` de un programa asi (con la identidad: el minificado es el
+/// mismo texto, y el atajo de "mismo texto" tampoco cuenta como igual): cada una va a
+/// descartes.tsv con `sandbox_corto`, suma a `original=` de las mutaciones y a `corto=`, y
+/// ninguna cuenta como comparada.
+#[test]
+fn sandbox_corto_modulo_y_variantes() {
+    if !crate::test_util::requiere_node() {
+        return;
+    }
+    let (b, senuelo) = base("corto");
+    let (corpus, out) = (b.join("corpus"), b.join("out"));
+    let preload = Preload::write_tagged("sandbox-corto").unwrap();
+    let cache = crate::cache::CacheA::new(None, &[]);
+    let triage = crate::triage::Triage::load(&out);
+    let correr = |caso: &str, js: &str, extra: &[&str], backend: Box<dyn Backend>| {
+        std::fs::create_dir_all(corpus.join(caso)).unwrap();
+        std::fs::write(corpus.join(caso).join("input.js"), js).unwrap();
+        let mut args: Vec<String> =
+            [corpus.to_str().unwrap(), "--out", out.to_str().unwrap(), "--no-cache", "--jobs", "1", "--sandbox"].iter().map(|s| s.to_string()).collect();
+        args.extend(extra.iter().map(|s| s.to_string()));
+        let cli = crate::Cli::parse(args).unwrap();
+        let known = crate::known::Known::load(&corpus, &out, 0, Minifier::Oxc);
+        let celda = out.join(format!("{caso}-{}", cli.cell()));
+        let reporter = crate::oracle::Reporter::new(&celda, cli.cell(), crate::runner::PRELOAD);
+        let runner = crate::runner_de_celda(&preload, crate::test_util::id_runner(), &cli);
+        let cfg = Config::from_backend(backend);
+        let ctx = crate::Ctx { reporter: &reporter, known: &known, cache: &cache, triage: &triage, medido: None };
+        let mut st = crate::Stats::default();
+        crate::process_case(&ctx, &runner, &cfg, None, &cli, &mut st, &corpus.join(caso).join("input.js"));
+        drop(runner);
+        drop(reporter);
+        let tsv = std::fs::read_to_string(celda.join("descartes.tsv")).unwrap_or_default();
+        let filas: Vec<(String, String)> = tsv
+            .lines()
+            .filter(|l| !l.starts_with('#'))
+            .filter_map(|l| {
+                let mut c = l.split('\t');
+                Some((c.next()?.to_string(), c.next()?.to_string()))
+            })
+            .collect();
+        (st, filas, celda)
+    };
+
+    let modulo = format!("import fs from \"node:fs\";\nfs.readFileSync({});\nexport const s = \"bug-no\";\n", js_str(&senuelo));
+    let (st, filas, celda) =
+        correr("m03-corto", &modulo, &["--carril", "b"], Box::new(Cambia { de: "bug-no".into(), a: "bug-si".into(), kind: SourceKind::Module }));
+    assert_eq!((st.sandbox_corto, st.same, st.divergences, st.known, st.a_sandbox), (1, 0, 0, 0, 0), "{}", st.line());
+    assert_eq!(filas.iter().map(|(_, c)| c.as_str()).collect::<Vec<_>>(), ["sandbox_corto"], "{filas:?}");
+    assert!(!celda.join("div").exists(), "{}", st.line());
+
+    // Sin la ruta del senuelo (lleva el pid): las variantes salen del fuente (semilla), y asi
+    // son siempre las mismas. `/etc/hostname`, solo con el sandbox (negado).
+    let script = "var a = 1 + 2;\nvar b = a * 3;\nconsole.log(a, b);\nrequire('fs').readFileSync('/etc/hostname');\nconsole.log(\"fin\");\n";
+    let (st, filas, _) = correr("v01-corto", script, &["--mutaciones", "6"], Box::new(Identidad { kind: SourceKind::Script }));
+    let m = &st.mutaciones;
+    assert_eq!((st.sandbox_corto, st.same, st.identical), (1, 0, 0), "{}", st.line());
+    // Las que siguen leyendo mueren igual: descarte. Las que no (borrada la lectura, otra ruta
+    // o `require` de otra cosa) se comparan: iguales (es la identidad). Ninguna diverge.
+    // MEDIDO (11-oct): 4 siguen leyendo una ruta negada (borrar el primer o el ultimo
+    // `console.log`, `2` -> `1` y la ruta `""`); 2 se comparan (la ruta `"dz"`: ENOENT adentro
+    // del directorio de trabajo; y borrar la lectura).
+    assert_eq!((m.variantes, m.sandbox_corto, m.iguales), (6, 4, 2), "{}", m.line());
+    assert_eq!((m.divergencias, m.conocidas, m.comparadas), (0, 0, m.iguales), "{}", m.line());
+    assert_eq!(m.comparadas + m.original + m.mudas, m.variantes, "{}", m.line());
+    assert!(m.original >= m.sandbox_corto, "{}", m.line());
+    let variantes_corto = filas.iter().filter(|(c, k)| c.contains("__mut") && k == "sandbox_corto").count();
+    assert_eq!(variantes_corto, m.sandbox_corto, "{filas:?}");
+    assert_eq!(filas.iter().filter(|(c, _)| !c.contains("__mut")).count(), 1, "{filas:?}");
     drop(preload);
     let _ = std::fs::remove_dir_all(&b);
 }

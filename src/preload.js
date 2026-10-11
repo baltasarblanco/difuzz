@@ -265,17 +265,23 @@
   const conPermisos = typeof process.permission === 'object' && process.permission !== null;
   const descriptorPropio = Object.getOwnPropertyDescriptor;
   const esProxy = require('util').types.isProxy;
+  // 8.2: devuelve si anoto (onThrow lo usa para `sandbox_sin_atrapar`).
   const notarSandbox = (e) => {
-    if (!conPermisos) return;
+    if (!conPermisos) return false;
+    let anoto = false;
+    const marcar = () => {
+      ctl('sandbox');
+      anoto = true;
+    };
     try {
-      if (e === null || (typeof e !== 'object' && typeof e !== 'function') || esProxy(e)) return;
+      if (e === null || (typeof e !== 'object' && typeof e !== 'function') || esProxy(e)) return false;
       const d = descriptorPropio(e, 'code');
-      if (d && (d.value === 'ERR_ACCESS_DENIED' || d.value === 'ERR_DLOPEN_DISABLED')) ctl('sandbox');
+      if (d && (d.value === 'ERR_ACCESS_DENIED' || d.value === 'ERR_DLOPEN_DISABLED')) marcar();
       // 2b: una senal a otro proceso que el filtro seccomp nego (runner::encerrar_senales):
       // `code` EPERM y `syscall` kill, los dos datos propios (MEDIDO node 24.14.1; tambien
       // `process._debugProcess`, que lanza `EPERM, Operation not permitted` con `syscall` kill).
       const s = descriptorPropio(e, 'syscall');
-      if (d && d.value === 'EPERM' && s && s.value === 'kill') ctl('sandbox');
+      if (d && d.value === 'EPERM' && s && s.value === 'kill') marcar();
       // 7.7: `os.setPriority` a otro proceso, negado por el mismo filtro: SystemError con
       // `code` ERR_SYSTEM_ERROR e `info` { code: 'EPERM', syscall: 'uv_os_setpriority' },
       // todos datos propios (MEDIDO node 24.14.1; `errno` y `syscall` del error son getters).
@@ -284,9 +290,10 @@
       if (d && d.value === 'ERR_SYSTEM_ERROR' && i !== null && typeof i === 'object' && !esProxy(i)) {
         const ic = descriptorPropio(i, 'code');
         const is = descriptorPropio(i, 'syscall');
-        if (ic && ic.value === 'EPERM' && is && is.value === 'uv_os_setpriority') ctl('sandbox');
+        if (ic && ic.value === 'EPERM' && is && is.value === 'uv_os_setpriority') marcar();
       }
     } catch {}
+    return anoto;
   };
   // 7.7 (revision fe0cd86, MENOR 4): las senales negadas que el programa atrapa sin el
   // sensor. `process._kill` (que no lanza) marca en su envoltorio (7.2, arriba).
@@ -775,7 +782,9 @@
       if (e instanceof ReferenceError && / before initialization/.test(e.message)) flags.add('tdz');
     } catch {}
     extendsFlag(e);
-    notarSandbox(e);
+    // 8.2: lo que mata al programa es un permiso negado: lo que seguia no corre
+    // (runner::Runner::murio_por_sandbox; si A y B dan lo mismo, main lo descarta).
+    if (notarSandbox(e)) ctl('sandbox_sin_atrapar');
     const t = thrownType(e);
     ctl(`throw ${t}`);
     // M21: mensaje y stack por el canal (no se comparan; van a a.exc/b.exc del hallazgo).
