@@ -4,10 +4,14 @@
 Solo lee las fuentes. Determinista: mismo disco + misma semilla => mismo corpus.
 
 Fuentes:
-  --dir D        directorios con node_modules u otros .js/.cjs/.mjs (repetible)
-  --cacache C    la cache de npm (~/.npm/_cacache): lee los tarballs del index-v5 sin extraerlos
+  --dir D        directorios con node_modules u otros .js/.cjs/.mjs (repetible). Un --dir que no
+                 es un directorio sale con 2 (antes se ignoraba en silencio)
+  --cacache C    la cache de npm (~/.npm/_cacache): lee los tarballs del index-v5 sin extraerlos.
+                 Sin C/index-v5/ sale con 2. Hace falta al menos una fuente (--dir o --cacache)
 
 Criterios (cada rechazo se cuenta por causa en <out>/stats.tsv):
+  - origen (ruta o npm:paquete:archivo) sin tab, \\n ni \\r: van sin escapar en una columna de
+    fuentes.tsv y romperian la fila (rechazo_nombre_tsv)
   - extension .js/.cjs/.mjs; nada de .min.js; tamano entre --min y --max bytes
   - UTF-8 valido; no parece minificado (linea media <= 200 y ninguna linea > 2000 chars)
   - sin capacidades peligrosas: fs, child_process, net, http(s), dgram, tls, worker_threads,
@@ -273,6 +277,17 @@ def main():
     ap.add_argument('--excluir', default='', help='fuentes.tsv de un corpus previo: no repetir sus hashes')
     ap.add_argument('--node', default='node', help='node para el pre-filtro de sintaxis (default: el del PATH)')
     a = ap.parse_args()
+    if a.n < 0:
+        ap.error(f'--n espera un entero >= 0 (vino {a.n})')
+    for d in a.dir:
+        # os.walk ignora en silencio un directorio que no existe: el corpus saldria vacio o mas chico.
+        if not os.path.isdir(d):
+            ap.error(f'--dir {d}: no es un directorio')
+    # Lo mismo con --cacache: sin index-v5, tarballs() no ve nada y el corpus saldria vacio con rc 0.
+    if a.cacache and not os.path.isdir(os.path.join(a.cacache, 'index-v5')):
+        ap.error(f'--cacache {a.cacache}: no es una cache de npm (falta index-v5/)')
+    if not a.dir and not a.cacache:
+        ap.error('hace falta --dir o --cacache')
 
     if os.path.exists(a.out):
         sys.exit(f'{a.out} ya existe')
@@ -294,6 +309,11 @@ def main():
 
     for origen, data in fuentes():
         vistos += 1
+        # El origen va tal cual en una columna de fuentes.tsv: un tab o un fin de linea correria las
+        # columnas (barrido-real.sh lee la forma por posicion; --excluir, el sha256).
+        if any(c in origen for c in '\t\n\r'):
+            stats['rechazo_nombre_tsv'] = stats.get('rechazo_nombre_tsv', 0) + 1
+            continue
         causa, info = clasificar(origen, data, a)
         if causa:
             stats['rechazo_' + causa] = stats.get('rechazo_' + causa, 0) + 1

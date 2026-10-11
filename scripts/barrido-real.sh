@@ -112,7 +112,10 @@ args=("$corpus" --out "$out" --minifier oxc --config carril_a --forma tal_cual -
 
 inicio=$(date -Is)
 t0=$(date +%s)
-"$bin" "${args[@]}" | tee "$out/barrido-carril_$carril.stdout"
+# tee -i: Ctrl-C llega a todo el grupo; sin -i tee moria en el acto, difuzz (que termina el caso
+# en curso y despues imprime el resumen) escribia en un pipe roto y salia con 101 en vez de 130, con
+# el .stdout vacio y CORRIDA.txt en "incompleta" (MEDIDO, 8.5). Con -i tee sigue hasta el EOF.
+"$bin" "${args[@]}" | tee -i "$out/barrido-carril_$carril.stdout"
 rc=${PIPESTATUS[0]}
 t1=$(date +%s)
 

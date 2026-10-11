@@ -31,7 +31,8 @@
 # por defecto (carril_a).
 # Cuanto tarda (MEDIDO el 10-oct, --jobs 8, maquina cargada): 61 s la regresion y 144 s una
 # exploracion.
-# Codigo de salida: el de difuzz (0 corrida entera, con o sin hallazgos), 2 por un error de uso o
+# Codigo de salida: el de difuzz (0 corrida entera, con o sin hallazgos; 130 interrumpida con
+# Ctrl-C, con TANDA.txt escrito), 2 por un error de uso o
 # si OUT ya tiene algo, 1 si el generador falla.
 # Dependencias: bash >= 4, node, fd, rg, sort, xargs, sha256sum, realpath, date, tee.
 set -uo pipefail
@@ -104,7 +105,8 @@ arbol=$(cd "$out/corpus" && fd -t f -0 . | LC_ALL=C sort -z | xargs -0 sha256sum
 args=("$out/corpus" --out "$out" --minifier oxc --carril "$carril" --jobs "$jobs")
 inicio=$(date -Is)
 t0=$(date +%s)
-"$bin" "${args[@]}" | tee "$out/difuzz.stdout"
+# tee -i: con Ctrl-C, ver el comentario igual en barrido-real.sh (sin -i: rc 101 y .stdout vacio).
+"$bin" "${args[@]}" | tee -i "$out/difuzz.stdout"
 rc=${PIPESTATUS[0]}
 t1=$(date +%s)
 

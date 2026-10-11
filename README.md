@@ -637,7 +637,8 @@ cargo test --release --test verificaciones -- --ignored --test-threads=1   # los
 
 Los scripts `scripts/matriz.sh` y `scripts/medir-serie.sh` (y `subir-oxc.sh`, abajo) toman el
 corpus de la variable `CORPUS` o, si falta, de `DIFUZZ_CORPUS`; sin ninguna de las dos salen con
-2. `matriz.sh` y `medir-serie.sh` no son ejecutables en el repo: se corren con `bash`.
+2. `matriz.sh` y `medir-serie.sh` son ejecutables en el repo (modo 100755): se corren directo
+(`scripts/matriz.sh ...`) o con `bash`.
 
 ## Subir la versión de oxc
 
