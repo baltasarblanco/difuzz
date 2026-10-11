@@ -243,6 +243,23 @@ sandbox, y con `--sandbox` marca el caso: si el original y el minificado lo hace
 la nota de A y B (antes de 7.9 iba a descartes y un bug real al lado no se veía; MEDIDO en la
 revisión de la integración del bloque 7).
 
+**`require` de un directorio** (8.4). Para resolver `require('..')`, `'../'`, `'.'` o `'/etc'` (un
+directorio que existe) node lee el `package.json` de ese directorio: un ancestro de la carpeta
+temporal de difuzz (el `TMPDIR` de la máquina, `/`) o la carpeta misma, fuera de lo permitido. El
+modelo de permisos lo niega en la búsqueda, y node lanzaba `ERR_ACCESS_DENIED` donde sin el sandbox
+da `MODULE_NOT_FOUND` (medido con node 24.14.1): el caso moría en el `require`, en el original y en
+el minificado, sin correr el resto. Con el sandbox, el preload toma ese `package.json` negado como
+uno que no existe (envuelve `Module._findPath`, que lo busca, y devuelve "no encontrado"): node arma
+su `MODULE_NOT_FOUND` de siempre, que va al enlace (`descartes.tsv`, causa `enlace`) o, con
+`--stubs`, al stub, igual que sin el sandbox. No se lee nada: lo negado sigue negado, sin marca de
+sandbox. Vale para `require`, `require.resolve` y `createRequire` (también desde el carril B). Un
+archivo de afuera que existe (`require('/etc/hostname')`, `require('../x.js')` con `x.js` afuera)
+resuelve y se niega al **cargarlo**: sigue tocando el sandbox. El `import` de un directorio no
+cambia: da `ERR_UNSUPPORTED_DIR_IMPORT` con y sin el sandbox. Lo que sí cambia: con el sensor de
+violaciones y sin `--stubs`, un `import()` de un directorio atrapado ya no marca el sandbox (node
+prueba la resolución de CommonJS para armar su mensaje, y el sensor veía ese `ERR_ACCESS_DENIED`
+atrapado por node).
+
 **Límites** (lo que el sandbox no frena):
 
 - El modelo de permisos de node **no es una barrera contra código hostil**: **no frena la
@@ -719,13 +736,16 @@ una máquina de 32 núcleos con carga 25-45 de otros procesos):
 | `armar-corpus-real.py` (una pasada por ~33 000 archivos, con el pre-filtro) | — | ~56 s |
 | `barrido-real.sh`, pool local entero (4 corpus: CJS y ESM, chicos y de 30 KB a 3 MB) | 18 749 | 23 min 35 s (~13 casos/s; CJS ~12/s, ESM ~25/s) |
 
-Con `--sandbox-red`, un `require` de un directorio (`require('..')`, `require('../')`) hace que node
-lea un `package.json` fuera de lo permitido y lance `ERR_ACCESS_DENIED` (no `MODULE_NOT_FOUND`, así
-que `--stubs` no lo cubre). Pasa igual en el original y en el minificado: el caso se compara con la
-nota de los dos y cuenta en `ambos=` (ver [Sandbox](#sandbox)); si el programa no atrapa el error,
-lo que sigue al `require` no corre en ninguno de los dos y el caso cuenta como igual sin que se
-pruebe lo que sigue (el límite de la sección Sandbox). En el pool local son 968 de 18 749 casos,
-que antes de 7.9 iban a `descartes.tsv` con causa `sandbox`.
+Un `require` de un directorio (`require('..')`, `require('../')`) aparece en código real (por
+ejemplo, los benchmarks de un paquete que cargan el paquete mismo). Con `--sandbox-red`, hasta 8.4 node lanzaba
+`ERR_ACCESS_DENIED` al leer el `package.json` de ese directorio y el caso moría en el `require`, en
+el original y en el minificado: con `fe0cd86` eran 968 de 18 749 casos del pool local en
+`descartes.tsv` (causa `sandbox`); con 7.9, iguales sin correr el resto. Desde 8.4 ese `require` da
+`MODULE_NOT_FOUND` como sin el sandbox (con `--stubs`, el stub; ver [Sandbox](#sandbox)). Medido
+sobre esos 968 con la configuración de `barrido-real.sh`: cada caso queda en la misma clase que sin
+el sandbox (939 iguales, 14 `enlace`, 11 `exit`, 2 `timeout` y 2 `observado_sin_salida` en
+`descartes.tsv`; 0 `div/`), y `lanzaron` baja de 941 a 74 (los que antes morían en el `require` y
+ahora corren el resto).
 
 Para triar un `div/` contra los bugs ya conocidos, el método que se usó es neutralizar cada familia
 del catálogo (pasar el valor por una identidad opaca para oxc) y volver a correr: la familia que,

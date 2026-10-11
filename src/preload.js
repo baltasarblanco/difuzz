@@ -673,6 +673,19 @@
   // atrapa errores que no son del programa (el hook de --stubs): al pausar, V8 formatea su
   // stack y prenderia `stack`. Lo define el sensor; sin inspector no hace nada.
   let sensor = () => {};
+  // 8.4: corre `f` con el sensor apagado, con apagados anidados (el hook de --stubs llama al
+  // resolve de node, que llama a `Module._findPath` envuelto mas abajo): solo el de afuera lo
+  // vuelve a prender. Sin la cuenta, el de adentro lo prenderia antes de tiempo y el sensor
+  // pausaria en el MODULE_NOT_FOUND que el hook de --stubs atrapa.
+  let sensorApagado = 0;
+  const sinSensor = (f) => {
+    if (sensorApagado++ === 0) sensor(false);
+    try {
+      return f();
+    } finally {
+      if (--sensorApagado === 0) sensor(true);
+    }
+  };
   // t-sensor: con DIFUZZ_SENSOR=perezoso (runner::puede_atrapar dijo que el programa no
   // puede atrapar una excepcion) el sensor no se prende al arrancar: queda aca y lo prende
   // `invocar` antes de la primera funcion que llama (el preload si atrapa lo que lanza).
@@ -1421,6 +1434,63 @@
     process.prependListener('uncaughtException', onLinkError);
     process.prependListener('unhandledRejection', onLinkError);
 
+    // 8.4 (= 7.12): con --permission, el `require` de un DIRECTORIO que existe (`'..'`, `'../'`,
+    // `'.'`, `'../..'`, `'/etc'`) lee su `package.json`, fuera de lo permitido, y node lanza
+    // ERR_ACCESS_DENIED desde la busqueda (`Module._findPath` -> tryPackage ->
+    // package_json_reader, MEDIDO node 24.14.1) donde sin el sandbox da MODULE_NOT_FOUND. Para
+    // el sandbox, un package.json de afuera es uno que no existe: `_findPath` devuelve `false`
+    // (no encontro) y node arma su MODULE_NOT_FOUND (mensaje con `Require stack`,
+    // `requireStack`), que va al enlace (71) o, con --stubs, al stub, igual que sin el sandbox.
+    // No se lee nada: lo negado sigue negado. Cubre lo que resuelve por CJS (`require`,
+    // `require.resolve`, `createRequire` y el resolve por defecto de los hooks de --stubs, que
+    // llaman a `Module._findPath` por la propiedad; MEDIDO). Solo esa lectura: cargar un archivo
+    // de afuera que existe (`require('/etc/hostname')`) se niega al cargar, fuera de `_findPath`,
+    // y sigue tocando el sandbox. ESM no lo necesita: `import` de un directorio da
+    // ERR_UNSUPPORTED_DIR_IMPORT con y sin el sandbox (MEDIDO). Con el sensor apagado mientras
+    // busca: si no, pausaria en el ERR_ACCESS_DENIED atrapado aca y marcaria `sandbox`. Mismos
+    // atributos y `length` (3) que el de node.
+    if (conPermisos) {
+      try {
+        const Module = require('module');
+        const desc = descriptorPropio(Module, '_findPath');
+        const real = desc && desc.value;
+        const aplicar = Reflect.apply;
+        // Sin getters ni Proxy: `code`, `permission` y `resource` son datos propios del error
+        // de node (MEDIDO).
+        const pkgNegado = (e) => {
+          try {
+            if (e === null || typeof e !== 'object' || esProxy(e)) return false;
+            const c = descriptorPropio(e, 'code');
+            const p = descriptorPropio(e, 'permission');
+            const r = descriptorPropio(e, 'resource');
+            return !!c && c.value === 'ERR_ACCESS_DENIED' && !!p && p.value === 'FileSystemRead' &&
+              !!r && typeof r.value === 'string' && r.value.endsWith('/package.json');
+          } catch {
+            return false;
+          }
+        };
+        if (typeof real === 'function') {
+          const envuelto = {
+            _findPath(request, paths, isMain) {
+              const args = arguments;
+              return sinSensor(() => {
+                try {
+                  return aplicar(real, this, args);
+                } catch (e) {
+                  if (pkgNegado(e)) return false;
+                  throw e;
+                }
+              });
+            },
+          }._findPath;
+          // El de node no tiene nombre (`Module._findPath = function (...)`, MEDIDO: `name` '').
+          const nombre = descriptorPropio(real, 'name');
+          if (nombre) Object.defineProperty(envuelto, 'name', nombre);
+          Object.defineProperty(Module, '_findPath', { ...desc, value: envuelto });
+        }
+      } catch {}
+    }
+
     // M30 (`--stubs`, opt-in): un specifier que no resuelve pasa a un modulo stub en
     // vez de cortar el enlace. DIFUZZ_STUBS es la ruta del manifiesto (src/stubs.rs):
     // `{specifier: [nombres]}`, calculado del original y el mismo para A y B. Sin la
@@ -1439,20 +1509,19 @@
       try {
         require('module').registerHooks({
           resolve(spec, context, next) {
-            sensor(false);
-            try {
-              return next(spec, context);
-            } catch (e) {
-              let code = null;
+            return sinSensor(() => {
               try {
-                code = e && e.code;
-              } catch {}
-              if (!LINK_CODES.includes(code)) throw e;
-              const cjs = (context.conditions || []).includes('require');
-              return { url: `${PREFIX}${cjs ? 'cjs' : 'esm'}/${encodeURIComponent(spec)}`, shortCircuit: true };
-            } finally {
-              sensor(true);
-            }
+                return next(spec, context);
+              } catch (e) {
+                let code = null;
+                try {
+                  code = e && e.code;
+                } catch {}
+                if (!LINK_CODES.includes(code)) throw e;
+                const cjs = (context.conditions || []).includes('require');
+                return { url: `${PREFIX}${cjs ? 'cjs' : 'esm'}/${encodeURIComponent(spec)}`, shortCircuit: true };
+              }
+            });
           },
           load(url, context, next) {
             if (!url.startsWith(PREFIX)) return next(url, context);

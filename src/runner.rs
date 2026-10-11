@@ -1050,8 +1050,11 @@ fn marca_sandbox(s: &str, modo: Sandbox) -> bool {
 /// directorio de trabajo del caso; escritura: el directorio de trabajo y el canal de
 /// control (el preload lo abre al arrancar). Node no necesito leer nada mas para arrancar,
 /// cargar un `.cjs`/`.mjs` ni resolver un modulo que no existe (MEDIDO: MODULE_NOT_FOUND,
-/// no ERR_ACCESS_DENIED). `--allow-inspector` solo con el sensor de violaciones (sin el,
-/// el sensor no se prende: MEDIDO, sin lineas `viol`).
+/// no ERR_ACCESS_DENIED). 8.4: resolver un DIRECTORIO que existe (`require('..')`) si lee su
+/// `package.json` y node lo niega (ERR_ACCESS_DENIED, MEDIDO node 24.14.1); no se permite: el
+/// preload toma ese package.json negado como uno que no existe (`Module._findPath` envuelto) y
+/// node da MODULE_NOT_FOUND, como sin el sandbox. `--allow-inspector` solo con el sensor de
+/// violaciones (sin el, el sensor no se prende: MEDIDO, sin lineas `viol`).
 ///
 /// 7.10: `--no-experimental-sqlite` (`node --help`, v24.14.1). `node:sqlite` no pasa por el
 /// modelo de permisos: con `--permission` solo, `new DatabaseSync(ruta)` creaba y escribia

@@ -163,6 +163,111 @@ fn sandbox_con_sensor() {
     let _ = std::fs::remove_dir_all(&b);
 }
 
+/// 8.4 (= 7.12): `require` de un directorio (`'..'`, `'../'`, `'.'`, `'/etc'`). Node lee el
+/// `package.json` de ese directorio, fuera de lo permitido, y la busqueda daba ERR_ACCESS_DENIED:
+/// el caso moria en el `require` (antes, descarte `sandbox`; con 7.9, iguales sin correr). Ahora
+/// el preload lo toma como un package.json que no existe: MODULE_NOT_FOUND como sin el sandbox
+/// (con `--stubs`, el stub), sin leer nada y sin marcar, tambien por `require.resolve` y
+/// `createRequire`, y con el sensor prendido (el de `Runner::new`). El senuelo es un directorio
+/// propio al lado de `run_dir` con un `package.json` cuyo `main` es otro senuelo: sin el sandbox
+/// se carga (el especificador llega a el); con el sandbox su contenido nunca aparece. Un archivo de
+/// afuera que existe resuelve y se niega al CARGARLO: sigue tocando el sandbox. Carril B: `import`
+/// de un directorio da ERR_UNSUPPORTED_DIR_IMPORT con y sin el sandbox, y ya no marca (el resolver
+/// de ESM prueba el de CJS para su mensaje y el sensor pausaba en ese ERR_ACCESS_DENIED atrapado).
+#[test]
+fn sandbox_require_de_directorio() {
+    if !crate::test_util::requiere_node() {
+        return;
+    }
+    let (b, senuelo) = base("dir");
+    std::fs::write(b.join("package.json"), "{\"main\": \"senuelo-main.js\"}\n").unwrap();
+    std::fs::write(b.join("senuelo-main.js"), "module.exports = 'SENUELO-MAIN';\n").unwrap();
+    let preload = Preload::write_tagged("sandbox-dir").unwrap();
+    let t = Duration::from_secs(20);
+    let nuevo = |sb: Sandbox, stubs: bool, kind: SourceKind| {
+        let r = Runner::new(&preload, crate::test_util::id_runner(), t).with_sandbox(sb).with_stubs(stubs).with_kind(kind);
+        r.set_stubs("{}");
+        r
+    };
+    let con = nuevo(Sandbox::Permisos, true, SourceKind::Script);
+    let con_sin_stubs = nuevo(Sandbox::Permisos, false, SourceKind::Script);
+    let red_sin_stubs = nuevo(Sandbox::PermisosYRed, false, SourceKind::Script);
+    let sin = nuevo(Sandbox::Apagado, true, SourceKind::Script);
+    let sin_sin_stubs = nuevo(Sandbox::Apagado, false, SourceKind::Script);
+    // Del script (en run_dir) al senuelo: run_dir y `base` estan los dos en temp_dir().
+    let dir = format!("../{}", b.file_name().unwrap().to_str().unwrap());
+    let probar = |r: &Runner, expr: &str| {
+        let js = format!(
+            "try {{ const m = {expr}; console.log('ok', typeof m === 'function' ? 'stub' : String(m)); }} catch (e) {{ console.log('err', e.code, Array.isArray(e.requireStack)); }}\n"
+        );
+        let e = r.run(&js);
+        assert_eq!(e.status, Status::Exited(0), "{expr}: {} {}", e.stderr, e.ctl);
+        (e.stdout.trim().to_string(), e.toco_sandbox())
+    };
+    let stub = ("ok stub".to_string(), false);
+    let no_existe = ("err MODULE_NOT_FOUND true".to_string(), false);
+    let negado = ("err ERR_ACCESS_DENIED false".to_string(), true);
+    let dir_barra = format!("{dir}/");
+    for spec in ["..", "../", "../..", "../../..", ".", "./", "/etc", dir.as_str(), dir_barra.as_str()] {
+        let req = format!("require({spec:?})");
+        let resolve = format!("require.resolve({spec:?})");
+        let crear = format!("require('module').createRequire(__filename)({spec:?})");
+        // Igual que sin el sandbox: con --stubs el stub (salvo `require.resolve`, que no pasa por
+        // los hooks: MODULE_NOT_FOUND, MEDIDO node 24.14.1), sin --stubs MODULE_NOT_FOUND.
+        for (expr, con_stubs) in [(&req, &stub), (&resolve, &no_existe), (&crear, &stub)] {
+            assert_eq!(probar(&con, expr), *con_stubs, "con --stubs: {expr}");
+            assert_eq!(probar(&con_sin_stubs, expr), no_existe, "sin --stubs: {expr}");
+            if spec != dir && spec != dir_barra {
+                assert_eq!(probar(&sin, expr), *con_stubs, "sin el sandbox: {expr}");
+                assert_eq!(probar(&sin_sin_stubs, expr), no_existe, "sin el sandbox ni --stubs: {expr}");
+            }
+        }
+    }
+    // 7.5: sin user namespaces, `--sandbox-red` falla (salvo DIFUZZ_SIN_USERNS=1, test_util.rs).
+    if crate::test_util::requiere_userns(crate::runner::probar_sandbox(Sandbox::PermisosYRed)) {
+        assert_eq!(probar(&red_sin_stubs, "require('..')"), no_existe, "--sandbox-red");
+    }
+    // Lo que ya era MODULE_NOT_FOUND sigue igual.
+    assert_eq!(probar(&con, &format!("require('{dir}/no-existe')")), stub);
+    assert_eq!(probar(&con_sin_stubs, &format!("require('{dir}/no-existe')")), no_existe);
+    // Un archivo de afuera que existe: se niega al cargarlo, no en la busqueda (con y sin --stubs).
+    for r in [&con, &con_sin_stubs] {
+        assert_eq!(probar(r, &format!("require('{dir}/senuelo-main.js')")), negado);
+        assert_eq!(probar(r, &format!("require({})", js_str(&senuelo))), negado);
+    }
+    // Sin el sandbox el especificador llega al senuelo.
+    assert_eq!(probar(&sin, &format!("require({dir:?})")), ("ok SENUELO-MAIN".to_string(), false));
+    // Sin atrapar: con --stubs corre el cuerpo; sin --stubs, al enlace (71) como un modulo que no
+    // existe, sin marcar (antes moria con ERR_ACCESS_DENIED y marcaba).
+    let js = "const m = require('..');\nconsole.log(typeof m);\n";
+    let e = con.run(js);
+    assert_eq!((&e.status, e.stdout.trim(), e.toco_sandbox()), (&Status::Exited(0), "function", false), "{}", e.ctl);
+    let e = con_sin_stubs.run(js);
+    assert!(e.link_failed() && !e.toco_sandbox(), "{:?} {}", e.status, e.ctl);
+    // El hook de --stubs llama al `_findPath` envuelto: el sensor sigue apagado hasta que sale el
+    // de afuera (`sinSensor`). Si el de adentro lo prendiera, cada MODULE_NOT_FOUND que atrapa el
+    // hook pausaria y 300 llegan al tope (MEDIDO con el preload sin la cuenta: `sensor_tope`).
+    let e = con.run("for (let i = 0; i < 300; i++) require(`./no-existe-${i}`);\nconsole.log('listo');\n");
+    assert_eq!(e.stdout.trim(), "listo", "{}", e.stderr);
+    assert!(!e.ctl.contains("sensor_tope"), "{}", e.ctl);
+    // `Module._findPath` envuelto: mismo `length` y `name` que el de node (con y sin el sandbox).
+    for r in [&con, &sin] {
+        let e = r.run("const f = require('module')._findPath;\nconsole.log(f.length, JSON.stringify(f.name));\n");
+        assert_eq!(e.stdout.trim(), "3 \"\"", "{}", e.stderr);
+    }
+    // Carril B: `import()` de un directorio, igual con y sin el sandbox y sin marcar.
+    let js = "for (const s of ['..', './', '/etc']) {\n  try { await import(s); console.log('ok'); } catch (e) { console.log('err', e.code); }\n}\n\
+              try { (await import('node:module')).createRequire(import.meta.url)('..'); } catch (e) { console.log('err', e.code); }\n";
+    let esperado = "err ERR_UNSUPPORTED_DIR_IMPORT\nerr ERR_UNSUPPORTED_DIR_IMPORT\nerr ERR_UNSUPPORTED_DIR_IMPORT\nerr MODULE_NOT_FOUND";
+    for sb in [Sandbox::Permisos, Sandbox::Apagado] {
+        let e = nuevo(sb, false, SourceKind::Module).run(js);
+        assert_eq!((e.stdout.trim(), e.toco_sandbox()), (esperado, false), "{sb:?}: {} {}", e.stderr, e.ctl);
+    }
+    drop((con, con_sin_stubs, red_sin_stubs, sin, sin_sin_stubs));
+    drop(preload);
+    let _ = std::fs::remove_dir_all(&b);
+}
+
 /// Un caso entero: con `--sandbox`, el original que toca un permiso (y su minificado
 /// tambien) se compara igual (7.9, revision fe0cd86 MENOR 3; antes iba a descartes con causa
 /// `sandbox` y se perdia el bug): con un "bug" despues del permiso negado y atrapado, div/
@@ -197,6 +302,10 @@ fn sandbox_destino_del_caso() {
         "var n = 1;\ntry {{ require('fs').readFileSync({}); }} catch (e) {{ console.log(e.code, e.message, e.permission, e.resource); }}\nconsole.log(n);\n",
         js_str(&senuelo)
     );
+    // 8.4: `require` de un directorio lee un package.json de afuera; antes, ERR_ACCESS_DENIED
+    // (descarte `sandbox`; con 7.9, iguales sin correr el cuerpo).
+    let dir = "var p = require('..');\nconsole.log(\"bug-no\", typeof p);\n".to_string();
+    let dir_resolve = "var r; try { require.resolve('..'); r = 'si'; } catch (e) { r = e.code; }\nconsole.log(r, \"bug-no\");\n".to_string();
     // (caso, programa, (de, a) del "bug", flags, destino esperado)
     type Caso<'a> = (&'a str, String, (&'a str, String), &'a [&'a str], &'a str);
     let casos: Vec<Caso> = vec![
@@ -218,6 +327,13 @@ fn sandbox_destino_del_caso() {
         // 7.2 (k17-pid-falso): matarse muere por la senal, como en node: descarte `senal`.
         ("matarse", matarse.clone(), ("bug-no", "bug-si".into()), &["--sandbox"], "descarte:senal"),
         ("matarse-sin", matarse, ("bug-no", "bug-si".into()), &[], "descarte:senal"),
+        // 8.4: como sin el sandbox. Sin --stubs, un modulo que no existe: descarte `enlace`; con
+        // --stubs, stub en A y en B y el cuerpo corre (el "bug" va a div/); `require.resolve`
+        // atrapado da MODULE_NOT_FOUND y el cuerpo sigue (div/).
+        ("dir-sin-stubs", dir.clone(), ("bug-no", "bug-si".into()), &["--sandbox"], "descarte:enlace"),
+        ("dir-con-stubs", dir.clone(), ("bug-no", "bug-si".into()), &["--sandbox", "--stubs"], "div"),
+        ("dir-con-stubs-sin", dir, ("bug-no", "bug-si".into()), &["--stubs"], "div"),
+        ("dir-resolve", dir_resolve, ("bug-no", "bug-si".into()), &["--sandbox"], "div"),
     ];
     let preload = Preload::write_tagged("sandbox-caso").unwrap();
     let known = crate::known::Known::load(&corpus, &out, 0, Minifier::Oxc);
