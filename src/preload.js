@@ -112,7 +112,8 @@
           // filtro seccomp que nego la senal (runner::encerrar_senales): marca el caso aunque
           // el programa no lance (`_kill` directo) o atrape el `kill EPERM` sin el sensor. No
           // se distingue de un EPERM natural (un proceso de otro usuario, p. ej. el pid 1):
-          // ese tambien marca y descarta el caso (rev-int H5, MEDIDO; README, sandbox).
+          // ese tambien marca (rev-int H5, MEDIDO; README, sandbox): con 7.9, si el original y el
+          // minificado lo hacen, el caso se compara con la nota (antes iba a descartes).
           // `conPermisos` y `ctl` se definen mas abajo; aca solo se leen en la llamada.
           if (r === eperm && conPermisos) ctl('sandbox');
           return r;
@@ -239,7 +240,9 @@
   // n-sandbox (`--sandbox`): un permiso que el modelo de permisos de node nego (ERR_ACCESS_DENIED;
   // ERR_DLOPEN_DISABLED, el addon nativo; kill EPERM, una senal; uv_os_setpriority EPERM, la prioridad de otro
   // proceso) va al canal como `sandbox`: si le paso al original,
-  // runner::Exec::toco_sandbox lo ve y el caso va a descartes. Solo con --permission
+  // runner::Exec::toco_sandbox lo ve y main::toca_sandbox decide: si lo toco solo el original
+  // (2c) o el original y el minificado (7.9) se compara, con una nota en meta.txt; si el
+  // minificado no llego a correr, el caso va a descartes. Solo con --permission
   // (`process.permission` no existe sin el, MEDIDO node 24): sin el flag no se lee nada mas.
   // Sin getters ni trampas del programa: el descriptor propio (node pone `code` como dato, MEDIDO)
   // y nunca sobre un Proxy. Las funciones se toman ahora, antes de que corra el programa.

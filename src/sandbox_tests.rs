@@ -4,9 +4,9 @@
 //!   `/etc/passwd`, una ruta inexistente de `~/.ssh`), escribir afuera, `child_process`,
 //!   workers y `process.binding` fallan y la ejecucion queda marcada (`toco_sandbox`); lo de
 //!   adentro del directorio de trabajo anda. Sin el sandbox, lo de siempre (y nunca marca).
-//! - El caso entero (`process_case`, como e2e_tests): si el original toca el sandbox, el caso
-//!   va a descartes con causa `sandbox`, nunca a div/ ni a known/; sin el flag, el mismo
-//!   programa (con un "bug" puesto a mano) va a div/.
+//! - El caso entero (`process_case`, como e2e_tests): 7.9, si el original y el minificado tocan
+//!   el sandbox, el caso se compara igual (con una nota en meta.txt): con un "bug" puesto a
+//!   mano va a div/, como sin el flag; sin bug, a iguales.
 //! - Las senales (2b): con el sandbox, `process.kill` a otro proceso da EPERM (y marca); a si
 //!   mismo, a 0 y a su grupo anda (7.2: tambien con el `process.pid` ficticio, sin marcar).
 //! - La red (`--sandbox-red`, solo Linux con user namespaces): sin salida (ENETUNREACH), el
@@ -162,9 +162,11 @@ fn sandbox_con_sensor() {
 }
 
 /// Un caso entero: con `--sandbox`, el original que toca un permiso (y su minificado
-/// tambien) va a descartes (`sandbox`); sin el flag, el mismo programa con el "bug" va a
-/// div/. Y un minificado que toca el sandbox cuando el original no (el bug cambia la ruta)
-/// se compara: div/. 2c: y al reves, un original que lo toca cuando el minificado no (el
+/// tambien) se compara igual (7.9, revision fe0cd86 MENOR 3; antes iba a descartes con causa
+/// `sandbox` y se perdia el bug): con un "bug" despues del permiso negado y atrapado, div/
+/// con la nota de A-y-B en meta.txt, como sin el flag; sin bug (el mensaje entero del error
+/// impreso, o el mismo error sin atrapar), iguales. Y un minificado que toca el sandbox
+/// cuando el original no (el bug cambia la ruta) se compara: div/. 2c: y al reves, un original que lo toca cuando el minificado no (el
 /// bug hace que B no lea), tambien: div/, con la nota en meta.txt.
 #[test]
 fn sandbox_destino_del_caso() {
@@ -184,13 +186,26 @@ fn sandbox_destino_del_caso() {
     );
     let vivo = "var vivo; try { process.kill(process.pid, 0); vivo = true; } catch (e) { vivo = e.code; }\nconsole.log(vivo, \"bug-no\");\n".to_string();
     let matarse = "var r; try { process.kill(process.pid, \"SIGTERM\"); r = \"ok\"; } catch (e) { r = e.code; }\nconsole.log(r, \"bug-no\");\n".to_string();
+    // revision/a3-2c/corpus/c01-ayb-bug-real: lee negado y lo atrapa en silencio; despues, el
+    // "bug" (ajeno al sandbox). Antes de 7.9 iba a descartes.
+    let ayb_bug = format!("try {{ require('fs').readFileSync({}); }} catch (e) {{}}\nconsole.log(\"bug-no\");\n", js_str(&senuelo));
+    // 7.9: sin bug (el "minificado" cambia `1` por `0+1`), A y B leen negado e imprimen el error
+    // entero (codigo, mensaje con la ruta, permiso y recurso): iguales.
+    let sin_bug = format!(
+        "var n = 1;\ntry {{ require('fs').readFileSync({}); }} catch (e) {{ console.log(e.code, e.message, e.permission, e.resource); }}\nconsole.log(n);\n",
+        js_str(&senuelo)
+    );
     // (caso, programa, (de, a) del "bug", flags, destino esperado)
     type Caso<'a> = (&'a str, String, (&'a str, String), &'a [&'a str], &'a str);
     let casos: Vec<Caso> = vec![
-        ("leer-con", leer.clone(), ("bug-no", "bug-si".into()), &["--sandbox"], "descarte:sandbox"),
+        // Con el sandbox, A y B lanzan el mismo ERR_ACCESS_DENIED antes de llegar al "bug"
+        // (7.9: se comparan; antes, descarte): iguales. Sin el flag, el bug se ve: div/.
+        ("leer-con", leer.clone(), ("bug-no", "bug-si".into()), &["--sandbox"], "iguales"),
         ("leer-sin", leer, ("bug-no", "bug-si".into()), &[], "div"),
-        ("hijo-con", hijo.clone(), ("bug-no", "bug-si".into()), &["--sandbox"], "descarte:sandbox"),
+        ("hijo-con", hijo.clone(), ("bug-no", "bug-si".into()), &["--sandbox"], "iguales"),
         ("hijo-sin", hijo, ("bug-no", "bug-si".into()), &[], "div"),
+        ("ayb-bug", ayb_bug, ("bug-no", "bug-si".into()), &["--sandbox"], "div"),
+        ("ambos-sin-bug", sin_bug, ("var n=1", "var n=0+1".into()), &["--sandbox"], "iguales"),
         // El original escribe adentro; el minificado (el bug) escribe afuera: B-solo.
         ("solo-b", escribir, ("dentro.txt", b.join("fuera.txt").to_str().unwrap().to_string()), &["--sandbox"], "div"),
         ("solo-a", solo_a, ("bug-no", "bug-si".into()), &["--sandbox"], "div"),
@@ -233,12 +248,19 @@ fn sandbox_destino_del_caso() {
             causa.clone().unwrap_or_else(|| "iguales".into())
         };
         assert_eq!(donde, esperado, "{caso}: {} | {tsv}", st.line());
-        assert_eq!(st.a_sandbox, usize::from(esperado == "descarte:sandbox"), "{caso}");
+        // 7.9: nada va a descartes por el sandbox (B corrio en todos).
+        let ambos = ["leer-con", "hijo-con", "ayb-bug", "ambos-sin-bug"].contains(&caso);
+        assert_eq!(st.a_sandbox, 0, "{caso}");
         assert_eq!(st.solo_a_sandbox, usize::from(caso == "solo-a"), "{caso}");
+        assert_eq!(st.ambos_sandbox, usize::from(ambos), "{caso}");
         if esperado == "div" {
             assert!(causa.is_none(), "{caso}: div/ y ademas descarte {causa:?}");
             let meta = std::fs::read_to_string(celda.join("div").join(caso).join("meta.txt")).unwrap();
             assert_eq!(meta.matches("solo el original toco el sandbox").count(), usize::from(caso == "solo-a"), "{caso}: {meta}");
+            assert_eq!(meta.matches("el original y el minificado tocaron el sandbox").count(), usize::from(ambos), "{caso}: {meta}");
+        }
+        if esperado == "iguales" {
+            assert_eq!((st.same, st.divergences, st.known), (1, 0, 0), "{caso}: {}", st.line());
         }
     }
     drop(preload);
@@ -589,6 +611,43 @@ fn sandbox_solo_a_modulo() {
     let meta = std::fs::read_to_string(celda.join("div").join(caso).join("meta.txt")).unwrap_or_default();
     assert_eq!(meta.matches("solo el original toco el sandbox").count(), 1, "{} | {meta}", st.line());
     assert_eq!((st.solo_a_sandbox, st.a_sandbox), (2, 0), "{}", st.line());
+    drop(preload);
+    let _ = std::fs::remove_dir_all(&b);
+}
+
+/// 7.9 (revision fe0cd86, MENOR 3): carril B, un modulo mudo cuyo original y minificado tocan
+/// el sandbox (leen negado y lo atrapan en silencio) y que tiene un bug ajeno al sandbox
+/// (`revision/a3-2c/corpus-b/m02-ayb-bug-real`): la pasada cruda (iguales: los dos mudos) y el
+/// envoltorio de modulos son A-y-B y se comparan. El hallazgo (div/) lleva la nota UNA vez y el
+/// caso cuenta dos pasadas A-y-B; nada va a descartes.
+#[test]
+fn sandbox_ambos_modulo() {
+    if !crate::test_util::requiere_node() {
+        return;
+    }
+    let (b, senuelo) = base("ambos-modulo");
+    let (corpus, out) = (b.join("corpus"), b.join("out"));
+    let caso = "m02-ayb-bug-real";
+    let js = format!("import fs from \"node:fs\";\ntry {{ fs.readFileSync({}); }} catch (e) {{}}\nexport const s = \"bug-no\";\n", js_str(&senuelo));
+    std::fs::create_dir_all(corpus.join(caso)).unwrap();
+    std::fs::write(corpus.join(caso).join("input.js"), &js).unwrap();
+    let args = [corpus.to_str().unwrap(), "--out", out.to_str().unwrap(), "--no-cache", "--jobs", "1", "--carril", "b", "--sandbox"];
+    let cli = crate::Cli::parse(args.iter().map(|s| s.to_string()).collect()).unwrap();
+    let preload = Preload::write_tagged("sandbox-ambos-modulo").unwrap();
+    let known = crate::known::Known::load(&corpus, &out, 0, Minifier::Oxc);
+    let cache = crate::cache::CacheA::new(None, &[]);
+    let triage = crate::triage::Triage::load(&out);
+    let celda = out.join(cli.cell());
+    let reporter = crate::oracle::Reporter::new(&celda, cli.cell(), crate::runner::PRELOAD);
+    let runner = crate::runner_de_celda(&preload, crate::test_util::id_runner(), &cli);
+    let cfg = Config::from_backend(Box::new(Cambia { de: "bug-no".into(), a: "bug-si".into(), kind: SourceKind::Module }));
+    let ctx = crate::Ctx { reporter: &reporter, known: &known, cache: &cache, triage: &triage, medido: None };
+    let mut st = crate::Stats::default();
+    crate::process_case(&ctx, &runner, &cfg, None, &cli, &mut st, &corpus.join(caso).join("input.js"));
+    drop(runner);
+    let meta = std::fs::read_to_string(celda.join("div").join(caso).join("meta.txt")).unwrap_or_default();
+    assert_eq!(meta.matches("el original y el minificado tocaron el sandbox").count(), 1, "{} | {meta}", st.line());
+    assert_eq!((st.ambos_sandbox, st.a_sandbox, st.divergences), (2, 0, 1), "{}", st.line());
     drop(preload);
     let _ = std::fs::remove_dir_all(&b);
 }

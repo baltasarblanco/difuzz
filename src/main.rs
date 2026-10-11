@@ -71,8 +71,8 @@ uso: difuzz <corpus_dir> [--out DIR] [--minifier M] [--config C] [--forma F] [--
                  (igual en A y B) en vez de descartar el caso como enlace (default: off)
   --sandbox      node corre con su modelo de permisos (--permission de node 24): lee solo el
                  preload, el programa y su directorio de trabajo, escribe solo en ese directorio,
-                 sin procesos hijos, workers, addons ni WASI. A y B igual; si el original toca
-                 un permiso negado, el caso va a descartes.tsv con causa sandbox (default: off).
+                 sin procesos hijos, workers, addons ni WASI. A y B igual; si tocan un permiso
+                 negado se comparan igual, con una nota en meta.txt (default: off).
                  NO frena la red ni los sockets unix: no es una barrera contra codigo hostil
   --sandbox-red  --sandbox mas namespaces de Linux sin root (usuario, red, montajes): sin red
                  (solo un loopback propio), /run tapado y los sockets unix del sistema tapados.
@@ -239,7 +239,7 @@ impl Cli {
         if self.stubs {
             cell.push_str("+stubs");
         }
-        // n-sandbox: cambia lo que se compara (lo que toca el sandbox va a descartes).
+        // n-sandbox: cambia lo que se compara (lo que toca el sandbox falla en A y en B).
         match self.sandbox {
             runner::Sandbox::Apagado => {}
             runner::Sandbox::Permisos => cell.push_str("+sandbox"),
@@ -500,11 +500,15 @@ struct Stats {
     /// A6: de esos, los descartados con causa `analisis` (el epilogo de un mudo).
     descartes_analisis: usize,
     /// n-sandbox: casos descartados porque el original toco el sandbox (causa `sandbox`).
-    /// En una linea aparte (solo con `--sandbox`): no cambia la de `total=`.
+    /// En una linea aparte (solo con `--sandbox`): no cambia la de `total=`. 7.9: solo los
+    /// que no se pueden comparar (el minificado no corrio: `TocaSandbox::SinB`).
     a_sandbox: usize,
     /// 2c: pasadas en que el original toco el sandbox y el minificado no (se comparan). En
     /// la misma linea aparte que `a_sandbox`.
     solo_a_sandbox: usize,
+    /// 7.9: pasadas en que el original y el minificado tocaron el sandbox (se comparan, con
+    /// la nota). En la misma linea aparte (`ambos=`), con las de las variantes.
+    ambos_sandbox: usize,
     /// R1-H13: casos (pasada cruda) cuyo analisis con el parser de SWC necesito
     /// errores recuperados u otro carril, sin perder ningun texto.
     analisis_recuperado: usize,
@@ -566,6 +570,7 @@ impl Stats {
         self.descartes_analisis += o.descartes_analisis;
         self.a_sandbox += o.a_sandbox;
         self.solo_a_sandbox += o.solo_a_sandbox;
+        self.ambos_sandbox += o.ambos_sandbox;
         self.analisis_recuperado += o.analisis_recuperado;
         self.analisis_perdido += o.analisis_perdido;
         self.lint_sin_analisis += o.lint_sin_analisis;
@@ -977,7 +982,10 @@ fn main() {
     // n-sandbox: en una linea aparte, solo con --sandbox (no cambia la de `total=`).
     // 7.7 (MENOR 5): `solo_original=` cuenta pasadas, tambien las de las variantes.
     let solo_original = stats.solo_a_sandbox + stats.mutaciones.solo_a_sandbox;
-    let linea_sandbox = cli.sandbox.activo().then(|| format!("sandbox: modo={} descartados={} solo_original={solo_original}", cli.sandbox.nombre(), stats.a_sandbox));
+    // 7.9: `ambos=` (al final, para no mover los campos de antes) cuenta pasadas, tambien
+    // las de las variantes de --mutaciones.
+    let ambos = stats.ambos_sandbox + stats.mutaciones.ambos_sandbox;
+    let linea_sandbox = cli.sandbox.activo().then(|| format!("sandbox: modo={} descartados={} solo_original={solo_original} ambos={ambos}", cli.sandbox.nombre(), stats.a_sandbox));
     if let Some(l) = &linea_sandbox {
         println!("{l}");
     }
@@ -1550,7 +1558,8 @@ fn observe_module(
     }
     // 7.7 (MENOR 5): la nota de solo-A es de esta pasada, no de la cruda (misma nota del
     // analisis: mismo original y mismo minificado).
-    stats.nota_pasada = sin_nota_solo_a(stats.nota_pasada.take());
+    // 7.9: y la de A-y-B, por lo mismo.
+    stats.nota_pasada = sin_nota_ambos(sin_nota_solo_a(stats.nota_pasada.take()));
     let b_previo = match descarte_sandbox(ctx, &obs, stats, rel, &a, minified) {
         Pasada::Descartada => return true,
         Pasada::Sigue(b) => b,
@@ -1588,8 +1597,10 @@ fn runner_de_celda(preload: &runner::Preload, worker: usize, cli: &Cli) -> runne
 }
 
 /// n-sandbox: si esta ejecucion del original toco el sandbox (un permiso negado, atrapado
-/// o no) y el minificado tambien, el caso no se compara: va a descartes con causa
-/// `sandbox`, nunca a div/ ni a known/ por eso. Vale para cualquier pasada (cruda,
+/// o no), cuenta quien lo toco y deja la nota de la pasada. 7.9 (revision fe0cd86, MENOR
+/// 3): si el minificado tambien lo toco, el caso se compara igual (antes iba entero a
+/// descartes y se perdia un bug ajeno al sandbox); solo va a descartes con causa
+/// `sandbox` si el minificado no corrio. Vale para cualquier pasada (cruda,
 /// observada, de bloques, `--invocar`, envoltorio de modulos); `runner` es el de la
 /// comparacion. Sin `--sandbox`, `Runner::toco_sandbox` es siempre false.
 fn descarte_sandbox(ctx: &Ctx, runner: &runner::Runner, stats: &mut Stats, rel: &Path, a: &runner::Exec, minified: &str) -> Pasada {
@@ -1600,7 +1611,12 @@ fn descarte_sandbox(ctx: &Ctx, runner: &runner::Runner, stats: &mut Stats, rel: 
             stats.nota_pasada = Some(con_nota_solo_a(stats.nota_pasada.take()));
             Pasada::Sigue(Some(*b))
         }
-        TocaSandbox::AyB => {
+        TocaSandbox::AyB(b) => {
+            stats.ambos_sandbox += 1;
+            stats.nota_pasada = Some(con_nota_ambos(stats.nota_pasada.take()));
+            Pasada::Sigue(Some(*b))
+        }
+        TocaSandbox::SinB => {
             stats.a_sandbox += 1;
             ctx.reporter.discard(rel, "sandbox", a.elapsed);
             Pasada::Descartada
@@ -1610,11 +1626,11 @@ fn descarte_sandbox(ctx: &Ctx, runner: &runner::Runner, stats: &mut Stats, rel: 
 
 /// n-sandbox: lo que deja `descarte_sandbox` a la pasada.
 enum Pasada {
-    /// A y B tocaron el sandbox: el caso ya esta en descartes.tsv.
+    /// A toco el sandbox y B no corrio (7.9: `SinB`): el caso ya esta en descartes.tsv.
     Descartada,
     /// Se compara. 7.7 (revision fe0cd86, MENOR 8): con el B que corrio `toca_sandbox`
-    /// cuando solo el original toco el sandbox (`compare_and_report` lo usa en vez de
-    /// correrlo de nuevo: se decide y se compara con el mismo B).
+    /// cuando el original toco el sandbox (solo el, o 7.9, los dos; `compare_and_report` lo
+    /// usa en vez de correrlo de nuevo: se decide y se compara con el mismo B).
     Sigue(Option<runner::Exec>),
 }
 
@@ -1626,20 +1642,30 @@ enum TocaSandbox {
     /// se abre (`revision-n2/sb3/u01-solo-a-toca`: con el bug, B no llegaba a leerlo). Se
     /// compara, con una nota en meta.txt; es el espejo de B-solo. Con el B que lo decidio.
     SoloA(Box<runner::Exec>),
-    /// Los dos: lo que se compararia es el sandbox, no el programa.
-    AyB,
+    /// Los dos. 7.9: se compara igual (con el B que lo decidio), con una nota en meta.txt.
+    /// A y B corren con el mismo sandbox (mismo runner, mismas rutas): lo que niega lo niega
+    /// igual a los dos, y un bug ajeno al sandbox (`revision/a3-2c/corpus/c01-ayb-bug-real`)
+    /// es un bug. Si el bug cambia lo que se toca (otra ruta, otro permiso), tambien: es un
+    /// cambio de comportamiento. Las divergencias falsas que esto podria traer se midieron
+    /// con programas sin bug que tocan el sandbox de muchas formas (`trabajo-10oct/b7-9`).
+    AyB(Box<runner::Exec>),
+    /// El original lo toco y el minificado no corrio (fallo del runner): no se sabe si lo
+    /// toca ni se puede comparar. Es lo unico que va a descartes con causa `sandbox`.
+    SinB,
 }
 
 /// 2c: si A toco el sandbox, B corre con el mismo runner de la comparacion (en esos casos,
 /// B corre antes; 7.7: `compare_and_report` usa ese mismo B). Un B que no corrio (fallo del
-/// runner) cuenta como que lo toco: el caso se descarta como antes.
+/// runner) es `SinB`: el caso se descarta como antes.
 fn toca_sandbox(runner: &runner::Runner, a: &runner::Exec, minified: &str) -> TocaSandbox {
     if !runner.toco_sandbox(a) {
         return TocaSandbox::No;
     }
     let b = runner.run(minified);
-    if matches!(b.status, Status::Failed(_)) || runner.toco_sandbox(&b) {
-        TocaSandbox::AyB
+    if matches!(b.status, Status::Failed(_)) {
+        TocaSandbox::SinB
+    } else if runner.toco_sandbox(&b) {
+        TocaSandbox::AyB(Box::new(b))
     } else {
         TocaSandbox::SoloA(Box::new(b))
     }
@@ -1665,6 +1691,30 @@ fn sin_nota_solo_a(nota: Option<String>) -> Option<String> {
         return None;
     }
     match n.strip_suffix(NOTA_SOLO_A).and_then(|r| r.strip_suffix(" | ")) {
+        Some(r) => Some(r.to_string()),
+        None => Some(n),
+    }
+}
+
+/// 7.9: la nota de meta.txt de una pasada en que el original y el minificado tocaron el
+/// sandbox.
+const NOTA_AMBOS: &str = "sandbox: el original y el minificado tocaron el sandbox: se compara (7.9)";
+
+/// 7.9: la nota de la pasada mas la de A-y-B, una sola vez.
+fn con_nota_ambos(nota: Option<String>) -> String {
+    match sin_nota_ambos(nota) {
+        Some(n) => format!("{n} | {NOTA_AMBOS}"),
+        None => NOTA_AMBOS.to_string(),
+    }
+}
+
+/// 7.9: la nota de la pasada sin la de A-y-B (como `sin_nota_solo_a`).
+fn sin_nota_ambos(nota: Option<String>) -> Option<String> {
+    let n = nota?;
+    if n == NOTA_AMBOS {
+        return None;
+    }
+    match n.strip_suffix(NOTA_AMBOS).and_then(|r| r.strip_suffix(" | ")) {
         Some(r) => Some(r.to_string()),
         None => Some(n),
     }
@@ -1976,11 +2026,15 @@ struct MutStats {
     /// 7.7 (MENOR 5): variantes comparadas en que solo el original toco el sandbox (2c). Van
     /// a la linea `sandbox:` (`solo_original=`), no a la de las mutaciones.
     solo_a_sandbox: usize,
+    /// 7.9: variantes comparadas en que el original y el minificado tocaron el sandbox. Van
+    /// a la linea `sandbox:` (`ambos=`), no a la de las mutaciones.
+    ambos_sandbox: usize,
 }
 
 impl MutStats {
     fn merge(&mut self, o: &MutStats) {
         self.solo_a_sandbox += o.solo_a_sandbox;
+        self.ambos_sandbox += o.ambos_sandbox;
         self.variantes += o.variantes;
         self.comparadas += o.comparadas;
         self.iguales += o.iguales;
@@ -2131,16 +2185,18 @@ fn process_mutants(
             eprintln!("runner: {e}");
             continue;
         }
-        // n-sandbox: el original de la variante y su minificado tocaron el sandbox: no se
-        // compara (cuenta en `original=` de las mutaciones, como las demas variantes cuyo
-        // original no sirve). 2c: si solo lo toco el original, se compara con la nota.
-        let (solo_a, b_previo) = match toca_sandbox(runner, &a, &minified) {
-            TocaSandbox::AyB => {
+        // n-sandbox: el original de la variante toco el sandbox y su minificado no corrio: no
+        // se compara (cuenta en `original=` de las mutaciones, como las demas variantes cuyo
+        // original no sirve). 2c: si solo lo toco el original, se compara con la nota; 7.9:
+        // si lo tocaron los dos, tambien (con la suya).
+        let (solo_a, ambos, b_previo) = match toca_sandbox(runner, &a, &minified) {
+            TocaSandbox::SinB => {
                 m.original += 1;
                 continue;
             }
-            TocaSandbox::SoloA(b) => (true, Some(*b)),
-            TocaSandbox::No => (false, None),
+            TocaSandbox::AyB(b) => (false, true, Some(*b)),
+            TocaSandbox::SoloA(b) => (true, false, Some(*b)),
+            TocaSandbox::No => (false, false, None),
         };
         if v.tdz_filter && a.flags.iter().any(|f| f == "tdz") {
             m.tdz += 1;
@@ -2159,6 +2215,10 @@ fn process_mutants(
         let nota = if solo_a {
             m.solo_a_sandbox += 1;
             Some(con_nota_solo_a(analisis.nota()))
+        } else if ambos {
+            // 7.9: las de A-y-B tambien (a `ambos=`).
+            m.ambos_sandbox += 1;
+            Some(con_nota_ambos(analisis.nota()))
         } else {
             analisis.nota()
         };

@@ -187,20 +187,37 @@ real, que es difuzz). Lo demás que reciba el pid ficticio no llega a ningún pr
 `length`, `name`, errores). Sin el sandbox, una señal a un pid escrito a mano sigue llegando a
 ese proceso, como cualquier otra cosa que el programa haga sin el sandbox.
 
-**Simetría.** Original y minificado corren siempre con el mismo sandbox. Si el **original y el
-minificado** tocan el sandbox (un permiso negado, atrapado o no; una señal o una prioridad negada; con
-`--sandbox-red`, además, un error de red), el caso no se compara: va a `descartes.tsv` con causa
-**`sandbox`**, nunca a `div/` ni a `known/` por eso. En cualquier pasada (cruda, observada, de
-bloques, `--invocar`, envoltorio de módulos); en las variantes de `--mutaciones` cuenta en
-`original=`. Si lo toca **uno solo**, sí se compara: es un cambio de comportamiento. Puede ser el
-minificado (el minifier cambió qué archivo abre) o el original (con el bug, el minificado no llega
-a abrirlo): en ese caso el minificado corre antes para saberlo (y se compara ese mismo minificado,
-sin correrlo otra vez), y el hallazgo lleva la nota `sandbox: solo el original toco el sandbox` en
-`meta.txt`. La celda lleva `+sandbox` o `+sandbox_red`, la caché de A no se comparte con las
-corridas sin sandbox y al terminar se imprime (y queda en `CORRIDA.txt`) la línea
-`sandbox: modo=... descartados=N solo_original=M` (`M`: pasadas en que solo el original tocó el
-sandbox y se compararon, también las de las variantes de `--mutaciones`; en el carril B, un módulo
-mudo puede sumar dos: la pasada cruda y la del envoltorio de módulos).
+**Simetría.** Original y minificado corren siempre con el mismo sandbox (mismo directorio de
+trabajo, mismas rutas, mismos permisos): lo que se niega, se niega igual a los dos. Por eso un
+caso que toca el sandbox (un permiso negado, atrapado o no; una señal o una prioridad negada; con
+`--sandbox-red`, además, un error de red) **se compara igual**, toque uno solo o los dos, en
+cualquier pasada (cruda, observada, de bloques, `--invocar`, envoltorio de módulos) y en las
+variantes de `--mutaciones`. Si el original lo tocó, el minificado corre antes para saber si
+también lo toca (y se compara ese mismo minificado, sin correrlo otra vez), y el hallazgo lleva
+una nota en `meta.txt`:
+
+- **los dos** (`sandbox: el original y el minificado tocaron el sandbox: se compara`): un programa
+  que, por ejemplo, intenta leer un archivo, lo atrapa y sigue, y además tiene un bug del minifier
+  que no tiene nada que ver con eso, va a `div/` como sin sandbox. Antes de 7.9 iba entero a
+  `descartes.tsv` y el bug se perdía (revisión de `fe0cd86`, MENOR 3). Que esto no inventa
+  divergencias se midió con 45 programas sin bug que tocan el sandbox de muchas formas (mensajes
+  de error enteros con rutas, `util.inspect` y `.stack` del error, errores sin atrapar y con
+  `cause`, `require` e `import()` de rutas negadas, procesos hijos, workers, `process.binding`,
+  addons, WASI, señales, carril B y `--invocar`; red, DNS y `fetch` con `--sandbox-red`), en oxc y
+  swc, 3 veces cada uno: ninguno fue a `div/` por el sandbox. Uno que imprime `e.stack` va a `div/`
+  en `core_defaults` igual que sin sandbox (lo cambian los nombres acortados, no el sandbox).
+- **solo el original** (`sandbox: solo el original toco el sandbox`): con el bug, el minificado no
+  llega a abrir el archivo. Es un cambio de comportamiento.
+
+Si lo toca solo el minificado (el minifier cambió qué archivo abre), se compara sin nota. Solo va a
+`descartes.tsv` con causa **`sandbox`** el caso cuyo original tocó el sandbox y cuyo minificado no
+pudo correr (falla del runner al lanzarlo: no se sabe si lo toca ni hay con qué comparar); en las
+variantes, eso cuenta en `original=`. La celda lleva `+sandbox` o `+sandbox_red`, la caché de A no
+se comparte con las corridas sin sandbox y al terminar se imprime (y queda en `CORRIDA.txt`) la
+línea `sandbox: modo=... descartados=N solo_original=M ambos=K` (`N`: casos descartados por eso;
+`M` y `K`: pasadas en que solo el original, o los dos, tocaron el sandbox y se compararon, también
+las de las variantes de `--mutaciones`; en el carril B, un módulo mudo puede sumar dos: la pasada
+cruda y la del envoltorio de módulos).
 
 Cómo se reconoce que una ejecución tocó el sandbox: el preload anota `ERR_ACCESS_DENIED`,
 `ERR_DLOPEN_DISABLED`, el `EPERM` de `kill` y el de `os.setPriority` (`uv_os_setpriority`) en su
@@ -211,8 +228,9 @@ los atrape. Con el sandbox, `os.setPriority` y `process._debugProcess` con el pi
 `EPERM` (el filtro niega cualquier pid que no sea el real) y marcan. difuzz busca esos textos (y
 `kill EPERM` y `uv_os_setpriority returned EPERM`) en la salida. Un `EPERM` natural se ve igual: un
 `kill`/`_kill` a un proceso de otro usuario (el pid 1, por ejemplo) da `EPERM` también sin el
-sandbox, y con `--sandbox` marca y descarta el caso (MEDIDO, revisión de la integración del
-bloque 7: un bug real al lado va a descartes en vez de `div/`).
+sandbox, y con `--sandbox` marca el caso: si el original y el minificado lo hacen, se compara con
+la nota de A y B (antes de 7.9 iba a descartes y un bug real al lado no se veía; MEDIDO en la
+revisión de la integración del bloque 7).
 
 **Límites** (lo que el sandbox no frena):
 
@@ -230,7 +248,8 @@ bloque 7: un bug real al lado va a descartes en vez de `div/`).
   operativo (lo frena el modelo de permisos de node, no el namespace).
 - Un permiso negado que el programa atrapa en silencio (sin imprimirlo) sin el sensor de
   violaciones (swc) o en un callback no se reconoce: A y B ven lo mismo y se comparan.
-- Un programa que imprime por su cuenta uno de los textos de la marca se descarta de más.
+- Un programa que imprime por su cuenta uno de los textos de la marca lleva la nota de más (y el
+  minificado corre una vez de más); se compara igual.
 - `--allow-inspector` (las corridas con el sensor de violaciones, oxc, y las de la cobertura de
   los re-chequeos, también swc) le deja al programa abrir una sesión del inspector **en su propio
   proceso** (`new inspector.Session()`), que node avisa que "puede invalidar el modelo de
