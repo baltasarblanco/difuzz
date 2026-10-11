@@ -487,6 +487,9 @@ struct Stats {
     /// I3/M1 (revision-b456): comparaciones donde A o B no corrieron enteros con
     /// el sensor de violaciones y los dos se repitieron sin el. Ortogonal, como LINT.
     sensor_repetidos: usize,
+    /// b7-8: casos (base, no variantes) que corrieron enteros sin el sensor por el
+    /// patron del bug de V8 (`runner_por_riesgo`). Ortogonal, como LINT.
+    sensor_omitidos: usize,
     /// R1-H05: casos cuyo minificado salio del oraculo sin debug assertions (el
     /// binario con asserts hizo panic). Ortogonal, como LINT: el caso cuenta
     /// tambien donde termino (iguales, DIVERGENCIAS, conocidas, descartes).
@@ -564,6 +567,7 @@ impl Stats {
         self.a_nondet += o.a_nondet;
         self.invocar_retry += o.invocar_retry;
         self.sensor_repetidos += o.sensor_repetidos;
+        self.sensor_omitidos += o.sensor_omitidos;
         self.solo_asserts += o.solo_asserts;
         self.solo_asserts_sin_div += o.solo_asserts_sin_div;
         self.fallos_analisis += o.fallos_analisis;
@@ -979,6 +983,10 @@ fn main() {
     if stats.sensor_repetidos > 0 {
         println!("sensor (I3): comparados_sin_sensor={}", stats.sensor_repetidos);
     }
+    // b7-8: idem.
+    if stats.sensor_omitidos > 0 {
+        println!("sensor (b7-8): omitido_por_riesgo_v8={}", stats.sensor_omitidos);
+    }
     // n-sandbox: en una linea aparte, solo con --sandbox (no cambia la de `total=`).
     // 7.7 (MENOR 5): `solo_original=` cuenta pasadas, tambien las de las variantes.
     let solo_original = stats.solo_a_sandbox + stats.mutaciones.solo_a_sandbox;
@@ -1141,6 +1149,11 @@ fn process_case(
     if cli.stubs {
         runner.set_stubs(&analisis::stubs(&original, cli.kind));
     }
+    // b7-8: con el patron del bug de V8, el caso entero (no sus variantes) sin el sensor.
+    let runner_celda = runner;
+    let por_riesgo = runner_por_riesgo(runner, &original, cli.kind);
+    stats.sensor_omitidos += usize::from(por_riesgo.is_some());
+    let runner = por_riesgo.as_ref().unwrap_or(runner);
     // Precondicion del oraculo: el original termina solo (exit 0 o lanzando).
     let (a, a_cached) = ctx.cache.run(runner, &original, &mut stats.cache_hits);
     if original_no_compila(runner, &a, &original) {
@@ -1180,7 +1193,7 @@ fn process_case(
     }
     if mutate {
         let base_div = stats.last_div.take();
-        process_mutants(ctx, runner, cfg, names_cfg, cli, &mut stats.mutaciones, rel, &raw, base_div, base_lint);
+        process_mutants(ctx, runner_celda, cfg, names_cfg, cli, &mut stats.mutaciones, rel, &raw, base_div, base_lint);
     }
 }
 
@@ -1596,6 +1609,19 @@ fn runner_de_celda(preload: &runner::Preload, worker: usize, cli: &Cli) -> runne
         .with_sandbox(cli.sandbox)
 }
 
+/// b7-8: el paso `sensor` de meta.txt de un caso con el sensor omitido.
+const SENSOR_OMITIDO_TRAZA: &str = "omitido (sensor_omitido: el original es sloppy con eval directo y una clase, el patron del bug de V8 con el sensor) -> A y B comparados sin el sensor (b7-8)";
+
+/// b7-8: el runner sin el sensor para un caso cuyo original tiene el patron del bug de
+/// V8 13.6 con el sensor (`checks::riesgo_sensor_v8`; SIGSEGV en el GC o scopes leidos
+/// fuera del contexto; ver `Runner::run_inner`). La decision es
+/// una por caso y sale del original: A, B y todo lo que sigue corren igual (como tras
+/// `sensor_caido`, I3). `None`: el runner de la celda (sin sensor por politica, o sin el
+/// patron).
+fn runner_por_riesgo(runner: &runner::Runner, original: &str, kind: minify::SourceKind) -> Option<runner::Runner> {
+    (runner.con_sensor() && analisis::riesgo_sensor(original, kind)).then(|| runner.sin_sensor_por_riesgo())
+}
+
 /// n-sandbox: si esta ejecucion del original toco el sandbox (un permiso negado, atrapado
 /// o no), cuenta quien lo toco y deja la nota de la pasada. 7.9 (revision fe0cd86, MENOR
 /// 3): si el minificado tambien lo toco, el caso se compara igual (antes iba entero a
@@ -1647,7 +1673,8 @@ enum TocaSandbox {
     /// igual a los dos, y un bug ajeno al sandbox (`revision/a3-2c/corpus/c01-ayb-bug-real`)
     /// es un bug. Si el bug cambia lo que se toca (otra ruta, otro permiso), tambien: es un
     /// cambio de comportamiento. Las divergencias falsas que esto podria traer se midieron
-    /// con programas sin bug que tocan el sandbox de muchas formas (`trabajo-10oct/b7-9`).
+    /// con programas sin bug que tocan el sandbox de muchas formas (45 programas, 3 veces cada
+    /// uno, oxc y swc, `--sandbox` y `--sandbox-red`: 0 div/ atribuibles al sandbox; 7.9, 10-oct).
     AyB(Box<runner::Exec>),
     /// El original lo toco y el minificado no corrio (fallo del runner): no se sabe si lo
     /// toca ni se puede comparar. Es lo unico que va a descartes con causa `sandbox`.
@@ -1787,7 +1814,8 @@ fn compare_and_report(
     // Integracion 7.1 + 7.4: el runner con el sensor, para el camino de B tras I3 (abajo).
     let runner_con = runner;
     let mut runner = runner;
-    let mut paso_sensor = None;
+    // b7-8: un caso con el sensor omitido corre entero sin el (`con_sensor` es false).
+    let mut paso_sensor = runner.sensor_omitido().then(|| SENSOR_OMITIDO_TRAZA.to_string());
     let (mut con_sensor_a, mut con_sensor_b) = (None, None);
     if runner.con_sensor() {
         let (da, db) = (a.sensor_degradado(), b.sensor_degradado());
@@ -1851,8 +1879,9 @@ fn compare_and_report(
     // (un programa puede notar el sensor y tomar otro camino con el): el re-chequeo, solo si
     // todo lo demas ya daba Explica, corre B otra vez con el sensor (tope mayor) y sin el, con
     // cobertura, y exige el mismo camino (`recheck::camino_sensor_i3`). Aca solo se pasa el
-    // runner con el sensor.
-    let i3 = paso_sensor.is_some().then_some(runner_con);
+    // runner con el sensor. Con el sensor omitido (b7-8) no hubo I3: `paso_sensor` lleva solo
+    // la traza del omitido y el camino de B no se busca con el sensor (no se prende).
+    let i3 = (paso_sensor.is_some() && !runner_con.sensor_omitido()).then_some(runner_con);
     match oracle::compare(&a, &b) {
         oracle::Verdict::Same => false,
         oracle::Verdict::Divergence(kind) => {
@@ -2178,6 +2207,9 @@ fn process_mutants(
         if cli.stubs {
             runner.set_stubs(&analisis::stubs(&original, cli.kind));
         }
+        // b7-8: cada variante decide por su original (una mutacion puede sacar el `eval`).
+        let por_riesgo = runner_por_riesgo(runner, &original, cli.kind);
+        let runner = por_riesgo.as_ref().unwrap_or(runner);
         let a = runner.run(&original);
         if let Status::Failed(e) = &a.status {
             m.runner += 1;

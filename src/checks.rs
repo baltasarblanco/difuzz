@@ -3,10 +3,10 @@
 use std::collections::HashSet;
 
 use swc_ecma_ast::{
-    AssignExpr, AssignTarget, BindingIdent, CatchClause, Class, ClassDecl, ClassExpr, Expr, FnDecl,
-    FnExpr, Ident, ImportDefaultSpecifier, ImportNamedSpecifier, ImportStarAsSpecifier, Lit,
-    MemberExpr, MemberProp, Param, Pat, Program, Prop, PropName, PropOrSpread, SimpleAssignTarget,
-    UpdateExpr, VarDeclarator, WithStmt,
+    AssignExpr, AssignTarget, BindingIdent, CallExpr, Callee, CatchClause, Class, ClassDecl, ClassExpr,
+    Expr, FnDecl, FnExpr, Ident, ImportDefaultSpecifier, ImportNamedSpecifier, ImportStarAsSpecifier,
+    Lit, MemberExpr, MemberProp, ModuleItem, Param, Pat, Program, Prop, PropName, PropOrSpread,
+    SimpleAssignTarget, Stmt, UpdateExpr, VarDeclarator, WithStmt,
 };
 use swc_ecma_visit::{Visit, VisitWith};
 
@@ -50,6 +50,72 @@ pub fn static_flags_oxc(program: &Program) -> Vec<&'static str> {
         out.push("extends");
     }
     out
+}
+
+/// b7-8: el programa (carril A, CommonJS) tiene el patron que dispara un bug de V8
+/// 13.6 (node 24.14.1) con el sensor de violaciones del preload: con el debugger
+/// pausando en excepciones atrapadas, una pausa dentro de la definicion de una clase
+/// en codigo sloppy con `eval` directo arma la cadena de scopes con el contexto de la
+/// clase y el ScopeInfo de la funcion de afuera (SIGSEGV en el GC o lecturas fuera del
+/// contexto; MEDIDO en el informe sigsegv-9460 del 10-oct, ver runner.rs). Criterio, sobre-
+/// aproximado a proposito: el prologo del programa no tiene un `"use strict"` real y hay
+/// en cualquier lugar una llamada directa a `eval` (tambien `(eval)(...)` y
+/// `eval(...)`, que son directas) y una clase (declaracion o expresion). No
+/// cuentan `(0, eval)(...)` ni `eval?.(...)` (indirectas; MEDIDO 0/5 SIGSEGV, contra 5/5
+/// de la directa, b7-8, 10-oct). No ve clases ni `eval` que solo estan en
+/// strings (codigo armado en runtime): ahi queda el reintento `sensor_caido`.
+pub fn riesgo_sensor_v8(program: &Program) -> bool {
+    let cuerpo: Vec<&Stmt> = match program {
+        Program::Script(s) => s.body.iter().collect(),
+        // Un texto del carril A que solo parsea como modulo: corre igual como script.
+        Program::Module(m) => m.body.iter().map_while(ModuleItem::as_stmt).collect(),
+    };
+    if prologo_estricto(&cuerpo) {
+        return false;
+    }
+    let mut v = RiesgoV8::default();
+    program.visit_with(&mut v);
+    v.eval_directo && v.clase
+}
+
+/// Un `"use strict"` en el prologo de directivas, escrito tal cual: con escapes
+/// (`"use\x20strict"`) no es la directiva (MEDIDO: 5/5 SIGSEGV, igual que sin ella).
+/// Sin `raw`, ante la duda, no cuenta.
+fn prologo_estricto(cuerpo: &[&Stmt]) -> bool {
+    for s in cuerpo {
+        let Stmt::Expr(e) = s else { return false };
+        let Expr::Lit(Lit::Str(x)) = &*e.expr else { return false };
+        if matches!(x.raw.as_deref(), Some("\"use strict\"" | "'use strict'")) {
+            return true;
+        }
+    }
+    false
+}
+
+#[derive(Default)]
+struct RiesgoV8 {
+    eval_directo: bool,
+    clase: bool,
+}
+
+impl Visit for RiesgoV8 {
+    fn visit_class(&mut self, n: &Class) {
+        self.clase = true;
+        n.visit_children_with(self);
+    }
+
+    fn visit_call_expr(&mut self, n: &CallExpr) {
+        if let Callee::Expr(c) = &n.callee {
+            let mut e = &**c;
+            while let Expr::Paren(p) = e {
+                e = &p.expr;
+            }
+            if matches!(e, Expr::Ident(i) if i.sym.as_str() == "eval") {
+                self.eval_directo = true;
+            }
+        }
+        n.visit_children_with(self);
+    }
 }
 
 /// Re-chequeo de `global_conocido` (recheck.rs): los globals de oxc que no existen
@@ -590,6 +656,43 @@ mod tests {
         // La lista esta ordenada para binary_search.
         let t = super::NODE_MISSING_OXC_GLOBALS;
         assert!(t.windows(2).all(|w| w[0] < w[1]));
+    }
+
+    /// b7-8: el patron del bug de V8 con el sensor (sloppy + `eval` directo + clase).
+    /// Cada negativo es el repro con un solo ingrediente cambiado.
+    #[test]
+    fn riesgo_del_sensor_de_v8() {
+        use super::riesgo_sensor_v8 as r;
+        const REPRO: &str = "var v;\ntry { class X extends 1 {} } catch {}\nif (false) eval(\"\");\n";
+        assert!(r(&parse(REPRO)));
+        // Positivos: la clase como expresion, `eval` entre parentesis o escapado, en
+        // un metodo o en un static de la clase (estrictos: lo que cuenta es el programa).
+        assert!(r(&parse("var C = class {}; eval(\"1\");")));
+        assert!(r(&parse("class A {} (eval)(\"1\");")));
+        assert!(r(&parse("class A {} \\u0065val(\"1\");")));
+        assert!(r(&parse("try { class X extends 1 {} } catch {} class K { m() { eval(\"0\"); } }")));
+        assert!(r(&parse("var o = { c: class { static v = (eval)(\"1\"); } };")));
+        // Un "use strict" que no es la directiva: con escapes, despues de otra
+        // sentencia o entre parentesis. Uno que si lo es despues de otra directiva: no.
+        assert!(r(&parse(&format!("\"use\\x20strict\";\n{REPRO}"))));
+        assert!(r(&parse(&format!("var w;\n\"use strict\";\n{REPRO}"))));
+        assert!(r(&parse(&format!("(\"use strict\");\n{REPRO}"))));
+        assert!(!r(&parse(&format!("\"otra\";\n'use strict';\n{REPRO}"))));
+        // Negativos: estricto, modulo, sin eval, eval indirecto u opcional, sin clase.
+        assert!(!r(&parse(&format!("\"use strict\";\n{REPRO}"))));
+        let cm: Lrc<SourceMap> = Default::default();
+        let fm = cm.new_source_file(FileName::Anon.into(), "var v; class X {} eval(\"\");".to_string());
+        let m = swc_ecma_parser::parse_file_as_module(&fm, Syntax::default(), EsVersion::latest(), None, &mut Vec::new()).unwrap();
+        // El AST de modulo de un texto de carril A (fallback de parse_para_analisis) sigue
+        // siendo sloppy: cuenta. Un modulo de verdad (carril B) no llega aca (analisis.rs).
+        assert!(r(&Program::Module(m)));
+        assert!(!r(&parse("var v;\ntry { class X extends 1 {} } catch {}\n")));
+        assert!(!r(&parse("var v;\ntry { class X extends 1 {} } catch {}\nif (false) (0, eval)(\"\");\n")));
+        assert!(!r(&parse("var v;\ntry { class X extends 1 {} } catch {}\nif (false) eval?.(\"\");\n")));
+        assert!(!r(&parse("var v;\ntry { f() } catch {}\nif (false) eval(\"\");\n")));
+        // `eval` y clases que solo estan en strings o como miembro: no.
+        assert!(!r(&parse("var v; eval(\"class X extends 1 {}\");")));
+        assert!(!r(&parse("class A {} o.eval(\"1\"); new eval(); eval`x`;")));
     }
 
     /// R1-H13: el estado del analisis viaja por el protocolo y da la nota.

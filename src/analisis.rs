@@ -334,6 +334,25 @@ pub fn globals(src: &str, kind: SourceKind) -> Result<Option<Vec<String>>, Strin
     correr("globals", kind, &[src])
 }
 
+/// b7-8: si el original tiene el patron del bug de V8 con el sensor de violaciones
+/// (`checks::riesgo_sensor_v8`). Un modulo (carril B) es estricto: no. El filtro de
+/// texto es exacto hacia abajo (`class` no admite escapes; un `eval` escapado lleva
+/// `\u`) y deja sin parsear casi todo el corpus. Ante la duda (SWC no lo parsea, o el
+/// analisis falla: con nota), true: lo conservador es no prender el sensor.
+pub fn riesgo_sensor(src: &str, kind: SourceKind) -> bool {
+    if kind == SourceKind::Module || !src.contains("class") || !(src.contains("eval") || src.contains("\\u")) {
+        return false;
+    }
+    match correr("riesgo_v8", kind, &[src]) {
+        Ok(Some(v)) if v.len() == 1 => v[0] == "1",
+        Ok(_) => true,
+        Err(e) => {
+            registrar("riesgo del sensor de V8 (b7-8: sensor omitido ante la duda)", &e);
+            true
+        }
+    }
+}
+
 /// `recheck::neutralize_with`.
 pub fn sin_with(src: &str, kind: SourceKind) -> Result<Option<String>, String> {
     correr("with", kind, &[src]).map(|v| v.and_then(|mut v| v.pop()))
@@ -432,6 +451,9 @@ fn ejecutar(op: &str, kind: SourceKind, p: &[&str]) -> Option<Vec<String>> {
         ("stubs", [src]) => Some(vec![crate::stubs::manifest(src, kind)]),
         ("globals", [src]) => GLOBALS.set(&Globals::new(), || {
             crate::backend::swc::parse_for(src, kind).map(|p| crate::checks::known_globals_used(&p))
+        }),
+        ("riesgo_v8", [src]) => GLOBALS.set(&Globals::new(), || {
+            crate::backend::swc::parse_para_analisis(src, kind).0.map(|p| vec![b(crate::checks::riesgo_sensor_v8(&p))])
         }),
         ("with", [src]) => crate::recheck::neutralize_with(src, kind).map(|s| vec![s]),
         ("arguments", [src]) => crate::recheck::rename_arguments(src).map(|s| vec![s]),

@@ -516,6 +516,23 @@ Principios:
 
 La sección `clasificacion:` de `meta.txt` muestra cada re-chequeo y su resultado.
 
+**Sin el sensor de violaciones.** En oxc, el preload ve las violaciones atrapadas (TDZ, coerción
+de `Symbol`, `extends` que lanza) con el inspector de V8, que pausa en cada excepción atrapada. A
+y B se comparan los dos sin ese sensor (paso `sensor:` de `clasificacion:`) en dos casos:
+
+- node muere o no termina con el sensor: se repite sin él (`sensor_caido`);
+- de entrada, si el original del carril A es sloppy (sin un `"use strict"` en el prólogo), tiene
+  una llamada directa a `eval` y alguna clase (`sensor_omitido`; resumen:
+  `sensor (b7-8): omitido_por_riesgo_v8=N`). Es el patrón de un bug de V8 13.6 (node 24.14.1):
+  una pausa dentro de la definición de una clase en ese código arma los scopes con el contexto
+  equivocado, y node muere con SIGSEGV en el GC o sigue leyendo memoria fuera del contexto
+  (medido con un repro de tres líneas, sin difuzz).
+
+En esos casos no hay violaciones atrapadas: una divergencia que solo ellas explicarían queda en
+`div/`, nunca en `known/`. En el corpus de tests de SWC son 8 de 3119 `input.js`. El patrón no ve
+una clase o un `eval` que solo están en strings (código armado en runtime): para eso queda el
+reintento.
+
 ## Códigos de salida
 
 | código | significado |
@@ -540,8 +557,8 @@ Sin `node` en el `PATH`, los tests que lo necesitan fallan con un mensaje claro.
 
 - **Golden de detección** (`tests/golden/`): 16 casos con bugs conocidos de oxc y swc, en 8
   celdas, más `--invocar` y `--stubs`; la clase esperada de cada caso está en `esperado.tsv`.
-- **Aceptación de los re-chequeos** (`tests/aceptacion/rechequeos/`): 127 casos que combinan un
-  bug real de oxc con un flag de asunción, en las 4 celdas de oxc (508 comparaciones).
+- **Aceptación de los re-chequeos** (`tests/aceptacion/rechequeos/`): 129 casos que combinan un
+  bug real de oxc con un flag de asunción, en las 4 celdas de oxc (516 comparaciones).
 
 ```sh
 tests/golden/verificar.sh --jobs 4                    # sale con 0 y "comparaciones=N fallas=0"

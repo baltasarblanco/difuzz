@@ -444,3 +444,57 @@ fn clasificacion_de_punta_a_punta() {
     drop(preload);
     let _ = std::fs::remove_dir_all(&base);
 }
+
+/// b7-8: el programa del bug de V8 con el sensor (`f1-bucle.js` de b7-8, 10-oct:
+/// SIGSEGV 20/20 con el sensor) por `process_case` con el runner de oxc (con sensor
+/// por politica): el caso corre entero sin el sensor (ni un `sensor_caido`, ni una
+/// repeticion I3), se compara y va a div/ con el paso `sensor: omitido` en meta.txt.
+/// Con `"use strict"` el patron no esta: el sensor corre (MEDIDO 0/10 SIGSEGV), ve la
+/// excepcion atrapada de `extends 1` y el caso va a known/ por esa asuncion; es justo la
+/// evidencia que el caso omitido no tiene (va a div/, nunca a known/ sin ella). Con swc
+/// no hay sensor que omitir.
+#[test]
+fn sensor_omitido_de_punta_a_punta() {
+    if !crate::test_util::requiere_node() {
+        return;
+    }
+    let base: PathBuf = std::env::temp_dir().join(format!("difuzz-test-e2e-b78-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&base);
+    let (corpus, out) = (base.join("corpus"), base.join("out"));
+    const F1: &str = "var v;\nvar basura = [];\nfor (var i = 0; i < 200; i++) {\n  basura.push(new Array(1000).fill({ i }));\n  try { class X extends 1 {} } catch {}\n}\nif (false) eval(\"\");\nconsole.log(41);\n";
+    let estricto = format!("\"use strict\";\n{F1}");
+    let casos = [("riesgo", F1, "oxc", 1, "div"), ("estricto", estricto.as_str(), "oxc", 0, "known"), ("swc", F1, "swc", 0, "div")];
+    for (caso, js, _, _, _) in &casos {
+        std::fs::create_dir_all(corpus.join(caso)).unwrap();
+        std::fs::write(corpus.join(caso).join("input.js"), js).unwrap();
+    }
+    let comunes = [corpus.to_str().unwrap(), "--out", out.to_str().unwrap(), "--no-cache", "--jobs", "1", "--timeout-ms", "20000"];
+    let cli_de = |m: &str| crate::Cli::parse(comunes.iter().chain(&["--minifier", m]).map(|s| s.to_string()).collect()).unwrap();
+    let reporter = crate::oracle::Reporter::new(&out, cli_de("oxc").cell(), crate::runner::PRELOAD);
+    let known = crate::known::Known::load(&corpus, &out, 0, Minifier::Oxc);
+    let cache = crate::cache::CacheA::new(None, &[]);
+    let triage = crate::triage::Triage::load(&out);
+    let preload = crate::runner::Preload::write_tagged("e2e-b78").unwrap();
+    for (caso, _, m, omitidos, dir) in casos {
+        let cli = cli_de(m);
+        let runner = crate::runner_de_celda(&preload, crate::test_util::id_runner(), &cli);
+        assert_eq!(runner.con_sensor(), m == "oxc");
+        let cfg = Back::Rompe("41", "42").config(&cli);
+        let ctx = crate::Ctx { reporter: &reporter, known: &known, cache: &cache, triage: &triage, medido: None };
+        let mut st = crate::Stats::default();
+        crate::process_case(&ctx, &runner, &cfg, None, &cli, &mut st, &corpus.join(caso).join("input.js"));
+        drop(runner);
+        let div = usize::from(dir == "div");
+        assert_eq!((st.sensor_omitidos, st.divergences, st.known), (omitidos, div, 1 - div), "{caso}: {}", st.line());
+        assert_eq!(donde(&out, caso), [dir], "{caso}");
+        let meta = std::fs::read_to_string(out.join(dir).join(caso).join("meta.txt")).unwrap();
+        let paso = format!("\nclasificacion:\n  sensor: {}\n", crate::SENSOR_OMITIDO_TRAZA);
+        assert_eq!(meta.contains(&paso), omitidos == 1, "{caso}: {meta}");
+        if omitidos == 1 {
+            // Sin repeticion I3: nada corrio con el sensor (ni murio con el).
+            assert_eq!(st.sensor_repetidos, 0, "{caso}: {meta}");
+        }
+    }
+    drop(preload);
+    let _ = std::fs::remove_dir_all(&base);
+}

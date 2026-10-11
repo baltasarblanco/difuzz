@@ -414,7 +414,7 @@
 22-r09-stack-orden-marcos	oxc-b-core_defaults	div:ThrowNew
 22-r09-stack-orden-marcos	oxc-b-carril_a	div:ThrowNew
 # 7.4 (Fase R I3): 1000 excepciones atrapadas pasan el tope del sensor (MAX_PAUSAS, 256 pausas) y A y B se comparan
-# sin el sensor. Con fe0cd86 los cinco iban a div/ (MEDIDO, trabajo-10oct/b7-4/out-casos-base): sin el sensor no hay
+# sin el sensor. Con fe0cd86 los cinco iban a div/ (MEDIDO por 7.4, 10-oct): sin el sensor no hay
 # `tdz_atrapada`. Ahora A hereda la violacion que el sensor vio antes del tope y el re-chequeo (sin el sensor, B == A')
 # decide: t01 (la TDZ en el loop) y t02 (la TDZ antes del ruido) son positivos, known/. t03 (bug del getter al lado)
 # y t04 (21-n10 en un loop: el bug en el catch de la TDZ) siguen en div/. t05: la TDZ despues del tope no la ve el
@@ -447,7 +447,7 @@
 # b7-1 (revision n2, IMPORTANTE 1): B == A' por el valor por defecto. El bug de oxc (substring, isInteger, cbrt,
 # `delete (0/0)`) deja justo el valor que la variable tiene cuando la rama de la violacion no corre (`""`, `0`,
 # `false`, un `+=` que no suma): B corre la rama con el bug y da lo mismo que A', que no la corre. Con el binario de
-# fe0cd86 iban a known/ en todas las filas de abajo salvo r08 en B (MEDIDO, trabajo-10oct/b7-1). Ahora el re-chequeo
+# fe0cd86 iban a known/ en todas las filas de abajo salvo r08 en B (MEDIDO por 7.1, 10-oct). Ahora el re-chequeo
 # mira el camino de B (el sensor en B para TDZ/Symbol/extends; la cobertura de V8 de B con y sin la neutralizacion
 # para el resto): div/. Programas de revision-n2/at2-at3 (qNN/rNN) y una variante (tdz-suma, un acumulador). r02:
 # positivo, oxc borra la clase (B no corre el catch): sigue en known/. En B, `with` no parsea (descarte) y
@@ -534,7 +534,7 @@
 # `&&=`/`||=`/`??=` ni los valores por defecto (h1-*: programas de rev-7.1/H1). H2: la asuncion elige un valor (un
 # indice, una clave, lo que devuelve un helper nativo o un built-in pisado, el texto de una funcion nativa, el
 # `this` de sloppy) y B recorre el mismo codigo con y sin ella (h2-*: rev-7.1/H2). Con el binario de 7.1 iban a
-# known/ en todas sus filas de carril A y B (MEDIDO, trabajo-10oct/b7-1b). Ahora: contadores de rama en el
+# known/ en todas sus filas de carril A y B (MEDIDO por 7.1b, 10-oct). Ahora: contadores de rama en el
 # minificado (h1, v-sloppy-args-andasig), sensor de uso (global, with, coercion, built-ins, this de sloppy), texto
 # nativo sin fijar (d05) y, para contenido y solo sloppy, la confirmacion con los literales salados
 # (v-sloppy-args-tabla, v-tostring-user3-tabla: el `arguments` atado y el texto de una funcion del programa como
@@ -595,3 +595,17 @@
 23-b71b-q02t-marco-forjado-tabla	oxc-a-carril_a	div:Stdout
 23-b71b-q02t-marco-forjado-tabla	oxc-b-core_defaults	div:Stdout
 23-b71b-q02t-marco-forjado-tabla	oxc-b-carril_a	div:Stdout
+# b7-8 (10-oct): el patron del bug de V8 13.6 con el sensor de violaciones (sloppy + `eval` directo + clase; SIGSEGV en el
+# GC con el inspector pausando dentro de la definicion de una clase). En el carril A el caso corre entero sin el sensor
+# (`sensor: omitido` en meta.txt). omitido-bug: el bug de 9460 (IIFE con rest borrada) con el programa que tumba a node
+# 20/20 con el sensor: div/ igual que con fe0cd86 (antes por `sensor_caido`). omitido-tdz: la TDZ atrapada que oxc borra
+# (known/ con el sensor, MEDIDO con fe0cd86) pasa a div/ en el carril A: sin el sensor no hay evidencia. En el carril B
+# (modulo, estricto) el sensor corre: known/ como antes.
+23-b78-omitido-bug	oxc-a-core_defaults	div:Stdout
+23-b78-omitido-bug	oxc-a-carril_a	div:Stdout
+23-b78-omitido-bug	oxc-b-core_defaults	div:Stdout
+23-b78-omitido-bug	oxc-b-carril_a	div:Stdout
+23-b78-omitido-tdz	oxc-a-core_defaults	div:Stdout
+23-b78-omitido-tdz	oxc-a-carril_a	div:Stdout
+23-b78-omitido-tdz	oxc-b-core_defaults	known
+23-b78-omitido-tdz	oxc-b-carril_a	known

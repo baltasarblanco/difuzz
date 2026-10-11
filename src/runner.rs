@@ -42,6 +42,9 @@ pub const LINK_EXIT: i32 = 71;
 /// violaciones no corrio entero (`Exec::sensor_degradado`).
 pub const SENSOR_CAIDO: &str = "sensor_caido";
 pub const SENSOR_TOPE: &str = "sensor_tope";
+/// b7-8: el caso corrio entero sin el sensor porque su original tiene el patron del bug
+/// de V8 (`Runner::sin_sensor_por_riesgo`, `checks::riesgo_sensor_v8`).
+pub const SENSOR_OMITIDO: &str = "sensor_omitido";
 
 /// 7.4: los flags que el preload pone por cada clase de violacion que ubico con una linea
 /// `viol` sin marca de no atrapada (`FLAG_VIOL` en preload.js). Los de una violacion
@@ -135,8 +138,10 @@ impl Exec {
     /// violaciones: `SENSOR_CAIDO` (se repitio sin el tras una senal o un
     /// timeout, `run_inner`) o `SENSOR_TOPE` (el preload llego a MAX_PAUSAS y lo
     /// apago a mitad). `None`: entera con el sensor, o sin el por politica.
+    /// b7-8: tambien `SENSOR_OMITIDO` (sin el por el patron del bug de V8): nunca
+    /// cuenta como entera con el sensor.
     pub fn sensor_degradado(&self) -> Option<&'static str> {
-        [SENSOR_CAIDO, SENSOR_TOPE].into_iter().find(|s| self.ctl.lines().any(|l| l == *s))
+        [SENSOR_CAIDO, SENSOR_TOPE, SENSOR_OMITIDO].into_iter().find(|s| self.ctl.lines().any(|l| l == *s))
     }
 
     /// 7.4 (Fase R I3): `self` es el mismo programa repetido sin el sensor porque el sensor
@@ -389,6 +394,8 @@ pub struct Runner {
     sensor: bool,
     /// n-sandbox: el encierro de node (`--sandbox`). Por defecto apagado.
     sandbox: Sandbox,
+    /// b7-8: sin el sensor por el patron del bug de V8 (`sin_sensor_por_riesgo`).
+    omitido: bool,
     /// Copia que comparte los archivos del runner original (`observing`,
     /// `sin_sensor`): al soltarse no borra nada.
     prestado: bool,
@@ -413,6 +420,7 @@ impl Runner {
             stubs: None,
             sensor: true,
             sandbox: Sandbox::Apagado,
+            omitido: false,
             prestado: false,
         }
     }
@@ -449,6 +457,21 @@ impl Runner {
         r
     }
 
+    /// b7-8: el mismo runner sin el sensor para TODO un caso cuyo original tiene el
+    /// patron del bug de V8 (`checks::riesgo_sensor_v8`): A, B, confirmacion,
+    /// re-chequeos y pasadas observadas corren igual, sin el. Cada ejecucion lleva
+    /// `sensor_omitido` en el canal y la cache de A la guarda aparte (`cache_tag`).
+    pub fn sin_sensor_por_riesgo(&self) -> Runner {
+        let mut r = self.sin_sensor();
+        r.omitido = true;
+        r
+    }
+
+    /// b7-8: este runner corre sin el sensor por el patron del bug de V8.
+    pub fn sensor_omitido(&self) -> bool {
+        self.omitido
+    }
+
     /// Copia que usa los mismos archivos y no los borra al soltarse.
     fn prestar(&self) -> Runner {
         Runner {
@@ -464,6 +487,7 @@ impl Runner {
             stubs: self.stubs.clone(),
             sensor: self.sensor,
             sandbox: self.sandbox,
+            omitido: self.omitido,
             prestado: true,
         }
     }
@@ -521,11 +545,16 @@ impl Runner {
 
     /// M28: lo que distingue la ejecucion de `run` en la cache de A ademas del
     /// texto: el envoltorio observador (y si invoca) corre otro archivo.
+    /// b7-8: y el sensor omitido (si no, un A con el sensor de un binario anterior,
+    /// mismo preload, se compararia contra un B sin el).
     pub fn cache_tag(&self) -> &'static str {
-        match (self.observe, self.invocar) {
-            (false, _) => "",
-            (true, false) => "observar",
-            (true, true) => "observar+invocar",
+        match (self.observe, self.invocar, self.omitido) {
+            (false, _, false) => "",
+            (true, false, false) => "observar",
+            (true, true, false) => "observar+invocar",
+            (false, _, true) => SENSOR_OMITIDO,
+            (true, false, true) => "observar sensor_omitido",
+            (true, true, true) => "observar+invocar sensor_omitido",
         }
     }
 
@@ -588,12 +617,21 @@ impl Runner {
     }
 
     /// b4-a: el sensor de violaciones atrapadas (inspector de V8 en el preload)
-    /// puede tumbar a node (MEDIDO: SIGSEGV con fixture/issues/9460/side-effects,
-    /// que sin el sensor corre bien) o volverlo lentisimo (MEDIDO: con pausa en
-    /// excepciones atrapadas cada throw recorre la pila; una recursion que atrapa
-    /// en cada nivel pasa de 0,05 s a mas de 40 s). Si node muere por una senal o
-    /// no termina a tiempo con el sensor, se repite sin el: el resultado es el de
-    /// siempre (sin flags de violacion) y el canal lleva `sensor_caido`.
+    /// puede tumbar a node o volverlo lentisimo (MEDIDO: con pausa en excepciones
+    /// atrapadas cada throw recorre la pila; una recursion que atrapa en cada nivel
+    /// pasa de 0,05 s a mas de 40 s). La caida es un bug de V8 13.6 (node 24.14.1), no
+    /// del preload: una pausa dentro de la definicion de una clase en codigo sloppy con
+    /// `eval` directo arma los scopes con el contexto equivocado y termina en SIGSEGV
+    /// en el GC (MEDIDO con fixture/issues/9460/side-effects y con un repro sin difuzz:
+    /// un preload que abre una `inspector.Session`, `Debugger.enable`,
+    /// `Debugger.setPauseOnExceptions({ state: 'caught' })` y `Debugger.resume` en cada pausa,
+    /// y el programa sloppy de 3 lineas
+    /// `var v; try { class X extends 1 {} } catch {} if (false) eval("");`: SIGSEGV 10/10,
+    /// 0/10 sin el preload, sin el `eval` o con "use strict"). b7-8: los casos con
+    /// ese patron ya no prenden el sensor (`sin_sensor_por_riesgo`); esto queda para
+    /// lo que el patron no ve (codigo armado en runtime, otro bug). Si node muere por
+    /// una senal o no termina a tiempo con el sensor, se repite sin el: el resultado
+    /// es el de siempre (sin flags de violacion) y el canal lleva `sensor_caido`.
     ///
     /// Paso 7 (revision-tint I1): ante Timeout la repeticion sin el sensor usa el
     /// timeout entero, como en b4c98fd. La sonda de M2 (un cuarto del timeout, minimo
@@ -609,6 +647,11 @@ impl Runner {
     /// el sensor va perezoso (lo prende `invocar` del preload, si llega). El
     /// reintento ante senal o timeout queda igual que con el sensor prendido.
     fn run_inner(&self, js: &str, opts: Opts) -> Exec {
+        if self.omitido {
+            let mut e = self.run_once(js, Opts { sin_sensor: true, ..opts });
+            e.ctl.insert_str(0, &format!("{SENSOR_OMITIDO}\n"));
+            return e;
+        }
         let opts = Opts { sin_sensor: opts.sin_sensor || !self.sensor, ..opts };
         let opts = Opts { perezoso: !opts.sin_sensor && !puede_atrapar(js), ..opts };
         let e = self.run_once(js, opts);
@@ -1998,5 +2041,42 @@ mod tests {
         let (a, b) = (m.run(js), m.run(&format!("{js}/* try */\n")));
         assert_eq!((a.flags.clone(), viol(&a)), (vec!["tdz".to_string()], vec!["viol tdz 0:0".to_string()]), "{}", a.ctl);
         assert_eq!((b.flags.clone(), viol(&b)), (vec!["stack".to_string(), "tdz".to_string()], vec!["viol tdz 0:0".to_string()]), "{}", b.ctl);
+    }
+
+    /// b7-8: el programa del bug de V8 (`f1-bucle.js` de b7-8, 10-oct: con el
+    /// sensor, SIGSEGV 20/20; sin el, 0/10; MEDIDO con node 24.14.1). El runner con el
+    /// sensor omitido no prende el inspector: termina solo, sin `sensor_caido`, con
+    /// `sensor_omitido` en el canal, y la cache de A lo guarda aparte. Que con el
+    /// sensor muera no se afirma (depende del layout del heap): solo se informa.
+    #[test]
+    fn sensor_omitido_por_riesgo() {
+        use super::{Preload, Runner, Status, SENSOR_CAIDO, SENSOR_OMITIDO};
+        use std::time::Duration;
+        if !crate::test_util::requiere_node() {
+            return;
+        }
+        let preload = Preload::write_tagged("omitido").unwrap();
+        let r = Runner::new(&preload, crate::test_util::id_runner(), Duration::from_secs(20));
+        let o = r.sin_sensor_por_riesgo();
+        assert!(!o.con_sensor() && o.sensor_omitido() && !r.sensor_omitido());
+        assert!(o.observing().sensor_omitido() && o.sin_sensor().sensor_omitido());
+        assert_eq!((r.cache_tag(), o.cache_tag()), ("", SENSOR_OMITIDO));
+        assert_eq!((r.observing().cache_tag(), o.observing().cache_tag()), ("observar", "observar sensor_omitido"));
+        let js = "var v;\nvar basura = [];\nfor (var i = 0; i < 200; i++) {\n  basura.push(new Array(1000).fill({ i }));\n  try { class X extends 1 {} } catch {}\n}\nif (false) eval(\"\");\ntry { z; } catch {}\nlet z;\nconsole.log(41);\n";
+        let e = o.run(js);
+        assert_eq!((&e.status, e.stdout.as_str()), (&Status::Exited(0), "41\n"), "{}", e.ctl);
+        assert!(e.ctl.starts_with("sensor_omitido\n") && !e.ctl.lines().any(|l| l == SENSOR_CAIDO), "{}", e.ctl);
+        assert_eq!(e.sensor_degradado(), Some(SENSOR_OMITIDO));
+        // Sin el sensor no hay violaciones (la TDZ atrapada no se ve): es el costo.
+        assert!(!e.ctl.lines().any(|l| l.starts_with("viol ")), "{}", e.ctl);
+        // Integracion 7.8 + 7.1/7.4 (camino de B tras I3): con el runner omitido, la corrida con
+        // cobertura y el tope mayor tampoco prende el sensor, y el camino de B no sale de ahi.
+        let cov = o.run_con_cobertura(js, &[], &[("DIFUZZ_MAX_PAUSAS", super::MAX_PAUSAS_MAYOR)]);
+        assert_eq!((cov.sensor_degradado(), cov.cobertura().is_some()), (Some(SENSOR_OMITIDO), true), "{}", cov.ctl);
+        assert!(!cov.ctl.lines().any(|l| l.starts_with("viol ")), "{}", cov.ctl);
+        let camino = crate::recheck::camino_sensor_i3(&o, &o, js, &e, None);
+        assert!(matches!(camino, crate::recheck::Camino::NoSe(ref n) if n.contains(SENSOR_OMITIDO)), "{camino:?}");
+        let c = r.run(js);
+        eprintln!("b7-8: con el sensor: {:?}, sensor_caido={}", c.status, c.ctl.lines().any(|l| l == SENSOR_CAIDO));
     }
 }
