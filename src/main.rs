@@ -1730,10 +1730,13 @@ fn compare_and_report(
     // repitio sin el tras una senal o un timeout) o a medias (`sensor_tope`: MAX_PAUSAS),
     // los dos se repiten sin el sensor (salvo el que ya corrio entero sin el) y todo lo
     // que sigue (confirmacion y re-chequeos) usa el runner sin sensor.
+    // 7.4: las corridas con el sensor (`con_sensor_a`/`_b`, salvo las `sensor_caido`, que ya
+    // son sin el) se guardan para heredar sus violaciones despues de confirmar.
     let (mut a, mut b, mut a_cached) = (a, b, a_cached);
     let sin_sensor;
     let mut runner = runner;
     let mut paso_sensor = None;
+    let (mut con_sensor_a, mut con_sensor_b) = (None, None);
     if runner.con_sensor() {
         let (da, db) = (a.sensor_degradado(), b.sensor_degradado());
         if da.is_some() || db.is_some() {
@@ -1741,11 +1744,11 @@ fn compare_and_report(
             runner = &sin_sensor;
             stats.sensor_repetidos += 1;
             if da != Some(runner::SENSOR_CAIDO) {
-                a = runner.run(original);
+                con_sensor_a = Some(std::mem::replace(&mut a, runner.run(original)));
                 a_cached = false;
             }
             if db != Some(runner::SENSOR_CAIDO) {
-                b = runner.run(minified);
+                con_sensor_b = Some(std::mem::replace(&mut b, runner.run(minified)));
             }
             let lado = |d: Option<&str>| match d {
                 Some(runner::SENSOR_CAIDO) => "sin el sensor (sensor_caido: senal o timeout con el)",
@@ -1765,11 +1768,32 @@ fn compare_and_report(
         eprintln!("runner: {e}");
         return true;
     }
-    let (a, b) = match confirm(ctx, runner, stats, rel, original, minified, a, a_cached, b) {
+    let (mut a, mut b) = match confirm(ctx, runner, stats, rel, original, minified, a, a_cached, b) {
         Confirmed::Same => return false,
         Confirmed::Nondeterministic => return true,
         Confirmed::Divergence(ab) => *ab,
     };
+    // 7.4 (Fase R I3): un positivo que atrapa mas de MAX_PAUSAS excepciones iba a div/: sin
+    // el sensor, A no tiene la violacion atrapada y el re-chequeo de violaciones no corria.
+    // A y B (ya confirmados, sin el sensor) heredan lo que el sensor ubico antes de
+    // degradarse (`Exec::heredar_violaciones`). Sound: la comparacion y los re-chequeos
+    // siguen sin el sensor, y el de violaciones solo da Explica si B == A' (todo sin el
+    // sensor). Lo que el sensor no llego a ver (una violacion despues del tope) sigue en div/.
+    // Descartadas (MEDIDO, node 24.14.1): dejar de pausar por posicion ya vista
+    // (`Debugger.setBlackboxedRanges` apaga la funcion entera: pierde la TDZ de al lado), un
+    // tope por tiempo (depende de la carga) y subir el tope (0,5-1,4 ms por pausa).
+    let heredadas_a = con_sensor_a.as_ref().map(|s| a.heredar_violaciones(s)).unwrap_or_default();
+    let heredadas_b = con_sensor_b.as_ref().map(|s| b.heredar_violaciones(s)).unwrap_or_default();
+    if let Some(p) = paso_sensor.as_mut() {
+        if !heredadas_a.is_empty() || !heredadas_b.is_empty() {
+            let lista = |v: &[String]| if v.is_empty() { "ninguna".to_string() } else { v.join(", ") };
+            p.push_str(&format!(
+                "; violaciones que vio el sensor (7.4): A {}, B {}",
+                lista(&heredadas_a),
+                lista(&heredadas_b)
+            ));
+        }
+    }
     match oracle::compare(&a, &b) {
         oracle::Verdict::Same => false,
         oracle::Verdict::Divergence(kind) => {

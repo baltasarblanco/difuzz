@@ -38,15 +38,16 @@ tests/golden/verificar.sh [--jobs N] [BINARIO] [DIR_SALIDA]
 
 ## Aceptación de los re-chequeos — `tests/aceptacion/rechequeos/`
 
-90 casos que combinan un bug real de oxc con un flag de asunción, en las 4 celdas de oxc (90 × 4 = 360
+95 casos que combinan un bug real de oxc con un flag de asunción, en las 4 celdas de oxc (95 × 4 = 380
 comparaciones): 21 de la revisión 1 (C4, `00-` a `10-`), 9 adversariales del revisor de la fase R (`r01` a
 `r10`, sin `r05`), `14-tdz-positivo`, 11 de los flags que antes no tenían re-chequeo (`15-` coerción, `16-`
 built-ins, `17-` contenido de `toString`/`.stack`, `18-` profundidad: positivos y adversariales con el Issue A),
 15 de la revisión de t-int (`19-`: el bug adentro del código que el re-chequeo neutraliza; r03, r06 y r13 son
 controles), 5 del paso 7 (`20-`), 23 de n-principio (`21-`: `extends`, `with`, `global_conocido`,
 violaciones y solo sloppy con el bug en la rama que solo corre con la violación; la TDZ en un `return`; y sus
-positivos) y 5 de `.stack` (`22-`, de n-ruido: el bug cambia nombre, cuenta u orden de los marcos). Los `19-`,
-`20-` y `22-` esperan `div/` en todas las celdas; los `21-`, `div/` salvo los positivos.
+positivos), 5 de `.stack` (`22-`, de n-ruido: el bug cambia nombre, cuenta u orden de los marcos) y 5 del
+tope del sensor (`23-`, ítem 7.4: 1000 excepciones atrapadas y una TDZ atrapada). Los `19-`, `20-` y `22-`
+esperan `div/` en todas las celdas; los `21-` y `23-`, `div/` salvo los positivos.
 Destino esperado en `esperado.tsv` (mismo formato que el golden). Reutiliza `tests/golden/verificar.sh`.
 Lo que la aceptación no cubre: un programa armado para que la salida con el bug coincida con la del original
 neutralizado va a `known/` (ver "Límites conocidos" en el README principal).

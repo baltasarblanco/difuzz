@@ -43,6 +43,11 @@ pub const LINK_EXIT: i32 = 71;
 pub const SENSOR_CAIDO: &str = "sensor_caido";
 pub const SENSOR_TOPE: &str = "sensor_tope";
 
+/// 7.4: los flags que el preload pone por cada clase de violacion que ubico con una linea
+/// `viol` sin marca de no atrapada (`FLAG_VIOL` en preload.js). Los de una violacion
+/// atrapada solo los ve el sensor; `coercion_symbol` tambien sale de un Symbol no atrapado.
+pub const FLAGS_DEL_SENSOR: [&str; 3] = ["tdz_atrapada", "coercion_symbol", "extends_atrapado"];
+
 /// n-sandbox: linea del canal de control cuando la ejecucion toco el sandbox (un permiso
 /// denegado: la escribe el preload, `notarSandbox`, o `run_file` si la salida lo muestra).
 pub const SANDBOX: &str = "sandbox";
@@ -126,6 +131,38 @@ impl Exec {
     /// apago a mitad). `None`: entera con el sensor, o sin el por politica.
     pub fn sensor_degradado(&self) -> Option<&'static str> {
         [SENSOR_CAIDO, SENSOR_TOPE].into_iter().find(|s| self.ctl.lines().any(|l| l == *s))
+    }
+
+    /// 7.4 (Fase R I3): `self` es el mismo programa repetido sin el sensor porque el sensor
+    /// se degrado (`compare_and_report`), y `con` su corrida con el sensor (entera, o a
+    /// medias: `SENSOR_TOPE`). Le suma lo que el sensor ubico en `con`: las lineas `viol`
+    /// que `self` no tiene y los `FLAGS_DEL_SENSOR`. Devuelve las lineas `viol` agregadas,
+    /// sin el prefijo. Solo le dice al re-chequeo de violaciones donde neutralizar: la
+    /// comparacion y los re-chequeos siguen sin el sensor (simetricos), y lo que manda a
+    /// known/ es su veredicto (`veredicto_neutralizado`: B == A', todo sin el sensor), no
+    /// estas lineas. Las violaciones posteriores al tope no se vieron: no hay que heredar.
+    pub fn heredar_violaciones(&mut self, con: &Exec) -> Vec<String> {
+        let mut nuevas: Vec<&str> = Vec::new();
+        for l in con.ctl.lines().filter(|l| l.starts_with("viol ")) {
+            if !nuevas.contains(&l) && !self.ctl.lines().any(|p| p == l) {
+                nuevas.push(l);
+            }
+        }
+        for l in &nuevas {
+            if !self.ctl.is_empty() && !self.ctl.ends_with('\n') {
+                self.ctl.push('\n');
+            }
+            self.ctl.push_str(l);
+            self.ctl.push('\n');
+        }
+        for f in FLAGS_DEL_SENSOR {
+            if con.flags.iter().any(|x| x == f) && !self.flags.iter().any(|x| x == f) {
+                self.flags.push(f.to_string());
+            }
+        }
+        // Como los deja el preload (`flags` ordenados).
+        self.flags.sort();
+        nuevas.iter().map(|l| l["viol ".len()..].to_string()).collect()
     }
 
     /// n-sandbox: esta ejecucion toco el sandbox (un permiso denegado, atrapado o no). El
@@ -1316,6 +1353,39 @@ fn ctl_flags(ctl: &str) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::ctl_flags;
+
+    /// 7.4: la corrida sin el sensor hereda las lineas `viol` y los flags de violacion
+    /// atrapada de la corrida con el sensor, sin repetir las que ya tiene; nada mas.
+    #[test]
+    fn heredar_violaciones_del_sensor() {
+        use super::{Exec, Status};
+        use std::time::Duration;
+        let ex = |ctl: &str, flags: &[&str]| Exec {
+            status: Status::Exited(0),
+            stdout: "1\n".into(),
+            stderr: String::new(),
+            flags: flags.iter().map(|f| f.to_string()).collect(),
+            elapsed: Duration::ZERO,
+            ctl: ctl.into(),
+        };
+        let con = ex(
+            "viol tdz 1:6\nviol tdz 1:6\nviol symbol 3:2\nviol tdz 7:0\nsensor_tope\nflags builtins,coercion_symbol,stack,tdz,tdz_atrapada\n",
+            &["builtins", "coercion_symbol", "stack", "tdz", "tdz_atrapada"],
+        );
+        // La no atrapada (`tdz 7:0`, flag `tdz`) la ve tambien la corrida sin el sensor.
+        let mut sin = ex("viol tdz 7:0\nflags tdz", &["tdz"]);
+        assert_eq!(sin.heredar_violaciones(&con), ["tdz 1:6", "symbol 3:2"]);
+        assert_eq!(sin.ctl, "viol tdz 7:0\nflags tdz\nviol tdz 1:6\nviol symbol 3:2\n");
+        // Solo los de violacion: `builtins` y `stack` son de la corrida con el sensor.
+        assert_eq!(sin.flags, ["coercion_symbol", "tdz", "tdz_atrapada"]);
+        assert_eq!(crate::recheck::violaciones(&sin), ["tdz 7:0", "tdz 1:6", "symbol 3:2"]);
+        // Heredar dos veces no cambia nada; sin violaciones, nada que heredar.
+        assert!(sin.heredar_violaciones(&con).is_empty());
+        assert_eq!(sin.flags, ["coercion_symbol", "tdz", "tdz_atrapada"]);
+        let mut otra = ex("", &[]);
+        assert!(otra.heredar_violaciones(&ex("sensor_tope\nflags \n", &[])).is_empty());
+        assert_eq!((otra.ctl.as_str(), otra.flags.len()), ("", 0));
+    }
 
     #[test]
     fn envoltorio_de_modulos() {

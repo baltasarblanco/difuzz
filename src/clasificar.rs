@@ -957,6 +957,60 @@ mod tests {
         std::fs::remove_dir_all(&d).unwrap();
     }
 
+    /// 7.4 (Fase R I3): con mas de MAX_PAUSAS (256) excepciones atrapadas el sensor se
+    /// apaga y A y B se comparan sin el (`sensor_tope`). Antes los positivos iban a div/
+    /// (sin el sensor no hay `tdz_atrapada`); ahora A hereda lo que el sensor vio antes del
+    /// tope y el re-chequeo de violaciones (sin el sensor, B == A') decide. Los negativos
+    /// (bug real al lado, o en el catch de la TDZ) siguen en div/, y una TDZ despues del
+    /// tope tambien (el sensor no la vio: limite documentado).
+    #[test]
+    fn tdz_atrapada_pasado_el_tope() {
+        use super::Medido;
+        use crate::{backend::Minifier, cache, compare_and_report, known, minify, oracle, runner, triage, Ctx, Stats};
+        use std::path::Path;
+        if !crate::test_util::requiere_node() {
+            return;
+        }
+        let d = std::env::temp_dir().join(format!("difuzz-test-tope-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        let reporter = oracle::Reporter::new(&d, "test".into(), runner::PRELOAD);
+        let known = known::Known::load(&d, &d, 0, Minifier::Oxc);
+        let cache = cache::CacheA::new(None, &[]);
+        let triage = triage::Triage::load(&d);
+        let (preset, kind) = (minify::Preset::CoreDefaults, minify::SourceKind::Script);
+        let medido = Some(Medido { minifier: Minifier::Oxc, preset, kind });
+        let ctx = Ctx { reporter: &reporter, known: &known, cache: &cache, triage: &triage, medido };
+        let preload = runner::Preload::write_tagged("viol-tope").unwrap();
+        let r = runner::Runner::new(&preload, crate::test_util::id_runner(), std::time::Duration::from_secs(20));
+        let cfg = preset.build(Minifier::Oxc, kind);
+        let ruido = "for (let i = 0; i < 300; i++) { try { null.x; } catch (e) {} }\n";
+        let tdz = "try { x; } catch (e) { n++; }\n";
+        let getter = "const o = { ...{ get prop() { n = \"PASS\"; } } };\nconsole.log(n);\nconsole.log(o);\n";
+        for (rel, src, known_div, paso) in [
+            ("pos-antes", format!("let n = 0;\n{tdz}{ruido}console.log(n);\nlet x = 1;\n"), (1, 0), "  violaciones: Explica"),
+            ("pos-loop", "let n = 0;\nfor (let i = 0; i < 300; i++) { try { x; } catch (e) { n++; } }\nconsole.log(n);\nlet x = 1;\n".into(), (1, 0), "  violaciones: Explica"),
+            ("neg-getter", format!("let n = 0;\n{tdz}{ruido}let x = 1;\n{getter}"), (0, 1), "  violaciones: NoExplica"),
+            ("neg-catch", "let r = 0;\nfor (let i = 0; i < 300; i++) { try { r = String(x); } catch (e) { r = Math.cbrt(-8); } }\nconsole.log(r);\nlet x = 1;\n".into(), (0, 1), "  violaciones: Inconcluso"),
+            ("lim-despues", format!("let n = 0;\n{ruido}{tdz}console.log(n);\nlet x = 1;\n"), (0, 1), "  asunciones: ninguna"),
+        ] {
+            let minify::Outcome::Ok { original, minified, .. } = minify::prepare(&src, &cfg) else { panic!("no minifica") };
+            let a = r.run(&original);
+            assert_eq!(a.sensor_degradado(), Some(runner::SENSOR_TOPE), "{rel}: sin esto el test no prueba nada");
+            let mut st = Stats::default();
+            let p = format!("{rel}/input.js");
+            assert!(compare_and_report(&ctx, &r, &mut st, Path::new(&p), &original, &minified, a, false, None, false, &[], None));
+            assert_eq!((st.known, st.divergences, st.sensor_repetidos), (known_div.0, known_div.1, 1), "{rel}");
+            let dir = if known_div.0 == 1 { "known" } else { "div" };
+            let meta = std::fs::read_to_string(d.join(format!("{dir}/{rel}/meta.txt"))).unwrap();
+            assert!(meta.contains(paso), "{rel}: {meta}");
+            let heredo = meta.contains("-> A y B comparados sin el sensor (I3); violaciones que vio el sensor (7.4): A tdz ");
+            assert_eq!(heredo, rel != "lim-despues", "{rel}: {meta}");
+        }
+        drop(r);
+        std::fs::remove_dir_all(&d).unwrap();
+    }
+
     /// t-principio: "un bug real nunca termina en known/; solo un re-chequeo
     /// concluyente manda ahi". `coercion`, `builtins`, `fn_tostring`/`stack` (paso
     /// contenido) y `profundidad` (bug en la misma linea) iban a known/ con el Issue A

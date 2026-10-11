@@ -413,3 +413,29 @@
 22-r09-stack-orden-marcos	oxc-a-carril_a	div:Stdout
 22-r09-stack-orden-marcos	oxc-b-core_defaults	div:ThrowNew
 22-r09-stack-orden-marcos	oxc-b-carril_a	div:ThrowNew
+# 7.4 (Fase R I3): 1000 excepciones atrapadas pasan el tope del sensor (MAX_PAUSAS, 256 pausas) y A y B se comparan
+# sin el sensor. Con fe0cd86 los cinco iban a div/ (MEDIDO, trabajo-10oct/b7-4/out-casos-base): sin el sensor no hay
+# `tdz_atrapada`. Ahora A hereda la violacion que el sensor vio antes del tope y el re-chequeo (sin el sensor, B == A')
+# decide: t01 (la TDZ en el loop) y t02 (la TDZ antes del ruido) son positivos, known/. t03 (bug del getter al lado)
+# y t04 (21-n10 en un loop: el bug en el catch de la TDZ) siguen en div/. t05: la TDZ despues del tope no la ve el
+# sensor, div/ (limite documentado en el README).
+23-t01-tope-tdz-loop-positivo	oxc-a-core_defaults	known
+23-t01-tope-tdz-loop-positivo	oxc-a-carril_a	known
+23-t01-tope-tdz-loop-positivo	oxc-b-core_defaults	known
+23-t01-tope-tdz-loop-positivo	oxc-b-carril_a	known
+23-t02-tope-tdz-antes-positivo	oxc-a-core_defaults	known
+23-t02-tope-tdz-antes-positivo	oxc-a-carril_a	known
+23-t02-tope-tdz-antes-positivo	oxc-b-core_defaults	known
+23-t02-tope-tdz-antes-positivo	oxc-b-carril_a	known
+23-t03-tope-tdz-getter	oxc-a-core_defaults	div:Stdout
+23-t03-tope-tdz-getter	oxc-a-carril_a	div:Stdout
+23-t03-tope-tdz-getter	oxc-b-core_defaults	div:Stdout
+23-t03-tope-tdz-getter	oxc-b-carril_a	div:Stdout
+23-t04-tope-tdz-catch	oxc-a-core_defaults	div:Stdout
+23-t04-tope-tdz-catch	oxc-a-carril_a	div:Stdout
+23-t04-tope-tdz-catch	oxc-b-core_defaults	div:Stdout
+23-t04-tope-tdz-catch	oxc-b-carril_a	div:Stdout
+23-t05-tope-tdz-despues	oxc-a-core_defaults	div:Stdout
+23-t05-tope-tdz-despues	oxc-a-carril_a	div:Stdout
+23-t05-tope-tdz-despues	oxc-b-core_defaults	div:Stdout
+23-t05-tope-tdz-despues	oxc-b-carril_a	div:Stdout

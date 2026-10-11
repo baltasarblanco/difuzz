@@ -385,6 +385,17 @@ Principios:
   `dead_code_constant_boolean_should_warn_more`: funciones en bloque de Anexo B), y un `.stack`
   impreso en que el minificado cambia el nombre de un marco (el mangling de `core_defaults`) o
   la cantidad de marcos (inlining).
+- **El sensor de violaciones atrapadas se apaga a las 256 pausas** (`MAX_PAUSAS` en el preload):
+  cada excepción atrapada lo pausa y cuesta de 0,5 ms (sin marcos) a 1,4 ms (50 marcos de
+  profundidad); sin tope, 10 000 excepciones atrapadas tardan de 5 a 15 s y llegan al timeout por
+  defecto (5 s). Al pausar, V8 formatea el stack del
+  error (puede llamar al `toString` o a `Error.prepareStackTrace` del programa): si A o B pasan el
+  tope, los dos se repiten y se comparan sin el sensor, simétricos (`sensor:` en la
+  `clasificacion:`; `comparados_sin_sensor=` en las stats). Las violaciones que el sensor ubicó
+  antes del tope pasan a esas corridas y el re-chequeo de violaciones, también sin el sensor,
+  decide como siempre (B == A'): un positivo con más de 256 excepciones atrapadas ya no va a
+  `div/` si su violación cae entre las primeras 256 pausas. Una violación atrapada después del
+  tope no se ve: el caso va a `div/`.
 - **Un minificado que node no acepta nunca se explica con una asunción**: ninguna permite
   producir código inválido.
 - **Una conocida que cambia de síntoma vuelve a `div/`** (se compara contra
@@ -416,8 +427,8 @@ Sin `node` en el `PATH`, los tests que lo necesitan fallan con un mensaje claro.
 
 - **Golden de detección** (`tests/golden/`): 16 casos con bugs conocidos de oxc y swc, en 8
   celdas, más `--invocar` y `--stubs`; la clase esperada de cada caso está en `esperado.tsv`.
-- **Aceptación de los re-chequeos** (`tests/aceptacion/rechequeos/`): 90 casos que combinan un
-  bug real de oxc con un flag de asunción, en las 4 celdas de oxc (360 comparaciones).
+- **Aceptación de los re-chequeos** (`tests/aceptacion/rechequeos/`): 95 casos que combinan un
+  bug real de oxc con un flag de asunción, en las 4 celdas de oxc (380 comparaciones).
 
 ```sh
 tests/golden/verificar.sh --jobs 4                    # sale con 0 y "comparaciones=N fallas=0"
