@@ -288,6 +288,12 @@ impl Remoto {
     /// 8.3: el preset con mangle apagado (`Minifier::build_sin_mangle`), en un hijo como
     /// cualquier config (M34). `None` si el backend no la tiene. Sin oraculo: un panic de los
     /// asserts deja el re-chequeo inconcluso (div/), no hace falta saber si es real.
+    /// 9.3 (M3): con los limites de `Remoto::new` (`presupuesto: None` es el del worker, no
+    /// "sin limite"; mismo timeout). Se lanza uno por re-chequeo y muere al terminar
+    /// (`Drop for Hijo`): asi no queda un hijo ocioso cuyo RSS cuente contra el presupuesto de
+    /// los otros. MEDIDO: lanzar el hijo y minificar un programa chico cuesta ~3 ms (20
+    /// lanzamientos, carga ~43), contra la corrida de node de B0 que el re-chequeo paga igual
+    /// (~180 ms una corrida de node en la meta de c03 de rev-b8-A).
     pub fn sin_mangle(minifier: Minifier, preset: Preset, kind: SourceKind) -> Option<Remoto> {
         minifier.build_sin_mangle(preset, kind)?;
         let exe = crate::binario::propio();
@@ -1019,6 +1025,22 @@ pub(crate) mod tests {
         let mut keep = args_config(Minifier::Oxc, Preset::CarrilA, SourceKind::Script, true);
         keep.push(SIN_MANGLE.into());
         assert_eq!(serve_con_pila(&keep, 8 << 20, &b""[..], Vec::new()), 2);
+    }
+
+    /// 9.3 (M3, rev-b8-A): el hijo sin mangle tiene los mismos limites que el minificador del
+    /// worker: `presupuesto: None` es el presupuesto del worker (`configurar_memoria`, sondeado
+    /// en `esperar` junto con los otros hijos del hilo, y RLIMIT_AS en `lanzar`), no "sin
+    /// presupuesto"; y el mismo timeout.
+    #[test]
+    fn sin_mangle_con_los_limites_del_worker() {
+        let (m, p, k) = (Minifier::Oxc, Preset::CarrilA, SourceKind::Script);
+        let (sm, normal) = (Remoto::sin_mangle(m, p, k).expect("oxc tiene variante sin mangle"), Remoto::new(m, p, k, false));
+        assert_eq!(sm.presupuesto, None);
+        assert_eq!(sm.presupuesto, normal.presupuesto);
+        assert_eq!(sm.presupuesto(), normal.presupuesto());
+        assert_eq!(sm.timeout, normal.timeout);
+        assert!(sm.lanzador.args.iter().any(|a| a == SIN_MANGLE));
+        assert!(Remoto::sin_mangle(Minifier::Swc, p, k).is_none());
     }
 
     /// El hijo de los tests: el binario de tests filtrado a este test, con la

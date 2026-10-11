@@ -455,7 +455,9 @@ Principios:
     constructor`, `is not iterable` y sus variantes async) con el texto de la expresión, y el
     mangle lo cambia (`cb is not a function` en A, `e is not a function` en B). El paso corre
     solo si A y B tienen las mismas líneas y cada una que difiere es ese mensaje con otra
-    expresión de nombres (`cb`, `o.cb`, `this[#h]`, `a[0]`); si no, ni corre ni deja traza. Se
+    expresión de nombres (`cb`, `o.cb`, `this[#h]`, `a[0]`, y como escribe V8 las llamadas y los
+    accesos opcionales: `f(...)`, `f(...)(...)`, `o.f(...).g`, `o?.g`, siempre `(...)` sin los
+    argumentos, medido en node 24); si no, ni corre ni deja traza. Se
     minifica de nuevo con el mismo preset y **mangle apagado** (B0), y `Explica` pide: (1) que B
     sea **alfa-equivalente** a B0, comprobado con el resolver de SWC (independiente del de oxc):
     los mismos nodos salvo los nombres, cada identificador de B resuelve al binding que
@@ -466,21 +468,32 @@ Principios:
     binding del que sale el `.name` de una función o clase: su nombre propio (declaración o
     expresión con nombre, método privado) o el destino de NamedEvaluation de una definición
     anónima (`var x = () => {}`, un default de parámetro o de destructuring, `x = ...`,
-    `x ||= ...`, `x &&= ...`, `x ??= ...`, un campo privado; `recheck::Nombran`). Si lo toca, el
+    `x ||= ...`, `x &&= ...`, `x ??= ...`, un campo privado; `recheck::Nombran`; con el destino
+    entre paréntesis, `(x) = ...` o `[(x) = ...] = []`, no hay NamedEvaluation y no se marca:
+    node da `.name` vacío, y el codegen de oxc 0.153.0 quita esos paréntesis igual). Si lo toca, el
     `.name` cambió, y eso ya es un bug de keep_names que el programa puede estar imprimiendo con
     la forma del mensaje (oxc 0.153.0 manglea un parámetro con default anónimo:
     `(handler = () => {}) => handler.name` da `e`): `Inconcluso`, `div/` con nota (H1 de la
     revisión del bloque 8). Se mira el binding renombrado, no el texto: no importa cómo lea el
     programa el `.name` (`f["na" + "me"]`, `Reflect.get`). Sin keep_names (core_defaults) el
     cambio del `.name` es la asunción "No Reliance on Function.prototype.name" y no se mira.
+    Lo que keep_names promete es `.name`, no el nombre con que V8 rotula un marco de stack: con
+    `const h = c ? function () {} : 0`, `.name` es `""` pero el marco dice `at h` (V8 lo infiere
+    del binding fuera de NamedEvaluation; medido en node 24 por la revisión del bloque 8). Ese
+    nombre no se marca: se ve solo leyendo `.stack`, que ya prende el flag `stack` (asunción
+    aceptada).
     Un mangle que hace que la llamada capture otro binding no llamable
     (mismo mensaje con otro nombre) no pasa (1): `Inconcluso`, `div/` con nota. También es
-    inconcluso si hay `with` o `eval` directo (la resolución es dinámica) o una forma que la
-    comparación no reconoce. No entran: un marco de stack con otro nombre de función (`at run` →
-    `at e` en core_defaults: sigue en `div/`), `X is not defined` (un global no se manglea) y las
-    expresiones que V8 escribe con algo más que nombres, puntos y corchetes (`(intermediate
-    value)`, `(0 , x.f)`, un literal). Cuesta 1
-    minificación, 2 parseos de SWC y 1 node, solo cuando la divergencia pasa ese filtro.
+    inconcluso si hay `with` o `eval` directo (la resolución es dinámica; cuenta cualquier llamada
+    a un nombre `eval`, con paréntesis o no, también un binding local llamado así, que puede
+    valer el `eval` de verdad: `(eval)(x)` es directo, `(0, eval)(x)` y `eval?.(x)` no) o una
+    forma que la comparación no reconoce. No entran: un marco de stack con otro nombre de función
+    (`at run` → `at e` en core_defaults: sigue en `div/`), `X is not defined` (un global no se
+    manglea) y las expresiones que V8 escribe con algo más que nombres, puntos, corchetes,
+    llamadas y opcionales (`(intermediate value)`, `(0 , x.f)`, un literal). Cuesta 1
+    minificación (en un hijo nuevo, con el timeout y el presupuesto de memoria de los otros
+    minificadores del worker; si no termina, `Inconcluso` con la causa), 2 parseos de SWC y 1
+    node, solo cuando la divergencia pasa ese filtro.
   - en todos los anteriores salvo los nombres, además, **B no tiene que pasar por la
     violación**. B == A' también puede ser una coincidencia: si el bug deja justo el valor que
     una variable tiene cuando la rama de la violación no corre (`""`, `false`, `0`, un `+=` que
@@ -733,9 +746,9 @@ Sin `node` en el `PATH`, los tests que lo necesitan fallan con un mensaje claro.
 
 - **Golden de detección** (`tests/golden/`): 16 casos con bugs conocidos de oxc y swc, en 8
   celdas, más `--invocar` y `--stubs`; la clase esperada de cada caso está en `esperado.tsv`.
-- **Aceptación de los re-chequeos** (`tests/aceptacion/rechequeos/`): 159 casos que combinan un
+- **Aceptación de los re-chequeos** (`tests/aceptacion/rechequeos/`): 165 casos que combinan un
   bug real de oxc con un flag de asunción (o con la forma en que se imprime), en las 4 celdas de oxc
-  (636 comparaciones).
+  (660 comparaciones).
 
 ```sh
 tests/golden/verificar.sh --jobs 4                    # sale con 0 y "comparaciones=N fallas=0"

@@ -590,20 +590,47 @@ fn de_expr(c: char) -> bool {
     c.is_alphanumeric() || matches!(c, '_' | '$' | '.' | '#' | '[' | ']')
 }
 
-/// 8.3: la expresion con que termina `p` (`cb`, `o.cb`, `import_x.f`, `this[#h]`) y lo que
-/// queda antes.
+/// 9.3 (M2): como escribe V8 una llamada dentro de la expresion (CallPrinter): `(...)`, siempre
+/// con tres puntos, sin los argumentos (MEDIDO en node 24.14.1: `f(1, 2)(3)` -> `f(...) is not a
+/// function`, `f()()()` -> `f(...)(...)`, `o.f()()` -> `o.f(...)`, `f().g()` -> `f(...).g`,
+/// `new (f())()` -> `f(...) is not a constructor`, `f()`x`` -> `f(...)`).
+const LLAMADA_V8: &str = "(...)";
+
+/// 9.3 (M2): el acceso opcional como lo escribe V8 (`o?.g()` -> `o?.g is not a function`).
+const OPCIONAL_V8: &str = "?.";
+
+/// 8.3: la expresion con que termina `p` (`cb`, `o.cb`, `import_x.f`, `this[#h]`, M2:
+/// `f(...)`, `o?.g`) y lo que queda antes.
 fn cola_expr(p: &str) -> (&str, &str) {
-    let corte = p.char_indices().rev().take_while(|(_, c)| de_expr(*c)).last().map_or(p.len(), |(i, _)| i);
+    let mut corte = p.len();
+    loop {
+        let r = &p[..corte];
+        if r.ends_with(LLAMADA_V8) {
+            corte -= LLAMADA_V8.len();
+        } else if r.ends_with(OPCIONAL_V8) {
+            corte -= OPCIONAL_V8.len();
+        } else if let Some(c) = r.chars().next_back().filter(|c| de_expr(*c)) {
+            corte -= c.len_utf8();
+        } else {
+            break;
+        }
+    }
     (&p[..corte], &p[corte..])
 }
 
 /// 8.3: `e` es una expresion renderizada con nombres (no un numero, no vacia, sin punto al
-/// principio ni al final, solo caracteres de `de_expr`).
+/// principio ni al final, solo caracteres de `de_expr`). M2: con las llamadas (`(...)`) y los
+/// accesos opcionales (`?.`) de V8, que no pueden abrir la expresion ni seguir a un punto.
 fn es_expr(e: &str) -> bool {
-    e.chars().next().is_some_and(|c| !c.is_ascii_digit() && c != '.' && c != '[')
-        && e.chars().all(de_expr)
-        && !e.ends_with('.')
-        && !e.contains("..")
+    // `(...)` pasa a `!` y `?.` a `.`: lo demas se mira como antes.
+    let n = e.replace(LLAMADA_V8, "!").replace(OPCIONAL_V8, ".");
+    !e.contains('!')
+        && n.chars().next().is_some_and(|c| !c.is_ascii_digit() && !matches!(c, '.' | '[' | '!'))
+        && n.chars().all(|c| de_expr(c) || c == '!')
+        && !n.ends_with('.')
+        && !n.contains("..")
+        && !n.contains(".!")
+        && !n.contains("[!")
 }
 
 /// 8.3: las dos lineas son el mismo mensaje de V8 salvo la expresion renderizada. Un marco de
@@ -672,10 +699,31 @@ pub fn mensaje_nombre_matters(
     let Some(cfg) = minify::Config::sin_mangle(minifier, preset, kind) else {
         return Recheck::Inconcluso(format!("{} no tiene variante sin mangle", minifier.name()));
     };
-    let minify::Outcome::Ok { minified: m0, .. } = minify::prepare(original, &cfg) else {
-        return Recheck::Inconcluso("no pude minificar sin mangle".into());
+    mensaje_nombre_desde(r, &cfg, (kind, minifier.preserva_nombres(preset, kind)), original, minified, a, b)
+}
+
+/// 8.3: `mensaje_nombre_matters` con la config sin mangle ya armada (tests: un hijo que pasa
+/// el presupuesto). 9.3 (M3): el hijo de `Config::sin_mangle` tiene el mismo timeout y el mismo
+/// presupuesto de memoria que el minificador del worker (`subproceso::Remoto::sin_mangle`); si
+/// no termina (timeout, memoria, panic) el re-chequeo queda `Inconcluso` con la causa en la nota
+/// (div/), nunca known/.
+fn mensaje_nombre_desde(
+    r: &runner::Runner,
+    cfg: &minify::Config,
+    nombres: (SourceKind, bool),
+    original: &str,
+    minified: &str,
+    a: &runner::Exec,
+    b: &runner::Exec,
+) -> Recheck {
+    let m0 = match minify::prepare(original, cfg) {
+        minify::Outcome::Ok { minified: m0, .. } => m0,
+        minify::Outcome::Panic(m) => {
+            return Recheck::Inconcluso(format!("no pude minificar sin mangle: {}", m.lines().next().unwrap_or_default()));
+        }
+        _ => return Recheck::Inconcluso("no pude minificar sin mangle".into()),
     };
-    mensaje_nombre_con(r, (kind, minifier.preserva_nombres(preset, kind)), minified, &m0, a, b)
+    mensaje_nombre_con(r, nombres, minified, &m0, a, b)
 }
 
 /// 8.3: `mensaje_nombre_matters` con el minificado sin mangle (`m0`) ya hecho (tests: un B
@@ -766,9 +814,20 @@ impl VisitMut for Canon {
         w.visit_mut_children_with(self);
     }
 
+    /// 9.3 (M4): `eval` directo segun la spec (EvaluateCall): el callee es una referencia a
+    /// un nombre `eval` (no una propiedad) que vale %eval%. Los parentesis no cambian la
+    /// referencia (`(eval)(x)`, `((eval))(x)` son directos; `(0, eval)(x)` y `eval?.(x)` no:
+    /// MEDIDO en node 24.14.1, sondas de 9.3), y el nombre puede ser un binding local que vale
+    /// %eval% (`function f(eval) { eval(x) }` en sloppy: tambien directo, MEDIDO). Como no se
+    /// sabe que vale, cualquier llamada a un nombre `eval` cuenta (de mas: solo agrega
+    /// Inconclusos).
     fn visit_mut_call_expr(&mut self, c: &mut swc_ecma_ast::CallExpr) {
         if let swc_ecma_ast::Callee::Expr(e) = &c.callee {
-            if matches!(&**e, Expr::Ident(i) if &*i.sym == "eval" && i.ctxt.outer() == self.sin_resolver) {
+            let mut callee = &**e;
+            while let Expr::Paren(p) = callee {
+                callee = &p.expr;
+            }
+            if matches!(callee, Expr::Ident(i) if &*i.sym == "eval") {
                 self.dinamico.get_or_insert("`eval` directo");
             }
         }
@@ -899,8 +958,9 @@ impl VisitMut for Expandir {
 ///   que es el mismo declarador); un SingleNameBinding con inicializador (default de
 ///   parametro, `[x = ...]`, `{k: x = ...}`; la forma `{x = ...}` ya viene expandida); un
 ///   AssignmentElement o AssignmentProperty de una asignacion por destructuring (los mismos
-///   `AssignPat`); y `x = ...`, `x &&= ...`, `x ||= ...`, `x ??= ...`. `(x) = ...` entra
-///   tambien (de mas: no achica lo que se marca).
+///   `AssignPat`); y `x = ...`, `x &&= ...`, `x ||= ...`, `x ??= ...`. 9.3 (M5): con el
+///   destino entre parentesis (`(x) = ...`, `[(x) = ...] = []`, `({k: (x) = ...} = {})`) no
+///   hay NamedEvaluation (IsIdentifierRef es falso; MEDIDO en node: `.name` "") y no se marca.
 ///
 /// Las claves de propiedades y de campos publicos tambien dan nombre, pero el mangle no las
 /// toca; los privados los marca `Canon::visit_mut_class`. Un global no se renombra
@@ -912,21 +972,20 @@ impl Nombran {
         self.0.insert((i.sym.to_string(), i.ctxt));
     }
 
-    fn destino(&mut self, e: &Expr) {
-        match e {
-            Expr::Ident(i) => self.ident(i),
-            Expr::Paren(p) => self.destino(&p.expr),
-            _ => {}
-        }
-    }
-
     fn patron(&mut self, p: &swc_ecma_ast::Pat, valor: &Expr) {
         if !definicion_anonima(valor) {
             return;
         }
         match p {
             swc_ecma_ast::Pat::Ident(b) => self.ident(&b.id),
-            swc_ecma_ast::Pat::Expr(e) => self.destino(e),
+            // 9.3 (M5): IsIdentifierRef de una expresion parentizada es falso (`[(h) = f] = []`
+            // y `({k: (h) = f} = {})` dan `.name` "": MEDIDO en node 24.14.1): solo el nombre
+            // pelado.
+            swc_ecma_ast::Pat::Expr(e) => {
+                if let Expr::Ident(i) = &**e {
+                    self.ident(i);
+                }
+            }
             _ => {}
         }
     }
@@ -956,10 +1015,10 @@ impl swc_ecma_visit::Visit for Nombran {
         use swc_ecma_ast::{AssignOp, AssignTarget, SimpleAssignTarget};
         let op = matches!(n.op, AssignOp::Assign | AssignOp::AndAssign | AssignOp::OrAssign | AssignOp::NullishAssign);
         if op && definicion_anonima(&n.right) {
-            match &n.left {
-                AssignTarget::Simple(SimpleAssignTarget::Ident(b)) => self.ident(&b.id),
-                AssignTarget::Simple(SimpleAssignTarget::Paren(p)) => self.destino(&p.expr),
-                _ => {}
+            // 9.3 (M5): `(h) = f` (y `(h) ||= f`...) no nombra: IsIdentifierRef de una
+            // expresion parentizada es falso (MEDIDO en node 24.14.1: `.name` "").
+            if let AssignTarget::Simple(SimpleAssignTarget::Ident(b)) = &n.left {
+                self.ident(&b.id);
             }
         }
         swc_ecma_visit::VisitWith::visit_children_with(n, self);
@@ -3102,6 +3161,72 @@ mod mensaje_nombre_tests {
         assert!(!linea_con_nombre("    at run (<pos>)", "    at e (<pos>)"));
     }
 
+    /// 9.3 (M3): si el hijo sin mangle pasa el presupuesto de memoria del worker o no termina a
+    /// tiempo, el re-chequeo queda `Inconcluso` con la causa (div/ con nota), no Explica. El
+    /// hijo es el de los tests de subproceso.rs (`remoto_de_test_con`): come 300 MiB contra un
+    /// presupuesto de 128 MiB, o duerme mas que su timeout.
+    #[test]
+    fn hijo_sin_mangle_sin_recursos_es_inconcluso() {
+        if !std::path::Path::new("/proc/self/statm").exists() {
+            return;
+        }
+        use crate::subproceso::tests::remoto_de_test_con;
+        use std::time::Duration;
+        let preload = Preload::write_tagged("mnombre-m3").unwrap();
+        let r = Runner::new(&preload, crate::test_util::id_runner(), Duration::from_secs(20));
+        let (a, b) = (ex("cb is not a function\n"), ex("e is not a function\n"));
+        let src = "function run(cb){try{cb()}catch(e){console.log(e.message)}}run();\n";
+        let min = "function run(e){try{e()}catch(t){console.log(t.message)}}run();\n";
+        let s = SourceKind::Script;
+        let come = [("DIFUZZ_TEST_COMER_MIB", "300"), ("DIFUZZ_TEST_DORMIR_MS", "20000")];
+        let cfg = crate::minify::Config::from_backend(Box::new(remoto_de_test_con(Minifier::Oxc, s, &come, Duration::from_secs(30), Some(128 << 20))));
+        let rc = super::mensaje_nombre_desde(&r, &cfg, (s, false), src, min, &a, &b);
+        assert!(matches!(rc, Recheck::Inconcluso(ref n) if n.contains(crate::subproceso::PREFIJO_MEMORIA)), "{rc:?}");
+        let duerme = [("DIFUZZ_TEST_DORMIR_MS", "20000")];
+        let cfg = crate::minify::Config::from_backend(Box::new(remoto_de_test_con(Minifier::Oxc, s, &duerme, Duration::from_millis(300), Some(0))));
+        let rc = super::mensaje_nombre_desde(&r, &cfg, (s, false), src, min, &a, &b);
+        assert!(matches!(rc, Recheck::Inconcluso(ref n) if n.contains(crate::subproceso::PREFIJO_TIMEOUT)), "{rc:?}");
+    }
+
+    /// 9.3 (M2): las llamadas (`(...)`) y los accesos opcionales (`?.`) como los escribe V8
+    /// (MEDIDO en node 24.14.1: sondas/m2-v8.cjs y m2-v8-b.cjs de 9.3).
+    #[test]
+    fn linea_con_nombre_llamadas_v8() {
+        let si = |x: &str, y: &str| assert!(linea_con_nombre(x, y), "{x} | {y}");
+        let no = |x: &str, y: &str| assert!(!linea_con_nombre(x, y), "{x} | {y}");
+        // c03 de rev-b8-A: `f()()`, con o sin argumentos.
+        si("TypeError: f(...) is not a function", "TypeError: t(...) is not a function");
+        si("f(...)(...) is not a function", "e(...)(...) is not a function");
+        si("o.f(...) is not a function", "e.f(...) is not a function");
+        si("TypeError: f(...).g is not a function", "TypeError: e(...).g is not a function");
+        si("f(...).g(...) is not a function", "e(...).g(...) is not a function");
+        si("this.m(...)[#h] is not a function", "this.m(...)[#e] is not a function");
+        si("o[f(...)] is not a function", "o[e(...)] is not a function");
+        si("f(...)[0] is not a function", "e(...)[0] is not a function");
+        si("f(...) is not a constructor", "e(...) is not a constructor");
+        // Opcionales.
+        si("o?.g is not a function", "e?.g is not a function");
+        si("o.a?.b is not a function", "e.a?.b is not a function");
+        si("o?.[k] is not a function", "e?.[t] is not a function");
+        si("f(...)?.g is not a function", "e(...)?.g is not a function");
+        // Lo que V8 no escribe, o que no es una expresion de nombres, sigue afuera.
+        no("(...) is not a function", "e is not a function");
+        no("f(...) is not a function", "f(...) is not a function");
+        no("x.(...) is not a function", "e.(...) is not a function");
+        no("o[(...)] is not a function", "e[(...)] is not a function");
+        no("f(1) is not a function", "e(1) is not a function");
+        no("f() is not a function", "e() is not a function");
+        no("f(..) is not a function", "e(..) is not a function");
+        no("o? is not a function", "e? is not a function");
+        no("o?. is not a function", "e?. is not a function");
+        no("f!g is not a function", "e!g is not a function");
+        no("(intermediate value) is not a constructor", "(intermediate value) is not a constructor");
+        no("(0 , f) is not a function", "(0 , e) is not a function");
+        // El resto de la linea (antes y despues) tiene que ser el mismo.
+        no("[log] f(...) is not a function", "[error] e(...) is not a function");
+        no("TypeError: f(...) is not a function", "TypeError: e(...) is not a constructor");
+    }
+
     fn ex(stdout: &str) -> Exec {
         Exec { status: Status::Exited(0), stdout: stdout.into(), stderr: String::new(), flags: Vec::new(), elapsed: std::time::Duration::ZERO, ctl: String::new() }
     }
@@ -3158,6 +3283,15 @@ mod mensaje_nombre_tests {
         // `eval` directo y `with`: la resolucion es dinamica, no se puede afirmar.
         no("function f(cb){eval('cb()')}", "function f(e){eval('cb()')}", s);
         no("function f(cb){with({})cb()}", "function f(e){with({})e()}", s);
+        // 9.3 (M4): con parentesis el eval sigue siendo directo, y un binding local que se
+        // llama `eval` puede valer %eval% (directo tambien; MEDIDO en node). `(0, eval)` y
+        // `eval?.()` son indirectos: ven solo globales, el renombre de un local no los toca.
+        no("function f(cb){(eval)('cb()')}", "function f(e){(eval)('cb()')}", s);
+        no("function f(cb){((eval))('cb()')}", "function f(e){((eval))('cb()')}", s);
+        no("function f(eval,cb){eval('cb()')}", "function f(t,e){t('cb()')}", s);
+        no("function f(cb){var eval=globalThis.eval;eval('cb()')}", "function f(e){var t=globalThis.eval;t('cb()')}", s);
+        ok("function f(cb){(0,eval)('1');return cb}", "function f(e){(0,eval)('1');return e}", s);
+        ok("function f(cb){eval?.('1');return cb}", "function f(e){eval?.('1');return e}", s);
         // No parsea.
         assert_eq!(alfa_equivalentes("function(", "x", s), None);
     }
@@ -3196,6 +3330,19 @@ mod mensaje_nombre_tests {
         assert_eq!(r("function f(){let h;[h=()=>{}]=[];return h}", "function f(){let e;[e=()=>{}]=[];return e}", s), ["h -> e"]);
         assert_eq!(r("function f(){let h;({h=()=>{}}={});return h}", "function f(){let e;({h:e=()=>{}}={});return e}", s), ["h -> e"]);
         assert!(r("function f(){let h=1;h+=()=>{};return h}", "function f(){let e=1;e+=()=>{};return e}", s).is_empty());
+        // 9.3 (M5): con el destino entre parentesis no hay NamedEvaluation (`.name` "", MEDIDO
+        // en node 24.14.1: sondas/m5-name.cjs de 9.3): no se marca.
+        assert!(r("function f(){let h;(h)=()=>{};return h}", "function f(){let e;(e)=()=>{};return e}", s).is_empty());
+        assert!(r("function f(){let h;((h))=class{};return h}", "function f(){let e;((e))=class{};return e}", s).is_empty());
+        assert!(r("function f(){let h;(h)||=()=>{};return h}", "function f(){let e;(e)||=()=>{};return e}", s).is_empty());
+        assert!(r("function f(){let h;[(h)=()=>{}]=[];return h}", "function f(){let e;[(e)=()=>{}]=[];return e}", s).is_empty());
+        assert!(r("function f(){let h;({k:(h)=()=>{}}={});return h}", "function f(){let e;({k:(e)=()=>{}}={});return e}", s).is_empty());
+        assert!(r("function f(){let h;for([(h)=()=>{}]of[[]]);return h}", "function f(){let e;for([(e)=()=>{}]of[[]]);return e}", s).is_empty());
+        // ...y sin parentesis en el destino sigue marcado, con parentesis en el valor tambien.
+        assert_eq!(r("function f(){let h;h=(()=>{});return h}", "function f(){let e;e=(()=>{});return e}", s), ["h -> e"]);
+        assert_eq!(r("function f(){let h;({k:h=()=>{}}={});return h}", "function f(){let e;({k:e=()=>{}}={});return e}", s), ["h -> e"]);
+        assert_eq!(r("function f(){let h;for([h=()=>{}]of[[]]);return h}", "function f(){let e;for([e=()=>{}]of[[]]);return e}", s), ["h -> e"]);
+        assert_eq!(r("function f(h=(()=>{})){return h}", "function f(e=(()=>{})){return e}", s), ["h -> e"]);
         // Una expresion que no es una definicion anonima: `(0, () => {})` no da nombre.
         assert!(r("function f(){let h=(0,()=>{});return h}", "function f(){let e=(0,()=>{});return e}", s).is_empty());
         // Nombres propios de funciones y clases (declaracion y expresion).

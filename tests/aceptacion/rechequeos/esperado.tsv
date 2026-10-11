@@ -757,3 +757,34 @@
 25-b91-p04-inspect-privado	oxc-b-carril_a	div:Stdout
 25-b91-p05-inspect-catch	oxc-a-carril_a	div:Stdout
 25-b91-p05-inspect-catch	oxc-b-carril_a	div:Stdout
+# 9.3 (menores M2 y M5 de rev-b8-A sobre mensaje_nombre). M2: V8 escribe una llamada dentro de la expresion como
+# `(...)` y el acceso opcional como `?.` (`cb(...) is not a function`, `o?.g`, `o.f(...)?.g`; MEDIDO en node
+# 24.14.1). Con 9e52cef la localizacion no los aceptaba y los positivos p01 y p02 iban a div/ en las 4 celdas; ahora
+# known/. p03 es c03 de rev-b8-A: `f` es un parametro con default anonimo que oxc manglea tambien con keep_names (H1):
+# div/ en carril_a, known/ en core_defaults. n01 (bug de 9460 al lado) y n02 (bug F en el argumento, que V8 no
+# escribe pero el programa imprime) siguen en div/. p04 (M5, `(h) = function () {}`): known/ con la base y con 9.3
+# (el codegen de oxc quita los parentesis del destino: no alcanzable de punta a punta); fija el destino.
+25-b93-n01-llamada-bug-al-lado	oxc-a-core_defaults	div:Stdout
+25-b93-n01-llamada-bug-al-lado	oxc-a-carril_a	div:Stdout
+25-b93-n01-llamada-bug-al-lado	oxc-b-core_defaults	div:Stdout
+25-b93-n01-llamada-bug-al-lado	oxc-b-carril_a	div:Stdout
+25-b93-n02-bug-en-argumento	oxc-a-core_defaults	div:Stdout
+25-b93-n02-bug-en-argumento	oxc-a-carril_a	div:Stdout
+25-b93-n02-bug-en-argumento	oxc-b-core_defaults	div:Stdout
+25-b93-n02-bug-en-argumento	oxc-b-carril_a	div:Stdout
+25-b93-p01-llamada-de-llamada	oxc-a-core_defaults	known
+25-b93-p01-llamada-de-llamada	oxc-a-carril_a	known
+25-b93-p01-llamada-de-llamada	oxc-b-core_defaults	known
+25-b93-p01-llamada-de-llamada	oxc-b-carril_a	known
+25-b93-p02-opcional	oxc-a-core_defaults	known
+25-b93-p02-opcional	oxc-a-carril_a	known
+25-b93-p02-opcional	oxc-b-core_defaults	known
+25-b93-p02-opcional	oxc-b-carril_a	known
+25-b93-p03-c03-param-default	oxc-a-core_defaults	known
+25-b93-p03-c03-param-default	oxc-a-carril_a	div:Stdout
+25-b93-p03-c03-param-default	oxc-b-core_defaults	known
+25-b93-p03-c03-param-default	oxc-b-carril_a	div:Stdout
+25-b93-p04-paren-destino	oxc-a-core_defaults	known
+25-b93-p04-paren-destino	oxc-a-carril_a	known
+25-b93-p04-paren-destino	oxc-b-core_defaults	known
+25-b93-p04-paren-destino	oxc-b-carril_a	known
