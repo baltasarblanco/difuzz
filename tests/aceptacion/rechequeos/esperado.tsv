@@ -676,3 +676,53 @@
 24-f1-p01-profundidad-nativa-positivo	oxc-a-carril_a	known
 24-f1-p01-profundidad-nativa-positivo	oxc-b-core_defaults	known
 24-f1-p01-profundidad-nativa-positivo	oxc-b-carril_a	known
+# 8.3 (= 7.11, d2/difuzz-1, hono sse.js; 11-oct): V8 escribe en el mensaje el nombre local de la expresion
+# (`cb is not a function`) y el mangle lo cambia. Con 90cd16b los 6 iban a div/ en las 4 celdas. El re-chequeo
+# `mensaje_nombre` re-minifica sin mangle y exige que B sea un renombre alfa-equivalente de eso y que eso de lo
+# mismo que A: p01 (mensaje) y p03 (nombres privados `this[#h]` y `{ payload }`) a known/; p02 (el error con su
+# stack) a known/ en carril_a y en div/ en core_defaults (el marco cambia de nombre, `at run` -> `at e`: n-principio
+# lo deja en div/). Negativos con un bug real: n01 (9460 en otra linea), n02 (el mensaje sale del codigo que 9460
+# deja de correr) y n03 (bug F dentro de la expresion que V8 escribe) siguen en div/. MEDIDO con el binario de 8.3.
+24-b83-n01-bug-al-lado	oxc-a-core_defaults	div:Stdout
+24-b83-n01-bug-al-lado	oxc-a-carril_a	div:Stdout
+24-b83-n01-bug-al-lado	oxc-b-core_defaults	div:Stdout
+24-b83-n01-bug-al-lado	oxc-b-carril_a	div:Stdout
+24-b83-n02-rt-oculto	oxc-a-core_defaults	div:Stdout
+24-b83-n02-rt-oculto	oxc-a-carril_a	div:Stdout
+24-b83-n02-rt-oculto	oxc-b-core_defaults	div:Stdout
+24-b83-n02-rt-oculto	oxc-b-carril_a	div:Stdout
+24-b83-n03-callee-con-bug	oxc-a-core_defaults	div:Stdout
+24-b83-n03-callee-con-bug	oxc-a-carril_a	div:Stdout
+24-b83-n03-callee-con-bug	oxc-b-core_defaults	div:Stdout
+24-b83-n03-callee-con-bug	oxc-b-carril_a	div:Stdout
+24-b83-p01-mensaje	oxc-a-core_defaults	known
+24-b83-p01-mensaje	oxc-a-carril_a	known
+24-b83-p01-mensaje	oxc-b-core_defaults	known
+24-b83-p01-mensaje	oxc-b-carril_a	known
+24-b83-p02-error-stack	oxc-a-core_defaults	div:Stdout
+24-b83-p02-error-stack	oxc-a-carril_a	known
+24-b83-p02-error-stack	oxc-b-core_defaults	div:Stdout
+24-b83-p02-error-stack	oxc-b-carril_a	known
+24-b83-p03-privado	oxc-a-core_defaults	known
+24-b83-p03-privado	oxc-a-carril_a	known
+24-b83-p03-privado	oxc-b-core_defaults	known
+24-b83-p03-privado	oxc-b-carril_a	known
+# 8.3, H1 de la revision del bloque 8 (rev-b8-A b01, b02): con keep_names (carril_a) oxc 0.153.0 manglea un
+# parametro cuyo default es una funcion o clase anonima, y el `.name` inferido cambia (bug real de keep_names). Si el
+# programa imprime ese `.name` con la forma `X is not a function/constructor`, B es alfa-equivalente a B0 y B0 da lo
+# mismo que A: con 81cb11f iban a known/ en las 4 celdas. Ahora `mensaje_nombre` da Inconcluso en carril_a cuando el
+# mangle renombra un binding del que sale un `.name` (recheck::Nombran): div/. En core_defaults (sin keep_names, el
+# cambio del `.name` es asuncion aceptada) siguen en known/. n03: el `.name` leido con una clave armada en runtime y
+# el default en un destructuring. MEDIDO con el binario del arreglo (b8-h1) y con uno de 81cb11f.
+24-b83h1-n01-param-mensaje	oxc-a-core_defaults	known
+24-b83h1-n01-param-mensaje	oxc-a-carril_a	div:Stdout
+24-b83h1-n01-param-mensaje	oxc-b-core_defaults	known
+24-b83h1-n01-param-mensaje	oxc-b-carril_a	div:Stdout
+24-b83h1-n02-clase-constructor	oxc-a-core_defaults	known
+24-b83h1-n02-clase-constructor	oxc-a-carril_a	div:Stdout
+24-b83h1-n02-clase-constructor	oxc-b-core_defaults	known
+24-b83h1-n02-clase-constructor	oxc-b-carril_a	div:Stdout
+24-b83h1-n03-name-sin-palabra	oxc-a-core_defaults	known
+24-b83h1-n03-name-sin-palabra	oxc-a-carril_a	div:Stdout
+24-b83h1-n03-name-sin-palabra	oxc-b-core_defaults	known
+24-b83h1-n03-name-sin-palabra	oxc-b-carril_a	div:Stdout

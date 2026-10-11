@@ -11,6 +11,7 @@
 //! 2. profundidad (M16, A con mas pila; t-principio: y B con mas pila; 8.1: un
 //!    Explica se confirma con los literales salados),
 //! 3. nombres (core_defaults: minificar preservando nombres),
+//!    y 8.3: el nombre local en un mensaje de V8 (`mensaje_nombre`, si la politica lo pide),
 //! 4. re-chequeos de la politica (`extends`, `global_conocido`, `with`,
 //!    violaciones; t-principio: `builtins`, `coercion`),
 //! 5. tabla de asunciones conocidas, rutas y backlog (known.rs),
@@ -241,6 +242,18 @@ pub fn clasificar<'a>(
             flags.push("nombres");
         } else {
             traza.paso("nombres", "NoExplica (con los nombres preservados sigue)");
+        }
+    }
+    // 8.3 (= 7.11; desde cd54ad2, d2/difuzz-1, hono sse.js): A y B difieren solo en mensajes de
+    // V8 que escriben el nombre local de la expresion (`cb is not a function` / `e is not a
+    // function`). Solo si la politica lo pide y la divergencia pasa la localizacion (si no, ni
+    // corre ni deja traza). Explica exige que B sea un renombre correcto del minificado sin
+    // mangle y que ese de lo mismo que A; si no se puede probar, div/ con nota.
+    if let Some(m) = ctx.medido.filter(|m| m.rechequea(Rechequeo::MensajeNombre)) {
+        if recheck::mensaje_con_nombre_localizado(a, b) {
+            flags.push("mensaje_nombre");
+            let r = recheck::mensaje_nombre_matters(runner, (m.minifier, m.preset, m.kind), original, minified, a, b);
+            rechequear(&mut flags, &mut notes, &mut traza, "mensaje_nombre", ("mensaje_nombre_irrelevante", "mensaje_nombre_inconcluso"), r);
         }
     }
     // 7a: los re-chequeos de flags estaticos que declara la politica del
@@ -1269,5 +1282,60 @@ mod tests {
             assert!(meta.contains(paso), "{rel}: {meta}");
         }
         std::fs::remove_dir_all(&d).unwrap();
+    }
+
+    /// 8.3 (= 7.11, d2/difuzz-1, hono sse.js), de punta a punta con oxc: el programa imprime
+    /// el TypeError del motor con el nombre del parametro (`cb is not a function`) y oxc lo
+    /// manglea. Desde cd54ad2 iba a div/; ahora known/ por `mensaje_nombre`. Si ademas se
+    /// imprime el stack, en core_defaults cambia el nombre del marco (`at run` -> `at e`) y
+    /// sigue en div/ (n-principio, `stack-mangling`). Con el bug F (`"abc".substring(1, undefined)`
+    /// -> ``) en otra linea, o dentro de la expresion que V8 escribe, sigue en div/ (la
+    /// localizacion no pasa y el paso no corre).
+    #[test]
+    fn mensaje_nombre_de_punta_a_punta() {
+        use super::Medido;
+        use crate::{backend::Minifier, cache, compare_and_report, known, minify, oracle, runner, triage, Ctx, Stats};
+        use std::path::Path;
+        if !crate::test_util::requiere_node() {
+            return;
+        }
+        let run = |cuerpo: &str, atrapa: &str| format!("function run(cb) {{\n  try {{\n    {cuerpo}\n  }} catch (e) {{\n    {atrapa}\n  }}\n}}\nrun();\n");
+        let f = "\"abc\".substring(1, undefined)";
+        for preset in [minify::Preset::CarrilA, minify::Preset::CoreDefaults] {
+            let d = std::env::temp_dir().join(format!("difuzz-test-mnombre-{}-{}", preset.name(), std::process::id()));
+            let _ = std::fs::remove_dir_all(&d);
+            std::fs::create_dir_all(&d).unwrap();
+            let reporter = oracle::Reporter::new(&d, "test".into(), runner::PRELOAD);
+            let known = known::Known::load(&d, &d, 0, Minifier::Oxc);
+            let cache = cache::CacheA::new(None, &[]);
+            let triage = triage::Triage::load(&d);
+            let kind = minify::SourceKind::Script;
+            let medido = Some(Medido { minifier: Minifier::Oxc, preset, kind });
+            let ctx = Ctx { reporter: &reporter, known: &known, cache: &cache, triage: &triage, medido };
+            let preload = runner::Preload::write_tagged(&format!("mnombre-{}", preset.name())).unwrap();
+            let r = runner::Runner::new(&preload, crate::test_util::id_runner(), std::time::Duration::from_secs(20));
+            let cfg = preset.build(Minifier::Oxc, kind);
+            let casos: [(&str, String, bool); 5] = [
+                ("mensaje", run("cb();", "console.log(e.message);"), true),
+                ("error-con-stack", run("cb();", "console.error(e);"), preset == minify::Preset::CarrilA),
+                ("constructor", run("new cb();", "console.log(String(e));"), true),
+                ("bug-al-lado", format!("{}console.log({f});\n", run("cb();", "console.log(e.message);")), false),
+                ("callee-con-bug", run(&format!("({f})(cb);"), "console.log(e.message);"), false),
+            ];
+            for (rel, src, a_known) in &casos {
+                let minify::Outcome::Ok { original, minified, static_flags, .. } = minify::prepare(src, &cfg) else { panic!("no minifica: {rel}") };
+                let mut st = Stats::default();
+                let p = format!("{rel}/input.js");
+                assert!(compare_and_report(&ctx, &r, &mut st, Path::new(&p), &original, &minified, r.run(&original), false, None, false, &static_flags, None), "{rel}: no diverge");
+                assert_eq!((st.known, st.divergences), if *a_known { (1, 0) } else { (0, 1) }, "{} {rel}", preset.name());
+                let meta = std::fs::read_to_string(d.join(format!("{}/{rel}/meta.txt", if *a_known { "known" } else { "div" }))).unwrap();
+                if *a_known {
+                    assert!(meta.contains("  mensaje_nombre: Explica") && meta.contains("difuzz: V8 escribe en el mensaje"), "{rel}: {meta}");
+                } else {
+                    assert!(!meta.contains("mensaje_nombre"), "{rel}: {meta}");
+                }
+            }
+            std::fs::remove_dir_all(&d).unwrap();
+        }
     }
 }

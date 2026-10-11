@@ -65,6 +65,14 @@ pub fn compare(a: &Exec, b: &Exec) -> Verdict {
     }
 }
 
+/// 8.3: los stdout de A y B normalizados igual que en `compare` (para
+/// `recheck::mensaje_con_nombre_localizado`).
+pub fn normalizadas(a: &Exec, b: &Exec) -> (String, String) {
+    let archivos = archivos_de_marco(a, b);
+    let n = |s: &str| normalize_stack_positions(&normalize_names(s), &archivos);
+    (n(&a.stdout), n(&b.stdout))
+}
+
 fn throw_line(s: &str) -> Option<&str> {
     s.lines()
         .rev()

@@ -562,6 +562,504 @@ pub fn contenido_matters(
     veredicto_neutralizado(a, b, &a2, &b2, Some(salada), || camino_entorno(r, minified, b, &b2, (&[], &env), &[]))
 }
 
+/// 8.3: los mensajes de V8 que escriben el texto fuente de la expresion llamada, construida
+/// o iterada (CallPrinter): `cb is not a function`. Con mangle, el nombre local cambia
+/// (`e is not a function`) sin que cambie el comportamiento. Los mas largos primero (contienen
+/// a los cortos). Afuera a proposito: `X is not defined` (un global no se manglea: si cambia,
+/// es un bug) y `Cannot access 'X' before initialization` (la TDZ tiene su re-chequeo).
+const SUFIJOS_V8: &[&str] = &[
+    " is not a function or its return value is not async iterable",
+    " is not a function or its return value is not iterable",
+    " is not a function",
+    " is not a constructor",
+    " is not async iterable",
+    " is not iterable",
+];
+
+/// 8.3: un caracter de la expresion que V8 renderiza: identificadores, puntos y el acceso a
+/// un nombre privado (`this[#handler]`, como lo escribe V8).
+fn de_expr(c: char) -> bool {
+    c.is_alphanumeric() || matches!(c, '_' | '$' | '.' | '#' | '[' | ']')
+}
+
+/// 8.3: la expresion con que termina `p` (`cb`, `o.cb`, `import_x.f`, `this[#h]`) y lo que
+/// queda antes.
+fn cola_expr(p: &str) -> (&str, &str) {
+    let corte = p.char_indices().rev().take_while(|(_, c)| de_expr(*c)).last().map_or(p.len(), |(i, _)| i);
+    (&p[..corte], &p[corte..])
+}
+
+/// 8.3: `e` es una expresion renderizada con nombres (no un numero, no vacia, sin punto al
+/// principio ni al final, solo caracteres de `de_expr`).
+fn es_expr(e: &str) -> bool {
+    e.chars().next().is_some_and(|c| !c.is_ascii_digit() && c != '.' && c != '[')
+        && e.chars().all(de_expr)
+        && !e.ends_with('.')
+        && !e.contains("..")
+}
+
+/// 8.3: las dos lineas son el mismo mensaje de V8 salvo la expresion renderizada. Un marco de
+/// stack con otro nombre de funcion (`at run` / `at e`, core_defaults) NO entra: n-principio
+/// (n-ruido r03) decidio que ese caso va a div/ (`flags_sin_rechequeo_de_punta_a_punta`,
+/// `stack-mangling`); cambiarlo es una decision aparte.
+fn linea_con_nombre(x: &str, y: &str) -> bool {
+    SUFIJOS_V8.iter().any(|s| {
+        let (Some(i), Some(j)) = (x.find(s), y.find(s)) else {
+            return false;
+        };
+        let ((px, ex), (py, ey)) = (cola_expr(&x[..i]), cola_expr(&y[..j]));
+        x[i + s.len()..] == y[j + s.len()..] && px == py && es_expr(ex) && es_expr(ey) && ex != ey
+    })
+}
+
+/// 8.3: A y B (normalizados como en `oracle::compare`) tienen las mismas lineas y cada linea
+/// en que difieren es un mensaje de V8 que solo cambia en la expresion renderizada
+/// (`linea_con_nombre`). Es la precondicion de `mensaje_nombre_matters`: sin ella el
+/// re-chequeo no corre (no se paga nada y meta.txt no cambia).
+pub fn mensaje_con_nombre_localizado(a: &runner::Exec, b: &runner::Exec) -> bool {
+    if a.status != b.status {
+        return false;
+    }
+    let (na, nb) = oracle::normalizadas(a, b);
+    let (la, lb): (Vec<&str>, Vec<&str>) = (na.lines().collect(), nb.lines().collect());
+    la.len() == lb.len() && la != lb && la.iter().zip(&lb).all(|(x, y)| x == y || linea_con_nombre(x, y))
+}
+
+/// 8.3 (`Rechequeo::MensajeNombre`): ¿la divergencia es solo el nombre local que V8 escribe
+/// en el mensaje, cambiado por un renombre CORRECTO? Se re-minifica el original con mangle
+/// apagado (B0: el mismo compress, sin renombre; `Minifier::build_sin_mangle`) y `Explica`
+/// pide las tres cosas:
+/// 1. B es alfa-equivalente a B0 (`alfa_equivalentes`, con el resolver de SWC, independiente
+///    del de oxc): los mismos nodos salvo los nombres de los bindings, y cada identificador
+///    de B resuelve al binding que corresponde al de B0. Un mangle que hace que una
+///    referencia capture OTRO binding (el riesgo de propuesta-1: `e is not a function` con
+///    `e` otro binding no llamable) no pasa. Si no se puede probar (no parsea, `eval`
+///    directo o `with`, una forma que la canonizacion no cubre): `Inconcluso`, div/ con nota.
+/// 2. B0 da lo mismo que A (`oracle::compare`): compress solo no diverge.
+/// 3. B difiere de B0 solo en esos mensajes (`mensaje_con_nombre_localizado(B0, B)`).
+///
+/// H1 (revision del bloque 8): la alfa-equivalencia no ve la semantica que depende del
+/// nombre de un binding: el `.name` de una funcion o clase sale del binding que la nombra
+/// (su nombre propio, o el destino de NamedEvaluation si es anonima: `x = () => {}`,
+/// `(x = () => {}) => ...`, `{x = class {}}`, `x ||= function () {}`; `Nombran`). Con un
+/// preset que promete keep_names (`Minifier::preserva_nombres`), si el mangle renombro uno
+/// de esos bindings el `.name` cambio, y eso ya es un bug de keep_names (oxc 0.153.0 manglea
+/// el parametro con default anonimo: oxc_mangler-0.153.0/src/keep_names.rs:84-111 solo mira
+/// `Function`, `Class` y `VariableDeclarator`). Si el programa imprime ese `.name` con la
+/// forma `X is not a function`, el resto se cumple igual: por eso da `Inconcluso` (div/ con
+/// nota) antes de correr B0. Sin keep_names (core_defaults) el cambio del `.name` es una
+/// asuncion aceptada ("No Reliance on Function.prototype.name") y no se mira.
+///
+/// Costo: 1 minificacion (en un hijo), 1 analisis (2 parseos de SWC) y 1 node, solo ante
+/// divergencias que pasan la localizacion.
+pub fn mensaje_nombre_matters(
+    r: &runner::Runner,
+    recheck: (backend::Minifier, minify::Preset, SourceKind),
+    original: &str,
+    minified: &str,
+    a: &runner::Exec,
+    b: &runner::Exec,
+) -> Recheck {
+    let (minifier, preset, kind) = recheck;
+    let Some(cfg) = minify::Config::sin_mangle(minifier, preset, kind) else {
+        return Recheck::Inconcluso(format!("{} no tiene variante sin mangle", minifier.name()));
+    };
+    let minify::Outcome::Ok { minified: m0, .. } = minify::prepare(original, &cfg) else {
+        return Recheck::Inconcluso("no pude minificar sin mangle".into());
+    };
+    mensaje_nombre_con(r, (kind, minifier.preserva_nombres(preset, kind)), minified, &m0, a, b)
+}
+
+/// 8.3: `mensaje_nombre_matters` con el minificado sin mangle (`m0`) ya hecho (tests: un B
+/// con un mangle roto a mano). `preserva_nombres`: el preset promete keep_names (H1).
+fn mensaje_nombre_con(
+    r: &runner::Runner,
+    (kind, preserva_nombres): (SourceKind, bool),
+    minified: &str,
+    m0: &str,
+    a: &runner::Exec,
+    b: &runner::Exec,
+) -> Recheck {
+    if m0 == minified {
+        // Sin mangle sale el mismo texto: el nombre distinto no viene del renombre.
+        return Recheck::NoExplica;
+    }
+    match crate::analisis::alfa(m0, minified, kind) {
+        Err(e) => {
+            crate::analisis::registrar("re-chequeo de mensaje_nombre", &e);
+            return Recheck::Inconcluso(format!("fallo el analisis de difuzz: {}", e.lines().next().unwrap_or_default()));
+        }
+        Ok(None) => return Recheck::Inconcluso("el analisis de difuzz no parsea el minificado o el minificado sin mangle".into()),
+        Ok(Some(Err(m))) => {
+            return Recheck::Inconcluso(format!(
+                "el minificado no es un renombre del minificado sin mangle ({m}): no se puede descartar un bug del mangler"
+            ))
+        }
+        Ok(Some(Ok(nombres))) if preserva_nombres && !nombres.is_empty() => {
+            return Recheck::Inconcluso(format!(
+                "con keep_names, el mangle renombro un binding del que sale el .name de una funcion o clase ({}): el nombre distinto puede ser un bug de keep_names, no solo el texto del mensaje de V8",
+                nombres.join(", ")
+            ))
+        }
+        Ok(Some(Ok(_))) => {}
+    }
+    let b0 = r.run(m0);
+    if matches!(b0.status, runner::Status::Timeout | runner::Status::Failed(_)) {
+        return Recheck::Inconcluso(format!("el minificado sin mangle no termino ({:?})", b0.status));
+    }
+    if !matches!(oracle::compare(a, &b0), oracle::Verdict::Same) || !mensaje_con_nombre_localizado(&b0, b) {
+        return Recheck::NoExplica;
+    }
+    Recheck::Explica
+}
+
+/// 8.3: forma canonica de un programa modulo los nombres de sus bindings (`alfa_equivalentes`).
+/// Despues del resolver de SWC, cada identificador que resuelve a un binding pasa a `l$<k>`
+/// (k: el orden en que aparece por primera vez ese binding, `(sym, ctxt)`), cada uno sin
+/// resolver (global) a `g$<sym>`, cada nombre privado a `p<k>` (por clase, el mas interno
+/// primero) y cada nombre de import/export a `x$<sym>`. Las formas abreviadas que el mangle
+/// expande (`{cb}` -> `{cb:e}`, `export{x}` -> `export{e as x}`, `import{x}` ->
+/// `import{x as e}`) se expanden antes en los dos lados.
+struct Canon {
+    sin_resolver: swc_common::Mark,
+    locales: std::collections::HashMap<(String, swc_common::SyntaxContext), usize>,
+    privados: Vec<std::collections::HashMap<String, usize>>,
+    n_privados: usize,
+    desde_otro: bool,
+    dinamico: Option<&'static str>,
+    /// H1: nombre canonico (`p<k>`) -> nombre original de cada nombre privado del que sale
+    /// un `.name` (metodo privado, o campo/accessor privado con una definicion anonima).
+    nombran_privados: std::collections::BTreeMap<String, String>,
+}
+
+impl Canon {
+    fn literal(m: &mut swc_ecma_ast::ModuleExportName) {
+        if let swc_ecma_ast::ModuleExportName::Ident(i) = m {
+            i.sym = format!("x${}", i.sym).into();
+            i.ctxt = swc_common::SyntaxContext::empty();
+        }
+    }
+}
+
+impl VisitMut for Canon {
+    fn visit_mut_ident(&mut self, i: &mut swc_ecma_ast::Ident) {
+        i.sym = if i.ctxt.outer() == self.sin_resolver {
+            format!("g${}", i.sym).into()
+        } else {
+            let n = self.locales.len();
+            let k = *self.locales.entry((i.sym.to_string(), i.ctxt)).or_insert(n);
+            format!("l${k}").into()
+        };
+        i.ctxt = swc_common::SyntaxContext::empty();
+    }
+
+    fn visit_mut_with_stmt(&mut self, w: &mut swc_ecma_ast::WithStmt) {
+        self.dinamico.get_or_insert("`with`");
+        w.visit_mut_children_with(self);
+    }
+
+    fn visit_mut_call_expr(&mut self, c: &mut swc_ecma_ast::CallExpr) {
+        if let swc_ecma_ast::Callee::Expr(e) = &c.callee {
+            if matches!(&**e, Expr::Ident(i) if &*i.sym == "eval" && i.ctxt.outer() == self.sin_resolver) {
+                self.dinamico.get_or_insert("`eval` directo");
+            }
+        }
+        c.visit_mut_children_with(self);
+    }
+
+    fn visit_mut_class(&mut self, c: &mut Class) {
+        use swc_ecma_ast::{ClassMember, Key};
+        let mut propios = std::collections::HashMap::new();
+        for m in &c.body {
+            // H1: el `.name` de un metodo privado es `#m` (`get #m`...), y el de una
+            // definicion anonima en un campo privado tambien (NamedEvaluation).
+            let anonima = |v: &Option<Box<Expr>>| v.as_deref().is_some_and(definicion_anonima);
+            let (nombre, nombra) = match m {
+                ClassMember::PrivateMethod(p) => (Some(&p.key.name), true),
+                ClassMember::PrivateProp(p) => (Some(&p.key.name), anonima(&p.value)),
+                ClassMember::AutoAccessor(p) => match &p.key {
+                    Key::Private(k) => (Some(&k.name), anonima(&p.value)),
+                    Key::Public(_) => (None, false),
+                },
+                _ => (None, false),
+            };
+            let Some(nombre) = nombre else { continue };
+            let k = *propios.entry(nombre.to_string()).or_insert_with(|| {
+                self.n_privados += 1;
+                self.n_privados - 1
+            });
+            if nombra {
+                self.nombran_privados.insert(format!("p{k}"), format!("#{nombre}"));
+            }
+        }
+        self.privados.push(propios);
+        c.visit_mut_children_with(self);
+        self.privados.pop();
+    }
+
+    fn visit_mut_private_name(&mut self, p: &mut swc_ecma_ast::PrivateName) {
+        let k = self.privados.iter().rev().find_map(|m| m.get(&*p.name).copied());
+        p.name = match k {
+            Some(k) => format!("p{k}").into(),
+            None => format!("q${}", p.name).into(),
+        };
+    }
+
+    fn visit_mut_named_export(&mut self, n: &mut swc_ecma_ast::NamedExport) {
+        let antes = std::mem::replace(&mut self.desde_otro, n.src.is_some());
+        n.visit_mut_children_with(self);
+        self.desde_otro = antes;
+    }
+
+    fn visit_mut_export_named_specifier(&mut self, s: &mut swc_ecma_ast::ExportNamedSpecifier) {
+        if self.desde_otro {
+            Canon::literal(&mut s.orig);
+        } else {
+            s.orig.visit_mut_with(self);
+        }
+        if let Some(e) = s.exported.as_mut() {
+            Canon::literal(e);
+        }
+    }
+
+    fn visit_mut_export_namespace_specifier(&mut self, s: &mut swc_ecma_ast::ExportNamespaceSpecifier) {
+        Canon::literal(&mut s.name);
+    }
+
+    fn visit_mut_export_default_specifier(&mut self, s: &mut swc_ecma_ast::ExportDefaultSpecifier) {
+        s.exported.sym = format!("x${}", s.exported.sym).into();
+        s.exported.ctxt = swc_common::SyntaxContext::empty();
+    }
+
+    fn visit_mut_import_named_specifier(&mut self, s: &mut swc_ecma_ast::ImportNamedSpecifier) {
+        s.local.visit_mut_with(self);
+        if let Some(i) = s.imported.as_mut() {
+            Canon::literal(i);
+        }
+    }
+}
+
+/// 8.3: expande las formas abreviadas que el mangle cambia por la larga (ver `Canon`).
+struct Expandir;
+
+impl VisitMut for Expandir {
+    fn visit_mut_prop(&mut self, p: &mut swc_ecma_ast::Prop) {
+        use swc_ecma_ast::{IdentName, KeyValueProp, Prop, PropName};
+        p.visit_mut_children_with(self);
+        if let Prop::Shorthand(i) = p {
+            let key = PropName::Ident(IdentName::new(i.sym.clone(), i.span));
+            *p = Prop::KeyValue(KeyValueProp { key, value: Box::new(Expr::Ident(i.clone())) });
+        }
+    }
+
+    fn visit_mut_object_pat_prop(&mut self, p: &mut swc_ecma_ast::ObjectPatProp) {
+        use swc_ecma_ast::{AssignPat, IdentName, KeyValuePatProp, ObjectPatProp, Pat, PropName};
+        p.visit_mut_children_with(self);
+        if let ObjectPatProp::Assign(a) = p {
+            let key = PropName::Ident(IdentName::new(a.key.id.sym.clone(), a.key.id.span));
+            let id = Box::new(Pat::Ident(a.key.clone()));
+            let value = match a.value.take() {
+                Some(right) => Box::new(Pat::Assign(AssignPat { span: a.span, left: id, right })),
+                None => id,
+            };
+            *p = ObjectPatProp::KeyValue(KeyValuePatProp { key, value });
+        }
+    }
+
+    fn visit_mut_import_named_specifier(&mut self, s: &mut swc_ecma_ast::ImportNamedSpecifier) {
+        if s.imported.is_none() {
+            let i = swc_ecma_ast::Ident::new_no_ctxt(s.local.sym.clone(), DUMMY_SP);
+            s.imported = Some(swc_ecma_ast::ModuleExportName::Ident(i));
+        }
+    }
+
+    fn visit_mut_export_named_specifier(&mut self, s: &mut swc_ecma_ast::ExportNamedSpecifier) {
+        if s.exported.is_none() {
+            if let swc_ecma_ast::ModuleExportName::Ident(i) = &s.orig {
+                let e = swc_ecma_ast::Ident::new_no_ctxt(i.sym.clone(), DUMMY_SP);
+                s.exported = Some(swc_ecma_ast::ModuleExportName::Ident(e));
+            }
+        }
+    }
+}
+
+/// H1 (8.3): los bindings `(sym, ctxt)` (despues del resolver y de `Expandir`) de los que sale
+/// el `.name` de una funcion o clase, segun la spec:
+/// - el nombre propio de una declaracion o expresion de funcion o de clase;
+/// - el destino de NamedEvaluation de una definicion anonima (`definicion_anonima`:
+///   IsAnonymousFunctionDefinition, con parentesis): `var/let/const x = ...` (y `using`,
+///   que es el mismo declarador); un SingleNameBinding con inicializador (default de
+///   parametro, `[x = ...]`, `{k: x = ...}`; la forma `{x = ...}` ya viene expandida); un
+///   AssignmentElement o AssignmentProperty de una asignacion por destructuring (los mismos
+///   `AssignPat`); y `x = ...`, `x &&= ...`, `x ||= ...`, `x ??= ...`. `(x) = ...` entra
+///   tambien (de mas: no achica lo que se marca).
+///
+/// Las claves de propiedades y de campos publicos tambien dan nombre, pero el mangle no las
+/// toca; los privados los marca `Canon::visit_mut_class`. Un global no se renombra
+/// (`Canon`: `g$<sym>` exige el mismo nombre).
+struct Nombran(std::collections::HashSet<(String, swc_common::SyntaxContext)>);
+
+impl Nombran {
+    fn ident(&mut self, i: &swc_ecma_ast::Ident) {
+        self.0.insert((i.sym.to_string(), i.ctxt));
+    }
+
+    fn destino(&mut self, e: &Expr) {
+        match e {
+            Expr::Ident(i) => self.ident(i),
+            Expr::Paren(p) => self.destino(&p.expr),
+            _ => {}
+        }
+    }
+
+    fn patron(&mut self, p: &swc_ecma_ast::Pat, valor: &Expr) {
+        if !definicion_anonima(valor) {
+            return;
+        }
+        match p {
+            swc_ecma_ast::Pat::Ident(b) => self.ident(&b.id),
+            swc_ecma_ast::Pat::Expr(e) => self.destino(e),
+            _ => {}
+        }
+    }
+}
+
+impl swc_ecma_visit::Visit for Nombran {
+    fn visit_var_declarator(&mut self, d: &swc_ecma_ast::VarDeclarator) {
+        if let Some(init) = &d.init {
+            self.patron(&d.name, init);
+        }
+        swc_ecma_visit::VisitWith::visit_children_with(d, self);
+    }
+
+    fn visit_assign_pat(&mut self, p: &swc_ecma_ast::AssignPat) {
+        self.patron(&p.left, &p.right);
+        swc_ecma_visit::VisitWith::visit_children_with(p, self);
+    }
+
+    fn visit_assign_pat_prop(&mut self, p: &swc_ecma_ast::AssignPatProp) {
+        if p.value.as_deref().is_some_and(definicion_anonima) {
+            self.ident(&p.key.id);
+        }
+        swc_ecma_visit::VisitWith::visit_children_with(p, self);
+    }
+
+    fn visit_assign_expr(&mut self, n: &swc_ecma_ast::AssignExpr) {
+        use swc_ecma_ast::{AssignOp, AssignTarget, SimpleAssignTarget};
+        let op = matches!(n.op, AssignOp::Assign | AssignOp::AndAssign | AssignOp::OrAssign | AssignOp::NullishAssign);
+        if op && definicion_anonima(&n.right) {
+            match &n.left {
+                AssignTarget::Simple(SimpleAssignTarget::Ident(b)) => self.ident(&b.id),
+                AssignTarget::Simple(SimpleAssignTarget::Paren(p)) => self.destino(&p.expr),
+                _ => {}
+            }
+        }
+        swc_ecma_visit::VisitWith::visit_children_with(n, self);
+    }
+
+    fn visit_fn_decl(&mut self, f: &swc_ecma_ast::FnDecl) {
+        self.ident(&f.ident);
+        swc_ecma_visit::VisitWith::visit_children_with(f, self);
+    }
+
+    fn visit_fn_expr(&mut self, f: &swc_ecma_ast::FnExpr) {
+        if let Some(i) = &f.ident {
+            self.ident(i);
+        }
+        swc_ecma_visit::VisitWith::visit_children_with(f, self);
+    }
+
+    fn visit_class_decl(&mut self, c: &swc_ecma_ast::ClassDecl) {
+        self.ident(&c.ident);
+        swc_ecma_visit::VisitWith::visit_children_with(c, self);
+    }
+
+    fn visit_class_expr(&mut self, c: &swc_ecma_ast::ClassExpr) {
+        if let Some(i) = &c.ident {
+            self.ident(i);
+        }
+        swc_ecma_visit::VisitWith::visit_children_with(c, self);
+    }
+}
+
+/// 8.3: la forma canonica y, H1, los nombres que dan un `.name` (nombre canonico -> nombre
+/// original; `Nombran` y los privados de `Canon`).
+type Canonica = (String, std::collections::BTreeMap<String, String>);
+
+/// 8.3: la forma canonica de `src` (`Canon`). `None`: no parsea. `Err`: tiene algo que hace
+/// dinamica la resolucion (`with`, `eval` directo) y la canonica no prueba nada.
+fn forma_canonica(src: &str, kind: SourceKind) -> Option<Result<Canonica, String>> {
+    let cm: Lrc<SourceMap> = Default::default();
+    let fm = cm.new_source_file(FileName::Anon.into(), src.to_string());
+    let program = backend::swc::parse_program(&fm, kind)?;
+    let (sin_resolver, top) = (swc_common::Mark::new(), swc_common::Mark::new());
+    let mut program = program.apply(swc_ecma_transforms_base::resolver(sin_resolver, top, false));
+    program.visit_mut_with(&mut Expandir);
+    let mut nombran = Nombran(Default::default());
+    swc_ecma_visit::VisitWith::visit_with(&program, &mut nombran);
+    let mut c = Canon {
+        sin_resolver,
+        locales: Default::default(),
+        privados: Vec::new(),
+        n_privados: 0,
+        desde_otro: false,
+        dinamico: None,
+        nombran_privados: Default::default(),
+    };
+    program.visit_mut_with(&mut c);
+    if let Some(d) = c.dinamico {
+        return Some(Err(format!("tiene {d}: la resolucion de nombres es dinamica")));
+    }
+    let mut nombres = std::mem::take(&mut c.nombran_privados);
+    for clave in nombran.0 {
+        if let Some(k) = c.locales.get(&clave) {
+            nombres.insert(format!("l${k}"), clave.0);
+        }
+    }
+    let mut buf = Vec::new();
+    {
+        let mut emitter = Emitter {
+            cfg: swc_ecma_codegen::Config::default().with_minify(true),
+            cm: cm.clone(),
+            comments: None,
+            wr: JsWriter::new(cm, "\n", &mut buf, None),
+        };
+        emitter.emit_program(&program).ok()?;
+    }
+    String::from_utf8(buf).ok().map(|s| Ok((s, nombres)))
+}
+
+/// 8.3: ¿`b` es un renombre correcto de `b0`? (`mensaje_nombre_matters`, paso 1). Las dos
+/// formas canonicas (`forma_canonica`) iguales. `None`: alguno no parsea (o un panic de SWC).
+/// `Err(motivo)`: no se puede afirmar. `Ok(renombres)`: si, y H1: los bindings de los que
+/// sale un `.name` (`Nombran`) que el renombre cambio, como `viejo -> nuevo` (vacio: ninguno).
+pub fn alfa_equivalentes(b0: &str, b: &str, kind: SourceKind) -> Option<Result<Vec<String>, String>> {
+    catch_unwind(AssertUnwindSafe(|| {
+        GLOBALS.set(&Globals::new(), || {
+            let c0 = forma_canonica(b0, kind)?;
+            let c1 = forma_canonica(b, kind)?;
+            Some(match (c0, c1) {
+                (Err(m), _) | (_, Err(m)) => Err(m),
+                (Ok((x, n0)), Ok((y, n1))) if x == y => {
+                    // Con las formas iguales, la misma etiqueta es el mismo binding en los dos.
+                    let etiquetas: std::collections::BTreeSet<&String> = n0.keys().chain(n1.keys()).collect();
+                    Ok(etiquetas
+                        .into_iter()
+                        .filter_map(|k| {
+                            let (v0, v1) = (n0.get(k), n1.get(k));
+                            let s = |v: Option<&String>| v.map_or("?", |v| v.as_str()).to_string();
+                            (v0 != v1).then(|| format!("{} -> {}", s(v0), s(v1)))
+                        })
+                        .collect())
+                }
+                (Ok(_), Ok(_)) => Err("las formas canonicas difieren".into()),
+            })
+        })
+    }))
+    .ok()
+    .flatten()
+}
+
 /// t-principio: lo que el preload vio pisado en `a` (lineas `builtin <objeto>
 /// <clave>` del canal), sin repetir.
 pub fn builtins_pisados(a: &runner::Exec) -> Vec<&str> {
@@ -2553,5 +3051,199 @@ mod tests {
         assert_eq!(e.sensor_degradado(), Some(crate::runner::SENSOR_TOPE), "{}", e.ctl);
         let e = r.run("console.log(1);\n");
         assert_eq!(e.sensor_degradado(), None, "{}", e.ctl);
+    }
+}
+
+/// 8.3 (= 7.11): el re-chequeo `mensaje_nombre`.
+#[cfg(test)]
+mod mensaje_nombre_tests {
+    use super::{alfa_equivalentes, linea_con_nombre, mensaje_con_nombre_localizado, mensaje_nombre_con, mensaje_nombre_matters, Recheck};
+    use crate::backend::Minifier;
+    use crate::minify::{prepare, Outcome, Preset, SourceKind};
+    use crate::runner::{Exec, Preload, Runner, Status};
+
+    #[test]
+    fn linea_con_nombre_casos() {
+        assert!(linea_con_nombre("[error] TypeError: cb is not a function", "[error] TypeError: e is not a function"));
+        assert!(linea_con_nombre("TypeError: o.cb is not a function", "TypeError: e.cb is not a function"));
+        assert!(linea_con_nombre("x is not iterable", "t is not iterable"));
+        assert!(linea_con_nombre("TypeError: Foo is not a constructor", "TypeError: n is not a constructor"));
+        assert!(!linea_con_nombre("TypeError: cb is not a function", "TypeError: cb is not a function"));
+        assert!(!linea_con_nombre("[error] TypeError: cb is not a function", "[log] TypeError: e is not a function"));
+        // Un global no se manglea: `is not defined` queda afuera.
+        assert!(!linea_con_nombre("ReferenceError: foo is not defined", "ReferenceError: a is not defined"));
+        assert!(!linea_con_nombre("TypeError: cb is not a function 1", "TypeError: e is not a function 2"));
+        assert!(!linea_con_nombre("1 is not a function", "2 is not a function"));
+        assert!(!linea_con_nombre("TypeError: cb is not a function", "TypeError: e is not a constructor"));
+        assert!(!linea_con_nombre("TypeError: a..b is not a function", "TypeError: e is not a function"));
+        // Un nombre privado, como lo escribe V8.
+        assert!(linea_con_nombre("this[#handler] is not a function 1", "this[#e] is not a function 1"));
+        // Un marco de stack con otro nombre de funcion (core_defaults) no entra (n-principio).
+        assert!(!linea_con_nombre("    at run (<pos>)", "    at e (<pos>)"));
+    }
+
+    fn ex(stdout: &str) -> Exec {
+        Exec { status: Status::Exited(0), stdout: stdout.into(), stderr: String::new(), flags: Vec::new(), elapsed: std::time::Duration::ZERO, ctl: String::new() }
+    }
+
+    #[test]
+    fn localizacion() {
+        let a = ex("antes\n[error] TypeError: cb is not a function\nfin\n");
+        assert!(mensaje_con_nombre_localizado(&a, &ex("antes\n[error] TypeError: e is not a function\nfin\n")));
+        // Otra linea distinta (un bug al lado): no.
+        assert!(!mensaje_con_nombre_localizado(&a, &ex("antes\n[error] TypeError: e is not a function\nFIN\n")));
+        // Una linea de mas o de menos: no.
+        assert!(!mensaje_con_nombre_localizado(&a, &ex("antes\n[error] TypeError: e is not a function\n")));
+        // Iguales: no hay nada que explicar.
+        assert!(!mensaje_con_nombre_localizado(&a, &a));
+        // Distinto estado de salida: no.
+        let mut b = ex("antes\n[error] TypeError: e is not a function\nfin\n");
+        b.status = Status::Exited(1);
+        assert!(!mensaje_con_nombre_localizado(&a, &b));
+    }
+
+    #[test]
+    fn alfa_equivalencia() {
+        let s = SourceKind::Script;
+        let ok = |x: &str, y: &str, k| assert_eq!(alfa_equivalentes(x, y, k), Some(Ok(Vec::new())), "{x} | {y}");
+        let no = |x: &str, y: &str, k| assert!(matches!(alfa_equivalentes(x, y, k), Some(Err(_))), "{x} | {y}: {:?}", alfa_equivalentes(x, y, k));
+        let b0 = "function run(cb){var x=1;try{cb()}catch(e){console.log(e.message,x)}}run();";
+        ok(b0, "function run(t){var n=1;try{t()}catch(r){console.log(r.message,n)}}run();", s);
+        // El riesgo de propuesta-1: el mangle hace que la llamada capture OTRO binding no
+        // llamable (`n`, que vale 1): el mensaje tendria la misma forma.
+        no(b0, "function run(t){var n=1;try{n()}catch(r){console.log(r.message,n)}}run();", s);
+        // Dos bindings fundidos en un nombre en el mismo scope.
+        no(b0, "function run(t){var t=1;try{t()}catch(r){console.log(r.message,t)}}run();", s);
+        // Un local que pasa a llamarse como un global que se usa (`console` capturado).
+        no("function f(a){return console.log(a)}", "function f(console){return console.log(console)}", s);
+        // Un global renombrado.
+        no("foo();", "e();", s);
+        // Un local renombrado que captura una referencia de un scope de afuera.
+        no("function f(a){var b=1;return function(){return a}}", "function f(e){var t=1;return function(){return t}}", s);
+        // Nombres reusados en scopes hermanos: valido.
+        ok("function f(a){return a}function g(b){return b}", "function f(e){return e}function g(e){return e}", s);
+        // Formas abreviadas que el mangle expande.
+        ok("function f(cb){return {cb}}", "function f(e){return {cb:e}}", s);
+        no("function f(cb){return {cb}}", "function f(e){return {cx:e}}", s);
+        ok("function f({cb}){return cb}", "function f({cb:e}){return e}", s);
+        ok("function f({cb=1}){return cb}", "function f({cb:e=1}){return e}", s);
+        // Nombres privados (renombrados por clase).
+        ok("class A{#x=1;g(){return this.#x}}", "class A{#a=1;g(){return this.#a}}", s);
+        no("class A{#x=1;#y=2;g(){return this.#x}}", "class A{#a=1;#b=2;g(){return this.#b}}", s);
+        // Import/export (modulo): el nombre exportado no cambia.
+        let m = SourceKind::Module;
+        ok("let x=1;export{x}", "let e=1;export{e as x}", m);
+        no("let x=1;export{x}", "let e=1;export{e as y}", m);
+        ok("import{x}from'm';console.log(x)", "import{x as e}from'm';console.log(e)", m);
+        // `eval` directo y `with`: la resolucion es dinamica, no se puede afirmar.
+        no("function f(cb){eval('cb()')}", "function f(e){eval('cb()')}", s);
+        no("function f(cb){with({})cb()}", "function f(e){with({})e()}", s);
+        // No parsea.
+        assert_eq!(alfa_equivalentes("function(", "x", s), None);
+    }
+
+    /// H1 (revision del bloque 8): los renombres de bindings de los que sale un `.name`
+    /// (`Nombran`) salen de la alfa-equivalencia, y solo esos.
+    #[test]
+    fn renombres_que_cambian_el_name() {
+        let (s, m) = (SourceKind::Script, SourceKind::Module);
+        let r = |x: &str, y: &str, k| match alfa_equivalentes(x, y, k) {
+            Some(Ok(v)) => v,
+            otro => panic!("{x} | {y}: {otro:?}"),
+        };
+        // Los dos repros de la revision (b01, b02): default de parametro anonimo.
+        assert_eq!(r("function run(p){const check=(handler=()=>{})=>{console.log(handler.name)};check();return p}", "function run(p){const check=(e=()=>{})=>{console.log(e.name)};check();return p}", s), ["handler -> e"]);
+        assert_eq!(r("function crear(Base=class{}){return Base.name}", "function crear(e=class{}){return e.name}", s), ["Base -> e"]);
+        // Un parametro sin default anonimo: un renombre que no toca ningun `.name`.
+        assert!(r("function run(cb){cb()}", "function run(e){e()}", s).is_empty());
+        assert!(r("function f(h=1){return h}", "function f(e=1){return e}", s).is_empty());
+        // Un default con nombre propio: el `.name` es el de la funcion, no el del parametro.
+        assert!(r("function f(h=function g(){}){return h}", "function f(e=function g(){}){return e}", s).is_empty());
+        // ...pero renombrar el nombre propio si lo cambia.
+        assert_eq!(r("function f(h=function g(){}){return h}", "function f(h=function e(){}){return h}", s), ["g -> e"]);
+        // Declarador, con parentesis, `async` y generador.
+        assert_eq!(r("function f(){let h=(async()=>{});return h}", "function f(){let e=(async()=>{});return e}", s), ["h -> e"]);
+        assert_eq!(r("function f(){var h=function*(){};return h}", "function f(){var e=function*(){};return e}", s), ["h -> e"]);
+        // Destructuring: `{h = ...}` (expandido), `{k: h = ...}`, `[h = ...]`, en parametros y en
+        // declaradores.
+        assert_eq!(r("function f({h=()=>{}}){return h}", "function f({h:e=()=>{}}){return e}", s), ["h -> e"]);
+        assert_eq!(r("function f({k:h=()=>{}}){return h}", "function f({k:e=()=>{}}){return e}", s), ["h -> e"]);
+        assert_eq!(r("function f(){const[h=class{}]=[];return h}", "function f(){const[e=class{}]=[];return e}", s), ["h -> e"]);
+        // Asignaciones: `=`, logicas y por destructuring; `+=` no hace NamedEvaluation.
+        assert_eq!(r("function f(){let h;h=()=>{};return h}", "function f(){let e;e=()=>{};return e}", s), ["h -> e"]);
+        assert_eq!(r("function f(){let h;h||=()=>{};return h}", "function f(){let e;e||=()=>{};return e}", s), ["h -> e"]);
+        assert_eq!(r("function f(){let h;h??=class{};return h}", "function f(){let e;e??=class{};return e}", s), ["h -> e"]);
+        assert_eq!(r("function f(){let h;[h=()=>{}]=[];return h}", "function f(){let e;[e=()=>{}]=[];return e}", s), ["h -> e"]);
+        assert_eq!(r("function f(){let h;({h=()=>{}}={});return h}", "function f(){let e;({h:e=()=>{}}={});return e}", s), ["h -> e"]);
+        assert!(r("function f(){let h=1;h+=()=>{};return h}", "function f(){let e=1;e+=()=>{};return e}", s).is_empty());
+        // Una expresion que no es una definicion anonima: `(0, () => {})` no da nombre.
+        assert!(r("function f(){let h=(0,()=>{});return h}", "function f(){let e=(0,()=>{});return e}", s).is_empty());
+        // Nombres propios de funciones y clases (declaracion y expresion).
+        assert_eq!(r("function f(){function g(){}return g}", "function f(){function e(){}return e}", s), ["g -> e"]);
+        assert_eq!(r("function f(){class C{}return C}", "function f(){class e{}return e}", s), ["C -> e"]);
+        assert_eq!(r("function f(){return class C{}}", "function f(){return class e{}}", s), ["C -> e"]);
+        // Privados: un metodo, y un campo con una definicion anonima; un campo con un valor no.
+        assert_eq!(r("class A{#m(){}g(){return this.#m}}", "class A{#a(){}g(){return this.#a}}", s), ["#m -> #a"]);
+        assert_eq!(r("class A{#h=()=>{};g(){return this.#h}}", "class A{#a=()=>{};g(){return this.#a}}", s), ["#h -> #a"]);
+        assert!(r("class A{#x=1;g(){return this.#x}}", "class A{#a=1;g(){return this.#a}}", s).is_empty());
+        // Modulo: export de un binding con default anonimo.
+        assert_eq!(r("let h=()=>{};export{h}", "let e=()=>{};export{e as h}", m), ["h -> e"]);
+        // Un global no se renombra (si no, ni siquiera es alfa-equivalente).
+        assert!(r("h=()=>{};", "h=()=>{};", s).is_empty());
+    }
+
+    /// De punta a punta con oxc y node: el positivo (h1/01 de d2-hallazgos) da Explica; un B
+    /// con el mangle roto a mano (la llamada captura otro binding no llamable y el mensaje
+    /// tiene la misma forma) da Inconcluso; y un B0 que ya diverge (compress) da NoExplica.
+    #[test]
+    fn mensaje_nombre_en_node() {
+        if !crate::test_util::requiere_node() {
+            return;
+        }
+        let preload = Preload::write_tagged("mnombre").unwrap();
+        let r = Runner::new(&preload, crate::test_util::id_runner(), std::time::Duration::from_secs(20));
+        let src = "function run(cb) {\n  var n = 1;\n  try { cb(); } catch (e) { console.log(e.message); }\n  return n;\n}\nrun();\n";
+        let cfg = Preset::CarrilA.build(Minifier::Oxc, SourceKind::Script);
+        let Outcome::Ok { original, minified, .. } = prepare(src, &cfg) else { panic!("oxc no minifica") };
+        let (a, b) = (r.run(&original), r.run(&minified));
+        assert_eq!(a.stdout, "cb is not a function\n");
+        assert_ne!(a.stdout, b.stdout, "oxc ya no manglea el parametro: {minified}");
+        assert!(mensaje_con_nombre_localizado(&a, &b), "{} | {}", a.stdout, b.stdout);
+        let rc = mensaje_nombre_matters(&r, (Minifier::Oxc, Preset::CarrilA, SourceKind::Script), &original, &minified, &a, &b);
+        assert_eq!(rc, Recheck::Explica);
+        // H1: con keep_names (carril_a), el parametro con default anonimo que oxc 0.153.0
+        // renombra cambia el `.name` que el programa imprime con la forma del mensaje:
+        // Inconcluso. Sin keep_names (core_defaults) es la asuncion aceptada: Explica.
+        let h1 = "function run(p) {\n  const check = (handler = () => {}) => {\n    console.log(handler.name + \" is not a function\");\n  };\n  check();\n  return p;\n}\nrun();\n";
+        for (preset, inconcluso) in [(Preset::CarrilA, true), (Preset::CoreDefaults, false)] {
+            let cfg = preset.build(Minifier::Oxc, SourceKind::Script);
+            let Outcome::Ok { original, minified, .. } = prepare(h1, &cfg) else { panic!("oxc no minifica") };
+            let (a, b) = (r.run(&original), r.run(&minified));
+            assert_eq!(a.stdout, "handler is not a function\n");
+            assert!(mensaje_con_nombre_localizado(&a, &b), "oxc ya no manglea el parametro ({preset:?}): {minified}");
+            let rc = mensaje_nombre_matters(&r, (Minifier::Oxc, preset, SourceKind::Script), &original, &minified, &a, &b);
+            if inconcluso {
+                assert!(matches!(rc, Recheck::Inconcluso(ref n) if n.contains("keep_names") && n.contains("handler -> ")), "{rc:?}");
+            } else {
+                assert_eq!(rc, Recheck::Explica, "{preset:?}");
+            }
+        }
+        // El mangle roto: `n` (1) en vez del parametro. B da `<otro> is not a function`.
+        let m0 = "function run(cb){var n=1;try{cb()}catch(e){console.log(e.message)}return n}run();\n";
+        let roto = "function run(t){var r=1;try{r()}catch(e){console.log(e.message)}return r}run();\n";
+        let b_roto = r.run(roto);
+        assert_eq!(b_roto.stdout, "r is not a function\n");
+        let rc = mensaje_nombre_con(&r, (SourceKind::Script, true), roto, m0, &a, &b_roto);
+        assert!(matches!(rc, Recheck::Inconcluso(ref n) if n.contains("bug del mangler")), "{rc:?}");
+        // B0 con otro mensaje (compress llamo a otra cosa): NoExplica.
+        let m0_malo = "function run(cb){var n=1;try{n()}catch(e){console.log(e.message)}return n}run();\n";
+        let b_malo = "function run(t){var r=1;try{r()}catch(e){console.log(e.message)}return r}run();\n";
+        let rc = mensaje_nombre_con(&r, (SourceKind::Script, true), b_malo, m0_malo, &a, &r.run(b_malo));
+        assert_eq!(rc, Recheck::NoExplica);
+        // Sin mangle sale lo mismo: el nombre no viene del renombre.
+        assert_eq!(mensaje_nombre_con(&r, (SourceKind::Script, true), m0, m0, &a, &r.run(m0)), Recheck::NoExplica);
+        // swc no tiene variante sin mangle: inconcluso (su politica no lo pide).
+        let rc = mensaje_nombre_matters(&r, (Minifier::Swc, Preset::CarrilA, SourceKind::Script), &original, &minified, &a, &b);
+        assert!(matches!(rc, Recheck::Inconcluso(_)), "{rc:?}");
     }
 }

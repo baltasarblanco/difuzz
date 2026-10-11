@@ -401,6 +401,18 @@ pub fn salar(src: &str, kind: SourceKind) -> Result<Option<Option<String>>, Stri
     correr("salar", kind, &[src]).map(|v| v.map(|mut v| v.pop()))
 }
 
+/// 8.3: `recheck::alfa_equivalentes` (el minificado sin mangle y el minificado).
+/// `Ok(None)`: alguno no parsea. `Ok(Some(Ok(renombres)))`: H1, los bindings que dan un
+/// `.name` y el renombre cambio.
+pub fn alfa(b0: &str, b: &str, kind: SourceKind) -> Result<Option<Result<Vec<String>, String>>, String> {
+    let v = correr("alfa", kind, &[b0, b])?;
+    Ok(v.map(|v| match &v[..] {
+        [si, renombres @ ..] if si == "si" => Ok(renombres.to_vec()),
+        [no, m] if no == "no" => Err(m.clone()),
+        otro => Err(format!("alfa: respuesta inesperada de {} partes", otro.len())),
+    }))
+}
+
 /// b4-a: `recheck::neutralize_violaciones` (`spec`: una violacion por linea).
 pub fn sin_violaciones(src: &str, kind: SourceKind, spec: &str) -> Result<Option<String>, String> {
     correr("violaciones", kind, &[src, spec]).map(|v| v.and_then(|mut v| v.pop()))
@@ -465,6 +477,10 @@ fn ejecutar(op: &str, kind: SourceKind, p: &[&str]) -> Option<Vec<String>> {
         ("int_sloppy", [src]) => crate::recheck::interruptores_sloppy(src).map(|s| s.into_iter().collect()),
         ("salar", [src]) => crate::recheck::salar_literales(src, kind).map(|s| s.into_iter().collect()),
         ("violaciones", [src, spec]) => crate::recheck::neutralize_violaciones(src, kind, spec).map(|s| vec![s]),
+        ("alfa", [b0, b]) => crate::recheck::alfa_equivalentes(b0, b, kind).map(|r| match r {
+            Ok(renombres) => std::iter::once("si".to_string()).chain(renombres).collect(),
+            Err(m) => vec!["no".to_string(), m],
+        }),
         ("checks", [src, o, m, minifier]) => {
             let minifier = Minifier::parse(minifier)?;
             let (f, (d0, d1), a) = crate::backend::swc::checks_on_text(src, o, m, kind, minifier);
@@ -784,6 +800,15 @@ mod tests {
         assert!(interruptores_with(src, k).unwrap().unwrap().is_some());
         assert_eq!(interruptores_coercion("console.log(1);\n", k).unwrap(), Some(None));
         assert_eq!(interruptores_coercion("let = ;", k).unwrap(), None);
+        // 8.3: las tres respuestas de `alfa` (si, no con el motivo, no parsea) cruzan el pipe.
+        assert_eq!(alfa("function f(a){return a}", "function f(e){return e}", k).unwrap(), Some(Ok(Vec::new())));
+        // H1: los renombres de bindings que dan un `.name` tambien cruzan.
+        let h1 = alfa("function f(h=()=>{}){return h}", "function f(e=()=>{}){return e}", k).unwrap();
+        assert_eq!(h1, Some(Ok(vec!["h -> e".to_string()])));
+        let no = alfa("function f(a,b){return a}", "function f(e,t){return t}", k).unwrap();
+        assert_eq!(no, crate::recheck::alfa_equivalentes("function f(a,b){return a}", "function f(e,t){return t}", k));
+        assert!(matches!(no, Some(Err(ref m)) if m.contains("difieren")), "{no:?}");
+        assert_eq!(alfa("let = ;", "x", k).unwrap(), None);
         sin_hijo_de_test();
         assert!(tomar_notas().is_empty());
     }

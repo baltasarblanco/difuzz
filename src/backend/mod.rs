@@ -104,6 +104,11 @@ pub enum Rechequeo {
     /// t-principio: `coercion` (estatico): las definiciones de valueOf/toString/
     /// `Symbol.toPrimitive` renombradas (`recheck::coercion_matters`).
     Coercion,
+    /// 8.3 (runtime, sin flag previo): A y B difieren solo en mensajes de V8 que escriben el
+    /// texto de la expresion (`cb is not a function` / `e is not a function`). Se re-minifica
+    /// con mangle apagado (`Minifier::build_sin_mangle`; el backend tiene que tenerla) y se
+    /// exige que B sea un renombre correcto de eso (`recheck::mensaje_nombre_matters`).
+    MensajeNombre,
 }
 
 /// Tercer eje de la celda: que minifier se mide.
@@ -199,6 +204,38 @@ impl Minifier {
             Minifier::Identidad => Box::new(identidad::Identidad { kind }),
         }
     }
+
+    /// 8.3: el preset con mangle apagado y el resto igual (`Rechequeo::MensajeNombre`). `None`:
+    /// el backend no la tiene (swc: no la pide su politica; VERIFICAR la API si se agrega).
+    pub fn build_sin_mangle(self, preset: Preset, kind: SourceKind) -> Option<Box<dyn Backend>> {
+        match self {
+            Minifier::Oxc => Some(Box::new(oxc::Oxc::sin_mangle(preset, source_type(kind)))),
+            Minifier::Swc => None,
+            #[cfg(test)]
+            Minifier::Identidad => None,
+        }
+    }
+
+    /// 8.3 (H1 de la revision del bloque 8): ¿el mangle del preset promete preservar el `.name`
+    /// de funciones o de clases (keep_names)? Sale de las opciones que arma el backend, no del
+    /// nombre del preset. Con keep_names, renombrar un binding del que sale un `.name` ya es
+    /// un bug del minifier (`recheck::mensaje_nombre_matters`).
+    pub fn preserva_nombres(self, preset: Preset, kind: SourceKind) -> bool {
+        match self {
+            Minifier::Swc => {
+                let base = match preset {
+                    Preset::CarrilA => swc::Swc::carril_a(),
+                    Preset::CoreDefaults => swc::Swc::core_defaults(),
+                };
+                let s = base.with_kind(kind, preset == Preset::CarrilA);
+                s.minify.mangle.as_ref().is_some_and(|m| m.keep_fn_names || m.keep_class_names)
+            }
+            Minifier::Oxc => oxc::Oxc::new(preset, source_type(kind)).preserva_nombres(),
+            // No renombra nada.
+            #[cfg(test)]
+            Minifier::Identidad => false,
+        }
+    }
 }
 
 fn source_type(kind: SourceKind) -> oxc::SourceType {
@@ -218,6 +255,20 @@ mod tests {
             assert_eq!(Minifier::parse(m.name()), Some(m));
         }
         assert_eq!(Minifier::parse("terser"), None);
+    }
+
+    /// 8.3 (H1): keep_names sale de las opciones del backend: carril_a lo promete y
+    /// core_defaults no, en los dos carriles y en los dos backends de produccion.
+    #[test]
+    fn preserva_nombres_por_preset() {
+        use crate::minify::{Preset, SourceKind};
+        for m in Minifier::TODOS {
+            for k in [SourceKind::Script, SourceKind::Module] {
+                assert!(m.preserva_nombres(Preset::CarrilA, k), "{m:?} {k:?}");
+                assert!(!m.preserva_nombres(Preset::CoreDefaults, k), "{m:?} {k:?}");
+            }
+        }
+        assert!(!Minifier::Identidad.preserva_nombres(Preset::CarrilA, SourceKind::Script));
     }
 
     /// 7.5: `TODOS`, `ALL` y la linea `--minifier` del USAGE (main.rs) dicen los mismos

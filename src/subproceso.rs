@@ -225,6 +225,9 @@ struct Lanzador {
     env: Vec<(String, String)>,
 }
 
+/// 8.3: argumento de `--preparar` para la config con mangle apagado (`Remoto::sin_mangle`).
+const SIN_MANGLE: &str = "--sin-mangle";
+
 /// Argumentos del subcomando oculto: los que necesita `serve` para armar la
 /// misma config que tendria el worker.
 fn args_config(minifier: Minifier, preset: Preset, kind: SourceKind, keep_names: bool) -> Vec<String> {
@@ -280,6 +283,24 @@ impl Remoto {
             timeout: TIMEOUT_MINIFICAR,
             presupuesto: None,
         }
+    }
+
+    /// 8.3: el preset con mangle apagado (`Minifier::build_sin_mangle`), en un hijo como
+    /// cualquier config (M34). `None` si el backend no la tiene. Sin oraculo: un panic de los
+    /// asserts deja el re-chequeo inconcluso (div/), no hace falta saber si es real.
+    pub fn sin_mangle(minifier: Minifier, preset: Preset, kind: SourceKind) -> Option<Remoto> {
+        minifier.build_sin_mangle(preset, kind)?;
+        let exe = crate::binario::propio();
+        let mut args = vec!["--preparar".to_string()];
+        args.extend(args_config(minifier, preset, kind, false));
+        args.push(SIN_MANGLE.into());
+        Some(Remoto {
+            lanzador: Lanzador { exe, args, env: Vec::new() },
+            local: Some(Box::new(move || minifier.build_sin_mangle(preset, kind).expect("comprobado arriba"))),
+            hijo: Mutex::new(None),
+            timeout: TIMEOUT_MINIFICAR,
+            presupuesto: None,
+        })
     }
 
     /// R1-H05: el mismo hijo, pero con el ejecutable del oraculo (sin debug
@@ -763,7 +784,7 @@ pub(crate) fn intern_flag(s: &str) -> &'static str {
 }
 
 /// El subcomando oculto `difuzz --preparar --minifier M --config C --carril K
-/// [--keep-names]`. Devuelve el exit code.
+/// [--keep-names | --sin-mangle]`. Devuelve el exit code.
 pub fn serve(args: &[String]) -> i32 {
     // R1-H05: `--preparar --info`, la identidad que valida `configurar_oraculo`.
     if args == ["--info"] {
@@ -783,6 +804,7 @@ fn serve_con_pila(args: &[String], pila: usize, entrada: impl BufRead + Send, sa
     // 7b: el backend no tiene default (antes `Swc` si faltaba): el padre
     // siempre lo pasa (args_config).
     let (mut minifier, mut preset, mut kind, mut keep) = (None, Preset::CarrilA, SourceKind::Script, false);
+    let mut sin_mangle = false;
     let mut i = 0;
     while i < args.len() {
         let v = args.get(i + 1).map(String::as_str).unwrap_or_default();
@@ -792,6 +814,11 @@ fn serve_con_pila(args: &[String], pila: usize, entrada: impl BufRead + Send, sa
             "--carril" => SourceKind::parse(v).map(|k| kind = k).is_some(),
             "--keep-names" => {
                 keep = true;
+                i += 1;
+                continue;
+            }
+            SIN_MANGLE => {
+                sin_mangle = true;
                 i += 1;
                 continue;
             }
@@ -807,12 +834,21 @@ fn serve_con_pila(args: &[String], pila: usize, entrada: impl BufRead + Send, sa
         eprintln!("--preparar: falta --minifier");
         return 2;
     };
+    // 8.3: la config con mangle apagado (`Remoto::sin_mangle`); no se combina con keep_names.
+    if sin_mangle && (keep || minifier.build_sin_mangle(preset, kind).is_none()) {
+        eprintln!("--preparar: {SIN_MANGLE} no existe para {} (o con --keep-names)", minifier.name());
+        return 2;
+    }
+    let backend = move || match minifier.build_sin_mangle(preset, kind) {
+        Some(b) if sin_mangle => b,
+        _ => local_backend(minifier, preset, kind, keep),
+    };
     // Misma pila que un worker (M1): un fuente que pasa en proceso pasa aca.
     let r = std::thread::scope(|s| {
         std::thread::Builder::new()
             .name("preparar".into())
             .stack_size(pila)
-            .spawn_scoped(s, move || bucle(local_backend(minifier, preset, kind, keep), entrada, salida))
+            .spawn_scoped(s, move || bucle(backend(), entrada, salida))
             .map(|h| h.join())
     });
     match r {
@@ -952,6 +988,37 @@ pub(crate) mod tests {
                 _ => panic!("distinto para {s:?}"),
             }
         }
+    }
+
+    /// 8.3: `--sin-mangle` arma la config con mangle apagado (la misma que en proceso:
+    /// `Minifier::build_sin_mangle`); para un backend sin esa variante, o con `--keep-names`,
+    /// el hijo no arranca (exit 2).
+    #[test]
+    fn serve_sin_mangle() {
+        let s = "function run(cb) { try { cb(); } catch (e) { console.log(e.message); } }\nrun();\n";
+        let entrada = format!("src {}\n{s}", s.len());
+        let mut salida = Vec::new();
+        let mut args = args_config(Minifier::Oxc, Preset::CarrilA, SourceKind::Script, false);
+        args.push(SIN_MANGLE.into());
+        assert_eq!(serve_con_pila(&args, 8 << 20, entrada.as_bytes(), &mut salida), 0);
+        let mut r = &salida[..];
+        let mut l = String::new();
+        r.read_line(&mut l).unwrap();
+        assert_eq!(l.trim_end(), SALUDO);
+        let local = crate::minify::Config::from_backend(Minifier::Oxc.build_sin_mangle(Preset::CarrilA, SourceKind::Script).unwrap());
+        match (leer_outcome(&mut r).unwrap(), crate::minify::prepare(s, &local)) {
+            (Outcome::Ok { minified: m1, .. }, Outcome::Ok { minified: m2, .. }) => {
+                assert_eq!(m1, m2);
+                assert!(m1.contains("cb()"), "con mangle apagado el parametro no cambia: {m1}");
+            }
+            _ => panic!("no minifico sin mangle"),
+        }
+        let mut swc = args_config(Minifier::Swc, Preset::CarrilA, SourceKind::Script, false);
+        swc.push(SIN_MANGLE.into());
+        assert_eq!(serve_con_pila(&swc, 8 << 20, &b""[..], Vec::new()), 2);
+        let mut keep = args_config(Minifier::Oxc, Preset::CarrilA, SourceKind::Script, true);
+        keep.push(SIN_MANGLE.into());
+        assert_eq!(serve_con_pila(&keep, 8 << 20, &b""[..], Vec::new()), 2);
     }
 
     /// El hijo de los tests: el binario de tests filtrado a este test, con la

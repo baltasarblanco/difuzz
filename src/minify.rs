@@ -152,6 +152,16 @@ impl Config {
         Config(env(minifier.build_con_nombres(preset, kind)), oraculo)
     }
 
+    /// 8.3: el preset con mangle apagado (`Rechequeo::MensajeNombre`), en un hijo salvo
+    /// `--en-proceso`, sin el analisis de difuzz alrededor (no hacen falta sus flags) y sin
+    /// oraculo. `None`: el backend no la tiene.
+    pub fn sin_mangle(minifier: Minifier, preset: Preset, kind: SourceKind) -> Option<Self> {
+        if crate::subproceso::activo() {
+            return Some(Config(Box::new(crate::subproceso::Remoto::sin_mangle(minifier, preset, kind)?), None));
+        }
+        Some(Config(minifier.build_sin_mangle(preset, kind)?, None))
+    }
+
     /// M34: una config sobre un backend ya armado (el hijo de `--preparar`).
     /// Sin oraculo: el hijo no re-minifica.
     pub fn from_backend(backend: Box<dyn crate::backend::Backend>) -> Self {

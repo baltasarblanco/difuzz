@@ -442,6 +442,37 @@ Principios:
     renombre solo: si A con el binding renombrado da lo mismo que A y su minificado también,
     la divergencia la explica ligar `arguments`, válido solo en sloppy.
   - los nombres (minificar preservándolos), en los dos: que la divergencia desaparezca.
+  - el **nombre local en un mensaje de V8** (`mensaje_nombre`, solo oxc; no es una asunción de oxc
+    sino una decisión de difuzz, como `stack`): V8 arma `X is not a function` (también `is not a
+    constructor`, `is not iterable` y sus variantes async) con el texto de la expresión, y el
+    mangle lo cambia (`cb is not a function` en A, `e is not a function` en B). El paso corre
+    solo si A y B tienen las mismas líneas y cada una que difiere es ese mensaje con otra
+    expresión de nombres (`cb`, `o.cb`, `this[#h]`, `a[0]`); si no, ni corre ni deja traza. Se
+    minifica de nuevo con el mismo preset y **mangle apagado** (B0), y `Explica` pide: (1) que B
+    sea **alfa-equivalente** a B0, comprobado con el resolver de SWC (independiente del de oxc):
+    los mismos nodos salvo los nombres, cada identificador de B resuelve al binding que
+    corresponde al de B0, los globales y los nombres de import/export no cambian, y los
+    privados se corresponden por clase; (2) que B0 dé lo mismo que A, y (3) que B difiera de B0
+    solo en esos mensajes. Con un preset que promete keep_names (carril_a; sale de las opciones
+    que arma el backend, `Minifier::preserva_nombres`), además, el renombre no puede tocar un
+    binding del que sale el `.name` de una función o clase: su nombre propio (declaración o
+    expresión con nombre, método privado) o el destino de NamedEvaluation de una definición
+    anónima (`var x = () => {}`, un default de parámetro o de destructuring, `x = ...`,
+    `x ||= ...`, `x &&= ...`, `x ??= ...`, un campo privado; `recheck::Nombran`). Si lo toca, el
+    `.name` cambió, y eso ya es un bug de keep_names que el programa puede estar imprimiendo con
+    la forma del mensaje (oxc 0.153.0 manglea un parámetro con default anónimo:
+    `(handler = () => {}) => handler.name` da `e`): `Inconcluso`, `div/` con nota (H1 de la
+    revisión del bloque 8). Se mira el binding renombrado, no el texto: no importa cómo lea el
+    programa el `.name` (`f["na" + "me"]`, `Reflect.get`). Sin keep_names (core_defaults) el
+    cambio del `.name` es la asunción "No Reliance on Function.prototype.name" y no se mira.
+    Un mangle que hace que la llamada capture otro binding no llamable
+    (mismo mensaje con otro nombre) no pasa (1): `Inconcluso`, `div/` con nota. También es
+    inconcluso si hay `with` o `eval` directo (la resolución es dinámica) o una forma que la
+    comparación no reconoce. No entran: un marco de stack con otro nombre de función (`at run` →
+    `at e` en core_defaults: sigue en `div/`), `X is not defined` (un global no se manglea) y las
+    expresiones que V8 escribe con algo más que nombres, puntos y corchetes (`(intermediate
+    value)`, `(0 , x.f)`, un literal). Cuesta 1
+    minificación, 2 parseos de SWC y 1 node, solo cuando la divergencia pasa ese filtro.
   - en todos los anteriores salvo los nombres, además, **B no tiene que pasar por la
     violación**. B == A' también puede ser una coincidencia: si el bug deja justo el valor que
     una variable tiene cuando la rama de la violación no corre (`""`, `false`, `0`, un `+=` que
@@ -658,8 +689,8 @@ Sin `node` en el `PATH`, los tests que lo necesitan fallan con un mensaje claro.
 
 - **Golden de detección** (`tests/golden/`): 16 casos con bugs conocidos de oxc y swc, en 8
   celdas, más `--invocar` y `--stubs`; la clase esperada de cada caso está en `esperado.tsv`.
-- **Aceptación de los re-chequeos** (`tests/aceptacion/rechequeos/`): 142 casos que combinan un
-  bug real de oxc con un flag de asunción, en las 4 celdas de oxc (568 comparaciones).
+- **Aceptación de los re-chequeos** (`tests/aceptacion/rechequeos/`): 151 casos que combinan un
+  bug real de oxc con un flag de asunción, en las 4 celdas de oxc (604 comparaciones).
 
 ```sh
 tests/golden/verificar.sh --jobs 4                    # sale con 0 y "comparaciones=N fallas=0"

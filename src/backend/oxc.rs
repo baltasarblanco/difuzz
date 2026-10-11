@@ -44,6 +44,8 @@ pub const POLITICA: Politica = Politica {
         Rechequeo::Violaciones,
         Rechequeo::Builtins,
         Rechequeo::Coercion,
+        // 8.3: el nombre local en un mensaje de V8 (`Oxc::sin_mangle`).
+        Rechequeo::MensajeNombre,
     ],
     solo_sloppy: Some("oxc: solo sloppy (no soportado); con \"use strict\" la divergencia desaparece"),
     chequeos_propios: false,
@@ -84,6 +86,10 @@ const FLAG_REASONS_OXC: &[(&str, &str)] = &[
     // No es asuncion documentada de oxc: el contenido de .stack (posiciones,
     // nombres) cambia con cualquier minificacion. Decision de difuzz, VERIFICAR.
     ("stack", "difuzz: el contenido de Error.prototype.stack cambia al minificar (oxc no lo documenta)"),
+    // 8.3 (recheck::mensaje_nombre_matters): solo llega aca si el re-chequeo dio Explica (B es
+    // un renombre alfa-equivalente del minificado sin mangle, y ese da lo mismo que A). No es
+    // asuncion documentada de oxc: V8 arma `X is not a function` con el texto de la llamada.
+    ("mensaje_nombre", "difuzz: V8 escribe en el mensaje de error el nombre local de la expresion, que el mangle cambia (oxc no lo documenta)"),
 ];
 
 pub struct Oxc {
@@ -135,6 +141,21 @@ impl Oxc {
             Preset::CoreDefaults => Oxc::core_defaults_keep_names(source_type),
             Preset::CarrilA => Oxc::new(preset, source_type),
         }
+    }
+
+    /// 8.3 (`Rechequeo::MensajeNombre`): el preset con mangle apagado y compress igual. En
+    /// oxc_minifier 0.153.0 compress corre antes que mangle y no depende de el
+    /// (`Minifier::build`, lib.rs:159-191): el programa que sale es el de B antes del renombre.
+    pub fn sin_mangle(preset: Preset, source_type: SourceType) -> Self {
+        let mut o = Oxc::new(preset, source_type);
+        o.options.mangle = None;
+        o
+    }
+
+    /// 8.3 (H1): el mangle preserva el `.name` de funciones o de clases
+    /// (`MangleOptionsKeepNames`, oxc_mangler-0.153.0/src/keep_names.rs:7-17).
+    pub fn preserva_nombres(&self) -> bool {
+        self.options.mangle.as_ref().is_some_and(|m| m.keep_names.function || m.keep_names.class)
     }
 
     /// core_defaults con `keep_names` en compress y en mangle (main::names_only).
