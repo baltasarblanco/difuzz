@@ -143,7 +143,32 @@ pub enum Camino {
 /// pide que `con` se comporte como `b` (la corrida de B que se clasifica) y, si hay, que
 /// `neutro` se comporte como `b2` (B'): si no, la cobertura no es la de esas corridas
 /// (no determinismo, o la instrumentacion cambio el programa) y no se sabe.
+///
+/// b7-1b (revision 7.1, H2): antes que el camino, el sensor de uso (lineas `uso` y `uso?` del
+/// canal de las dos corridas, preload.js): mirar el camino no ve una dependencia por datos (la
+/// asuncion elige un indice, una clave o un valor y B recorre el mismo codigo con y sin ella).
+/// Si B toco la asuncion, B == A' puede ser coincidencia: `Distinto`; si no se pudo sensar,
+/// `NoSe`.
 pub fn comparar_caminos(b: &runner::Exec, con: &runner::Exec, b2: Option<&runner::Exec>, neutro: &runner::Exec) -> Camino {
+    let mut usos: Vec<&str> = Vec::new();
+    let mut no_sensados: Vec<&str> = Vec::new();
+    for l in con.ctl.lines().chain(neutro.ctl.lines()) {
+        if let Some(u) = l.strip_prefix("uso ") {
+            if !usos.contains(&u) {
+                usos.push(u);
+            }
+        } else if let Some(u) = l.strip_prefix("uso? ") {
+            if !no_sensados.contains(&u) {
+                no_sensados.push(u);
+            }
+        }
+    }
+    if !usos.is_empty() {
+        return Camino::Distinto(format!("B usa la asuncion: {}", usos.join(", ")));
+    }
+    if !no_sensados.is_empty() {
+        return Camino::NoSe(format!("no pude sensar si B usa la asuncion: {}", no_sensados.join(", ")));
+    }
     if !matches!(oracle::compare(b, con), oracle::Verdict::Same) {
         return Camino::NoSe(format!("con la cobertura prendida B no da lo mismo ({:?})", con.status));
     }
@@ -162,16 +187,40 @@ pub fn comparar_caminos(b: &runner::Exec, con: &runner::Exec, b2: Option<&runner
 /// b7-1: el camino de B cuando la neutralizacion es del entorno (stubs de globals, built-ins
 /// fijos, contenido fijo, mas pila): B y B' corren el mismo texto, asi que se corre B dos
 /// veces con cobertura, sin y con la neutralizacion (`args`/`env`), y se comparan. 2 node.
+///
+/// b7-1b (revision 7.1, H1): el texto que corre es B con los contadores de rama
+/// (`instrumentar_ramas`), porque V8 no separa con bloques el lado derecho de `&&=`/`||=`/`??=`
+/// ni los valores por defecto (oxc hace `t&&=e=...` de un `if (t) t = (e = ...)`). `con_env`:
+/// lo que lleva ademas la corrida sin neutralizar (el sensor de uso de los built-ins).
 pub fn camino_entorno(
     r: &runner::Runner,
     minified: &str,
     b: &runner::Exec,
     b2: &runner::Exec,
     (args, env): (&[&str], &[(&str, &str)]),
+    con_env: &[(&str, &str)],
 ) -> Camino {
-    let con = r.run_con_cobertura(minified, &[], &[]);
-    let neutro = r.run_con_cobertura(minified, args, env);
+    let texto = match texto_instrumentado(minified, crate::analisis::ramas(minified, r.kind())) {
+        Ok(t) => t,
+        Err(c) => return c,
+    };
+    let con = r.run_con_cobertura(&texto, &[], con_env);
+    let neutro = r.run_con_cobertura(&texto, args, env);
     comparar_caminos(b, &con, Some(b2), &neutro)
+}
+
+/// b7-1b: el texto que corre con cobertura: el instrumentado, o B tal cual si no hacia falta
+/// instrumentar nada; si no se pudo, no se sabe.
+fn texto_instrumentado(minified: &str, r: Result<Option<Option<String>>, String>) -> Result<String, Camino> {
+    match r {
+        Ok(Some(Some(t))) => Ok(t),
+        Ok(Some(None)) => Ok(minified.to_string()),
+        Ok(None) => Err(Camino::NoSe("no pude instrumentar el minificado (no parsea con SWC)".into())),
+        Err(e) => {
+            crate::analisis::registrar("re-chequeo (instrumentar el minificado)", &e);
+            Err(Camino::NoSe(format!("fallo el analisis de difuzz: {}", e.lines().next().unwrap_or_default())))
+        }
+    }
 }
 
 /// b7-1: el camino de B cuando la neutralizacion cambia el texto (`with`, coercion): B
@@ -226,8 +275,16 @@ pub fn camino_sensor(b: &runner::Exec, con_sensor: bool, clases: Option<&[&str]>
 /// (cada pausa llama a su `Error.prepareStackTrace`) y toma otro camino con el no puede
 /// prestarle a B un camino que B sin el sensor no toma (rev-int H1, MEDIDO). 2 node, y solo
 /// cuando todo lo demas ya daba Explica (closure de `veredicto_neutralizado`).
+/// Integracion 7.1b: las dos corridas son del minificado con los contadores de rama de 7.1b
+/// (`texto_instrumentado` + `analisis::ramas`, lo mismo que `camino_entorno`): la cobertura de V8
+/// no separa el lado derecho de `&&=`/`||=`/`??=` ni un valor por defecto, y un programa que nota el
+/// sensor puede cambiar de camino solo ahi (MEDIDO: b7-int/sensor-rhs a01 iba a known/).
 pub fn camino_sensor_i3(sin: &runner::Runner, con: &runner::Runner, minified: &str, b: &runner::Exec, clases: Option<&[&str]>) -> Camino {
-    let c = con.run_con_cobertura(minified, &[], &[("DIFUZZ_MAX_PAUSAS", runner::MAX_PAUSAS_MAYOR)]);
+    let texto = match texto_instrumentado(minified, crate::analisis::ramas(minified, sin.kind())) {
+        Ok(t) => t,
+        Err(c) => return c,
+    };
+    let c = con.run_con_cobertura(&texto, &[], &[("DIFUZZ_MAX_PAUSAS", runner::MAX_PAUSAS_MAYOR)]);
     if let Some(d) = c.sensor_degradado() {
         return Camino::NoSe(format!(
             "A y B se compararon sin el sensor (I3) y B con el sensor (tope {}) tampoco corrio entero ({d})",
@@ -237,7 +294,7 @@ pub fn camino_sensor_i3(sin: &runner::Runner, con: &runner::Runner, minified: &s
     if !matches!(oracle::compare(b, &c), oracle::Verdict::Same) {
         return Camino::NoSe(format!("con el sensor B no da lo mismo que sin el ({:?})", c.status));
     }
-    let s = sin.run_con_cobertura(minified, &[], &[]);
+    let s = sin.run_con_cobertura(&texto, &[], &[]);
     if !matches!(oracle::compare(b, &s), oracle::Verdict::Same) {
         return Camino::NoSe(format!("con la cobertura prendida B no da lo mismo ({:?})", s.status));
     }
@@ -275,8 +332,14 @@ pub fn camino_estricto(r: &runner::Runner, minified: &str, b: &runner::Exec) -> 
             _ => return Camino::NoSe("el minificado no compila en estricto".into()),
         }
     }
-    let con = r.run_con_cobertura(&format!("{PREFIJO_SLOPPY}{base}"), &[], &[]);
-    let neutro = r.run_con_cobertura(&format!("{PREFIJO_ESTRICTO}{base}"), &[], &[]);
+    // b7-1b (revision 7.1, H1/H2 d07): con los contadores de rama y el sensor del `this` de
+    // sloppy (`interruptores_sloppy`): en estricto, un `this` que sloppy cambia es uso.
+    let texto = match texto_instrumentado(&base, crate::analisis::interruptores_sloppy(&base)) {
+        Ok(t) => t,
+        Err(c) => return c,
+    };
+    let con = r.run_con_cobertura(&format!("{PREFIJO_SLOPPY}{texto}"), &[], &[]);
+    let neutro = r.run_con_cobertura(&format!("{PREFIJO_ESTRICTO}{texto}"), &[], &[]);
     comparar_caminos(b, &con, None, &neutro)
 }
 
@@ -413,7 +476,7 @@ pub fn globals_matter(
     }
     let b2 = r.run_with_globals(minified, &g);
     // b7-1: B sin y con los stubs, con cobertura (q03/r08: la rama sin `window` con el bug).
-    veredicto_neutralizado(a, b, &a2, &b2, None, || camino_entorno(r, minified, b, &b2, (&[], &[("DIFUZZ_GLOBALS", g.as_str())])))
+    veredicto_neutralizado(a, b, &a2, &b2, None, || camino_entorno(r, minified, b, &b2, (&[], &[("DIFUZZ_GLOBALS", g.as_str())]), &[]))
 }
 
 /// b1-b: `Explica` solo si la divergencia desaparece sin el scope del `with` y
@@ -478,7 +541,7 @@ pub fn contenido_matters(
     let b2 = r.run_with_env(minified, &env);
     // b7-1: B con el contenido de verdad y con el fijo, con cobertura (r05: la rama que
     // depende del texto de la funcion, con el bug).
-    veredicto_neutralizado(a, b, &a2, &b2, Some(salada), || camino_entorno(r, minified, b, &b2, (&[], &env)))
+    veredicto_neutralizado(a, b, &a2, &b2, Some(salada), || camino_entorno(r, minified, b, &b2, (&[], &env), &[]))
 }
 
 /// t-principio: lo que el preload vio pisado en `a` (lineas `builtin <objeto>
@@ -521,7 +584,9 @@ pub fn builtins_matter(r: &runner::Runner, original: &str, minified: &str, a: &r
     let b2 = r.run_with_env(minified, &env);
     // b7-1 (q06: el built-in pisado que B todavia llama, con el bug): B con lo pisado libre y
     // fijo, con cobertura.
-    veredicto_neutralizado(a, b, &a2, &b2, None, || camino_entorno(r, minified, b, &b2, (&[], &env)))
+    // b7-1b (revision 7.1, H2 d04): y en la corrida sin fijar, el sensor de uso de lo pisado.
+    let uso = [("DIFUZZ_BUILTINS_USO", spec.as_str())];
+    veredicto_neutralizado(a, b, &a2, &b2, None, || camino_entorno(r, minified, b, &b2, (&[], &env), &uso))
 }
 
 /// t-principio: `coercion` (estatico; oxc: "Coercion Methods Are Pure"; antes iba a
@@ -987,22 +1052,78 @@ pub fn neutralize_with(src: &str, kind: SourceKind) -> Option<String> {
 /// b7-1: los interruptores que define el preload con DIFUZZ_NEUTRO (`camino_interruptores`).
 pub const INTERRUPTOR_WITH: &str = "__difuzzNeutroWith";
 pub const INTERRUPTOR_CLAVE: &str = "__difuzzNeutroClave";
+/// b7-1b (revision 7.1, H1/H2): los ganchos que define el preload con DIFUZZ_COBERTURA=1:
+/// el contador de rama, el uso de un helper de coercion (al principio de su cuerpo, o
+/// envolviendo su valor) y el `this` de una funcion sloppy.
+pub const GANCHO_RAMA: &str = "__difuzzNeutroRama";
+pub const GANCHO_USO: &str = "__difuzzNeutroUso";
+pub const GANCHO_VALOR: &str = "__difuzzNeutroValor";
+pub const GANCHO_THIS: &str = "__difuzzNeutroThis";
 
 /// b7-1: `callee(arg)` con `callee` un identificador libre.
 fn llamar(callee: &str, arg: Expr) -> Box<Expr> {
+    llamar_con(callee, vec![arg])
+}
+
+/// b7-1b: `callee(args...)` con `callee` un identificador libre.
+fn llamar_con(callee: &str, args: Vec<Expr>) -> Box<Expr> {
     use swc_ecma_ast::{CallExpr, Callee, ExprOrSpread, Ident};
     Box::new(Expr::Call(CallExpr {
         span: DUMMY_SP,
         callee: Callee::Expr(Box::new(Expr::Ident(Ident::new_no_ctxt(callee.into(), DUMMY_SP)))),
-        args: vec![ExprOrSpread { spread: None, expr: Box::new(arg) }],
+        args: args.into_iter().map(|a| ExprOrSpread { spread: None, expr: Box::new(a) }).collect(),
         ..Default::default()
     }))
 }
 
-/// b7-1: parsea, aplica `v` y emite. `Some(None)`: no hay nada que cambiar. `None`: no se
-/// pudo (no parsea, no emite o el fuente ya nombra los interruptores): eso no es "nada que
-/// cambiar", es no saber.
-fn instrumentar<V: VisitMut>(src: &str, kind: SourceKind, mut v: V, cambio: impl Fn(&V) -> bool) -> Option<Option<String>> {
+/// b7-1b: un literal de cadena.
+fn cadena(s: &str) -> Expr {
+    Expr::Lit(Lit::Str(swc_ecma_ast::Str { span: DUMMY_SP, value: s.into(), raw: None }))
+}
+
+/// b7-1b: una sentencia de expresion.
+fn sentencia(e: Box<Expr>) -> Stmt {
+    Stmt::Expr(ExprStmt { span: DUMMY_SP, expr: e })
+}
+
+/// b7-1b: una directiva (`"use strict";` y cualquier otra cadena suelta al principio).
+fn es_directiva(s: &Stmt) -> bool {
+    matches!(s, Stmt::Expr(e) if matches!(&*e.expr, Expr::Lit(Lit::Str(_))))
+}
+
+/// b7-1b: si el prologo de directivas tiene `"use strict"`.
+fn tiene_use_strict(stmts: &[Stmt]) -> bool {
+    stmts
+        .iter()
+        .take_while(|s| es_directiva(s))
+        .any(|s| matches!(s, Stmt::Expr(e) if matches!(&*e.expr, Expr::Lit(Lit::Str(x)) if x.value.to_string_lossy() == "use strict")))
+}
+
+/// b7-1b: `s` como primera sentencia del cuerpo, despues de las directivas (una sentencia antes
+/// de `"use strict"` lo convertiria en una expresion suelta).
+fn al_principio(stmts: &mut Vec<Stmt>, s: Stmt) {
+    let i = stmts.iter().take_while(|x| es_directiva(x)).count();
+    stmts.insert(i, s);
+}
+
+/// b7-1b: una funcion, flecha o clase sin nombre (con o sin parentesis). Asignada a un nombre
+/// (o como valor por defecto) toma ese nombre (NamedEvaluation): envolverla en otra expresion
+/// le cambiaria el `.name`. Evaluarla no corre codigo (salvo las claves computadas de una
+/// clase).
+fn definicion_anonima(e: &Expr) -> bool {
+    match e {
+        Expr::Paren(p) => definicion_anonima(&p.expr),
+        Expr::Fn(f) => f.ident.is_none(),
+        Expr::Arrow(_) => true,
+        Expr::Class(c) => c.ident.is_none(),
+        _ => false,
+    }
+}
+
+/// b7-1: parsea, aplica `f` y emite. `f` dice si cambio algo: si no, `Some(None)` (no hay nada
+/// que cambiar). `None`: no se pudo (no parsea, no emite o el fuente ya nombra los
+/// interruptores o los ganchos): eso no es "nada que cambiar", es no saber.
+fn instrumentar(src: &str, kind: SourceKind, f: impl FnOnce(&mut Program) -> bool) -> Option<Option<String>> {
     if src.contains("__difuzzNeutro") {
         return None;
     }
@@ -1011,8 +1132,7 @@ fn instrumentar<V: VisitMut>(src: &str, kind: SourceKind, mut v: V, cambio: impl
             let cm: Lrc<SourceMap> = Default::default();
             let fm = cm.new_source_file(FileName::Anon.into(), src.to_string());
             let mut program = backend::swc::parse_program(&fm, kind)?;
-            program.visit_mut_with(&mut v);
-            if !cambio(&v) {
+            if !f(&mut program) {
                 return Some(None);
             }
             emit(cm, &program.apply(fixer(None))).map(Some)
@@ -1022,10 +1142,66 @@ fn instrumentar<V: VisitMut>(src: &str, kind: SourceKind, mut v: V, cambio: impl
     .flatten()
 }
 
+/// b7-1b (revision 7.1, H1): pone un contador (`(__difuzzNeutroRama(<i>), x)`) delante de cada
+/// parte condicional que la cobertura de bloques de V8 no separa: el lado derecho de `&&=`,
+/// `||=` y `??=` (cualquier destino) y el valor por defecto de un parametro o de una
+/// desestructuracion (en declaraciones, asignaciones, `for`, `catch`). MEDIDO (node 24.14.1,
+/// cobertura precisa con `callCount` y `detailed`, `proto/p4.cjs`): con y sin esa parte, los
+/// rangos son los mismos; `?.`, `&&`, `||`, `??`, el ternario, `if`, `switch`, los bucles,
+/// `try` y `break` si se separan. Sin contador: una definicion anonima (`definicion_anonima`).
+/// Devuelve si puso alguno.
+fn ramas(program: &mut Program) -> bool {
+    use swc_ecma_ast::{AssignExpr, AssignOp, AssignPat, AssignPatProp, Number, SeqExpr};
+    struct R(u32);
+    impl R {
+        fn contar(&mut self, e: &mut Box<Expr>) {
+            if definicion_anonima(e) {
+                return;
+            }
+            let x = std::mem::take(e);
+            let i = Expr::Lit(Lit::Num(Number { span: DUMMY_SP, value: f64::from(self.0), raw: None }));
+            **e = Expr::Seq(SeqExpr { span: DUMMY_SP, exprs: vec![llamar(GANCHO_RAMA, i), x] });
+            self.0 += 1;
+        }
+    }
+    impl VisitMut for R {
+        fn visit_mut_assign_expr(&mut self, n: &mut AssignExpr) {
+            n.visit_mut_children_with(self);
+            if matches!(n.op, AssignOp::AndAssign | AssignOp::OrAssign | AssignOp::NullishAssign) {
+                self.contar(&mut n.right);
+            }
+        }
+        fn visit_mut_assign_pat(&mut self, p: &mut AssignPat) {
+            p.visit_mut_children_with(self);
+            self.contar(&mut p.right);
+        }
+        fn visit_mut_assign_pat_prop(&mut self, p: &mut AssignPatProp) {
+            p.visit_mut_children_with(self);
+            if let Some(v) = &mut p.value {
+                self.contar(v);
+            }
+        }
+    }
+    let mut r = R(0);
+    program.visit_mut_with(&mut r);
+    r.0 > 0
+}
+
+/// b7-1b (revision 7.1, H1): el minificado con los contadores de rama (`ramas`), para el camino
+/// de B por cobertura (`camino_entorno`). `Some(None)` si no hay donde ponerlos (B corre tal
+/// cual); `None` si no se pudo (`instrumentar`).
+pub fn instrumentar_ramas(src: &str, kind: SourceKind) -> Option<Option<String>> {
+    instrumentar(src, kind, ramas)
+}
+
 /// b7-1: el minificado con cada `with (o) S` como `with (__difuzzNeutroWith(o)) S`. Con
 /// DIFUZZ_NEUTRO=0 el interruptor devuelve `o` (B tal cual); con 1, un objeto sin
 /// propiedades: cada nombre de `S` resuelve afuera, como en `{ o; S; }` (`neutralize_with`).
 /// `Some(None)` si no hay `with`; `None` si no se pudo (`instrumentar`).
+/// b7-1b (revision 7.1, H1/H2 d02b): con DIFUZZ_NEUTRO=0 y cobertura, el interruptor devuelve
+/// un Proxy de `o` que anota cada nombre que resuelve en el (el sensor de uso, preload.js); y
+/// el minificado lleva ademas los contadores de rama (`ramas`). `Some(None)` sigue siendo "no
+/// hay `with`" aunque haya donde poner contadores: sin `with`, B no depende de el.
 pub fn interruptores_with(src: &str, kind: SourceKind) -> Option<Option<String>> {
     struct N(bool);
     impl VisitMut for N {
@@ -1038,7 +1214,14 @@ pub fn interruptores_with(src: &str, kind: SourceKind) -> Option<Option<String>>
             }
         }
     }
-    instrumentar(src, kind, N(false), |n| n.0)
+    instrumentar(src, kind, |p| {
+        let mut n = N(false);
+        p.visit_mut_with(&mut n);
+        if n.0 {
+            ramas(p);
+        }
+        n.0
+    })
 }
 
 /// b7-1: el minificado con cada definicion de helper de coercion que renombra
@@ -1047,64 +1230,289 @@ pub fn interruptores_with(src: &str, kind: SourceKind) -> Option<Option<String>>
 /// Con DIFUZZ_NEUTRO=0 el interruptor devuelve la clave (B tal cual: un metodo con clave
 /// computada se llama igual); con 1, `__dz_<nombre>`, como el renombre del original.
 /// `Some(None)` si no hay nada que cambiar; `None` si no se pudo (`instrumentar`).
+/// b7-1b (revision 7.1, H2 d03): ademas, el sensor de uso: cada helper definido como funcion
+/// (metodo, getter, setter, funcion o flecha como valor) empieza con
+/// `__difuzzNeutroUso("<nombre>")`, y cualquier otro valor va envuelto en
+/// `__difuzzNeutroValor(v, "<nombre>")` (si es una funcion, tambien nativa como
+/// `Array.prototype.join`, el preload la cambia por una que anota la llamada). Y los contadores
+/// de rama (`ramas`).
 pub fn interruptores_coercion(src: &str, kind: SourceKind) -> Option<Option<String>> {
-    use swc_ecma_ast::{AssignExpr, AssignTarget, ClassMember, ComputedPropName, MemberProp, Prop, PropName, SimpleAssignTarget, Str};
-    fn clave_de(k: &PropName) -> Option<Expr> {
+    use swc_ecma_ast::{AssignExpr, AssignTarget, ClassMember, ComputedPropName, Function, MemberProp, Prop, PropName, SimpleAssignTarget};
+    fn clave_de(k: &PropName) -> Option<(Expr, &'static str)> {
         match k {
             PropName::Ident(i) if crate::checks::is_coercion_name(i.sym.as_str()) => {
-                Some(Expr::Lit(Lit::Str(Str { span: DUMMY_SP, value: i.sym.as_str().into(), raw: None })))
+                Some((cadena(i.sym.as_str()), if i.sym.as_str() == "valueOf" { "valueOf" } else { "toString" }))
             }
-            PropName::Computed(c) if crate::checks::is_symbol_to_primitive(&c.expr) => Some((*c.expr).clone()),
+            PropName::Computed(c) if crate::checks::is_symbol_to_primitive(&c.expr) => Some(((*c.expr).clone(), "toPrimitive")),
             _ => None,
         }
     }
-    fn clave(k: &mut PropName) -> bool {
-        let Some(e) = clave_de(k) else {
-            return false;
-        };
+    fn clave(k: &mut PropName) -> Option<&'static str> {
+        let (e, nombre) = clave_de(k)?;
         *k = PropName::Computed(ComputedPropName { span: DUMMY_SP, expr: llamar(INTERRUPTOR_CLAVE, e) });
-        true
+        Some(nombre)
+    }
+    fn uso_funcion(f: &mut Function, nombre: &str) {
+        if let Some(b) = &mut f.body {
+            al_principio(&mut b.stmts, sentencia(llamar(GANCHO_USO, cadena(nombre))));
+        }
+    }
+    fn uso_valor(e: &mut Box<Expr>, nombre: &str) {
+        use swc_ecma_ast::{ArrowFunctionBody, SeqExpr};
+        match &mut **e {
+            Expr::Paren(p) => uso_valor(&mut p.expr, nombre),
+            Expr::Fn(f) => uso_funcion(&mut f.function, nombre),
+            Expr::Arrow(a) => match &mut *a.body {
+                ArrowFunctionBody::FunctionBody(b) => al_principio(&mut b.stmts, sentencia(llamar(GANCHO_USO, cadena(nombre)))),
+                ArrowFunctionBody::Expr(x) => {
+                    let v = std::mem::take(x);
+                    **x = Expr::Seq(SeqExpr { span: DUMMY_SP, exprs: vec![llamar(GANCHO_USO, cadena(nombre)), v] });
+                }
+            },
+            _ => {
+                let v = std::mem::take(e);
+                *e = llamar_con(GANCHO_VALOR, vec![*v, cadena(nombre)]);
+            }
+        }
     }
     struct N(bool);
     impl VisitMut for N {
         fn visit_mut_prop(&mut self, p: &mut Prop) {
             p.visit_mut_children_with(self);
-            let k = match p {
-                Prop::KeyValue(x) => &mut x.key,
-                Prop::Method(x) => &mut x.key,
-                Prop::Getter(x) => &mut x.key,
-                Prop::Setter(x) => &mut x.key,
-                _ => return,
+            let Some(nombre) = (match p {
+                Prop::KeyValue(x) => clave(&mut x.key),
+                Prop::Method(x) => clave(&mut x.key),
+                Prop::Getter(x) => clave(&mut x.key),
+                Prop::Setter(x) => clave(&mut x.key),
+                _ => None,
+            }) else {
+                return;
             };
-            self.0 |= clave(k);
+            self.0 = true;
+            match p {
+                Prop::KeyValue(x) => uso_valor(&mut x.value, nombre),
+                Prop::Method(x) => uso_funcion(&mut x.function, nombre),
+                Prop::Getter(x) => uso_funcion(&mut x.function, nombre),
+                Prop::Setter(x) => uso_funcion(&mut x.function, nombre),
+                _ => {}
+            }
         }
         fn visit_mut_class_member(&mut self, m: &mut ClassMember) {
             m.visit_mut_children_with(self);
-            let k = match m {
-                ClassMember::Method(x) => &mut x.key,
-                ClassMember::ClassProp(x) => &mut x.key,
-                _ => return,
-            };
-            self.0 |= clave(k);
+            match m {
+                ClassMember::Method(x) => {
+                    if let Some(nombre) = clave(&mut x.key) {
+                        self.0 = true;
+                        uso_funcion(&mut x.function, nombre);
+                    }
+                }
+                ClassMember::ClassProp(x) => {
+                    if let Some(nombre) = clave(&mut x.key) {
+                        self.0 = true;
+                        if let Some(v) = &mut x.value {
+                            uso_valor(v, nombre);
+                        }
+                    }
+                }
+                _ => {}
+            }
         }
         fn visit_mut_assign_expr(&mut self, n: &mut AssignExpr) {
             n.visit_mut_children_with(self);
             if let AssignTarget::Simple(SimpleAssignTarget::Member(m)) = &mut n.left {
                 let e = match &m.prop {
                     MemberProp::Ident(i) if crate::checks::is_coercion_name(i.sym.as_str()) => {
-                        Some(Expr::Lit(Lit::Str(Str { span: DUMMY_SP, value: i.sym.as_str().into(), raw: None })))
+                        Some((cadena(i.sym.as_str()), if i.sym.as_str() == "valueOf" { "valueOf" } else { "toString" }))
                     }
-                    MemberProp::Computed(c) if crate::checks::is_symbol_to_primitive(&c.expr) => Some((*c.expr).clone()),
+                    MemberProp::Computed(c) if crate::checks::is_symbol_to_primitive(&c.expr) => Some(((*c.expr).clone(), "toPrimitive")),
                     _ => None,
                 };
-                if let Some(e) = e {
+                if let Some((e, nombre)) = e {
                     m.prop = MemberProp::Computed(ComputedPropName { span: DUMMY_SP, expr: llamar(INTERRUPTOR_CLAVE, e) });
+                    uso_valor(&mut n.right, nombre);
                     self.0 = true;
                 }
             }
         }
     }
-    instrumentar(src, kind, N(false), |n| n.0)
+    instrumentar(src, kind, |p| {
+        let mut n = N(false);
+        p.visit_mut_with(&mut n);
+        if n.0 {
+            ramas(p);
+        }
+        n.0
+    })
+}
+
+/// b7-1b (revision 7.1, H2 d07): el minificado para el camino de solo sloppy
+/// (`camino_estricto`): cada funcion sloppy (no dentro de una clase ni de algo con
+/// `"use strict"`) que usa su propio `this` (el de una flecha adentro tambien) empieza con
+/// `__difuzzNeutroThis(this)` (despues de las directivas). En la corrida en estricto, un `this`
+/// que sloppy hubiera cambiado (undefined, null, un primitivo) es uso de la asuncion: B elige
+/// un valor por eso aunque no cambie de camino (`[a, b][+(f() !== void 0)]`). Y los contadores
+/// de rama (`ramas`). Lo que no ve: el `arguments` atado a los parametros y los demas cambios de
+/// sloppy que no lanzan en estricto (el camino de la cobertura sigue mirando). `Some(None)` si
+/// no hay nada que poner; `None` si no se pudo (`instrumentar`). Carril A (script).
+pub fn interruptores_sloppy(src: &str) -> Option<Option<String>> {
+    use swc_ecma_ast::{Function, ThisExpr};
+    use swc_ecma_visit::{Visit, VisitWith};
+    fn usa_this(f: &Function) -> bool {
+        struct B(bool);
+        impl Visit for B {
+            fn visit_this_expr(&mut self, _: &ThisExpr) {
+                self.0 = true;
+            }
+            // Otra funcion u otra clase: otro `this`.
+            fn visit_function(&mut self, _: &Function) {}
+            fn visit_class(&mut self, _: &Class) {}
+        }
+        let mut b = B(false);
+        f.params.visit_with(&mut b);
+        f.body.visit_with(&mut b);
+        b.0
+    }
+    struct S {
+        estricto: bool,
+        puso: bool,
+    }
+    impl VisitMut for S {
+        fn visit_mut_function(&mut self, f: &mut Function) {
+            let antes = self.estricto;
+            self.estricto |= f.body.as_ref().is_some_and(|b| tiene_use_strict(&b.stmts));
+            f.visit_mut_children_with(self);
+            if !self.estricto && usa_this(f) {
+                if let Some(b) = &mut f.body {
+                    al_principio(&mut b.stmts, sentencia(llamar(GANCHO_THIS, Expr::This(ThisExpr { span: DUMMY_SP }))));
+                    self.puso = true;
+                }
+            }
+            self.estricto = antes;
+        }
+        fn visit_mut_class(&mut self, c: &mut Class) {
+            let antes = self.estricto;
+            self.estricto = true;
+            c.visit_mut_children_with(self);
+            self.estricto = antes;
+        }
+    }
+    instrumentar(src, SourceKind::Script, |p| {
+        let estricto = match p {
+            Program::Script(s) => tiene_use_strict(&s.body),
+            Program::Module(_) => true,
+        };
+        let mut s = S { estricto, puso: false };
+        p.visit_mut_with(&mut s);
+        let r = ramas(p);
+        s.puso || r
+    })
+}
+
+/// b7-1b (revision 7.1, H2, opcion (c)): el sufijo de los literales salados.
+pub const SAL_LITERAL: &str = "dz";
+
+/// b7-1b (revision 7.1, H2, opcion (c)): el programa con cada literal de cadena EN POSICION DE
+/// DATO (elemento de un arreglo, valor de una propiedad, inicializador de una declaracion, lado
+/// derecho de una asignacion, objeto de un acceso a miembro como `"abc".substring(...)`) con
+/// `SAL_LITERAL` al final; tambien las plantillas sin expresiones (`\`x\``, como las imprime
+/// oxc). No se tocan las comparaciones (`typeof x === "u"`), los argumentos ni las claves.
+/// `Some(None)` si no hay ninguno; `None` si no se pudo (`instrumentar`).
+pub fn salar_literales(src: &str, kind: SourceKind) -> Option<Option<String>> {
+    use swc_ecma_ast::{ArrayLit, AssignExpr, KeyValueProp, MemberExpr, VarDeclarator};
+    fn salar(e: &mut Expr) -> bool {
+        match e {
+            Expr::Lit(Lit::Str(x)) => {
+                let v = format!("{}{SAL_LITERAL}", x.value.to_string_lossy());
+                x.value = v.as_str().into();
+                x.raw = None;
+                true
+            }
+            Expr::Tpl(t) if t.exprs.is_empty() && t.quasis.len() == 1 => {
+                let q = &mut t.quasis[0];
+                let (Some(c), raw) = (q.cooked.as_ref(), q.raw.as_str()) else {
+                    return false;
+                };
+                let cooked = format!("{}{SAL_LITERAL}", c.to_string_lossy());
+                let raw = format!("{raw}{SAL_LITERAL}");
+                q.cooked = Some(cooked.as_str().into());
+                q.raw = raw.as_str().into();
+                true
+            }
+            _ => false,
+        }
+    }
+    struct S(bool);
+    impl VisitMut for S {
+        fn visit_mut_array_lit(&mut self, n: &mut ArrayLit) {
+            n.visit_mut_children_with(self);
+            for e in n.elems.iter_mut().flatten().filter(|e| e.spread.is_none()) {
+                self.0 |= salar(&mut e.expr);
+            }
+        }
+        fn visit_mut_key_value_prop(&mut self, n: &mut KeyValueProp) {
+            n.visit_mut_children_with(self);
+            self.0 |= salar(&mut n.value);
+        }
+        fn visit_mut_var_declarator(&mut self, n: &mut VarDeclarator) {
+            n.visit_mut_children_with(self);
+            if let Some(e) = &mut n.init {
+                self.0 |= salar(e);
+            }
+        }
+        fn visit_mut_assign_expr(&mut self, n: &mut AssignExpr) {
+            n.visit_mut_children_with(self);
+            self.0 |= salar(&mut n.right);
+        }
+        fn visit_mut_member_expr(&mut self, n: &mut MemberExpr) {
+            n.visit_mut_children_with(self);
+            self.0 |= salar(&mut n.obj);
+        }
+    }
+    instrumentar(src, kind, |p| {
+        let mut s = S(false);
+        p.visit_mut_with(&mut s);
+        s.0
+    })
+}
+
+/// b7-1b (revision 7.1, H2, opcion (c)): para las familias sin sensor de uso completo (contenido:
+/// el texto de una funcion del programa; solo sloppy: el `arguments` atado), un `Explica` se
+/// confirma con el original SALADO (`salar_literales`): se minifica igual, se corren A y B
+/// salados y `recheck` (el mismo re-chequeo) tiene que dar Explica tambien ahi. Si el bug deja
+/// justo el valor por defecto, con otro valor ya no coincide (B != A'). Sin literales que salar,
+/// o si el salado no diverge, no hay nada que mirar: Explica. 1 minify + 2 node + el re-chequeo,
+/// solo en los candidatos a Explica de esas familias. Heuristica: un valor por defecto que no
+/// viene de un literal (`[].join()`) no cambia con la sal.
+pub fn con_literales_salados(
+    r: &runner::Runner,
+    (minifier, preset, kind): (backend::Minifier, minify::Preset, SourceKind),
+    original: &str,
+    recheck: impl FnOnce(&str, &str, &runner::Exec, &runner::Exec) -> Recheck,
+) -> Recheck {
+    let salado = match crate::analisis::salar(original, kind) {
+        Ok(Some(Some(s))) => s,
+        Ok(Some(None)) => return Recheck::Explica,
+        Ok(None) => return Recheck::Inconcluso("no pude salar los literales del original (no parsea con SWC)".into()),
+        Err(e) => {
+            crate::analisis::registrar("re-chequeo (literales salados)", &e);
+            return Recheck::Inconcluso(format!("fallo el analisis de difuzz: {}", e.lines().next().unwrap_or_default()));
+        }
+    };
+    let cfg = preset.build(minifier, kind);
+    let minify::Outcome::Ok { original: o2, minified: m2, .. } = minify::prepare(&salado, &cfg) else {
+        return Recheck::Inconcluso("no pude minificar el original con los literales salados".into());
+    };
+    let (a2, b2) = (r.run(&o2), r.run(&m2));
+    if matches!(oracle::compare(&a2, &b2), oracle::Verdict::Same) {
+        return Recheck::Explica;
+    }
+    match recheck(&o2, &m2, &a2, &b2) {
+        Recheck::Explica => Recheck::Explica,
+        Recheck::NoExplica => Recheck::Inconcluso(
+            "con los literales salados (otro valor por defecto) la asuncion ya no explica la divergencia: la coincidencia con el valor por defecto no prueba nada".into(),
+        ),
+        Recheck::Inconcluso(n) => Recheck::Inconcluso(format!("con los literales salados (otro valor por defecto): {n}")),
+    }
 }
 
 /// R2-H10: el nombre que toma el binding `arguments` en la variante estricta.
@@ -1331,6 +1739,16 @@ mod tests {
         assert!(matches!(comparar_caminos(&b, &cov("x\n", "ab 3"), Some(&b2), &cov("\"\"\n", "ab 3")), Camino::NoSe(_)));
         assert!(matches!(comparar_caminos(&b, &cov("\"\"\n", "ab 3"), Some(&b2), &cov("y\n", "ab 3")), Camino::NoSe(_)));
         assert!(matches!(comparar_caminos(&b, &ex(Status::Exited(0), "\"\"\n"), None, &cov("y\n", "ab 3")), Camino::NoSe(_)));
+        // b7-1b (revision 7.1, H2): el sensor de uso manda sobre el camino (mismo camino, pero B
+        // toco la asuncion); lo que no se pudo sensar, no se sabe.
+        let mut uso = cov("\"\"\n", "ab 3");
+        uso.ctl.push_str("uso global window\n");
+        let r = comparar_caminos(&b, &cov("\"\"\n", "ab 3"), Some(&b2), &uso);
+        assert!(matches!(r, Camino::Distinto(ref n) if n.contains("B usa la asuncion: global window")), "{r:?}");
+        let mut no = cov("\"\"\n", "ab 3");
+        no.ctl.push_str("uso? builtins p2 includes\n");
+        let r = comparar_caminos(&b, &no, Some(&b2), &cov("\"\"\n", "ab 3"));
+        assert!(matches!(r, Camino::NoSe(ref n) if n.contains("builtins p2 includes")), "{r:?}");
     }
 
     /// b1-b: solo es concluyente si A' termina y B' == A'; n-principio: y B == A' (los
@@ -1439,20 +1857,95 @@ mod tests {
         assert_eq!(interruptores_with("console.log(1);", k), Some(None));
         assert_eq!(interruptores_with("let = ;", k), None);
         assert_eq!(interruptores_with("with(o)__difuzzNeutroWith;", k), None);
-        let src = "var o = { valueOf() { return 1; }, toString: f, [Symbol.toPrimitive]: g, x: 1 };\nclass C { toString() {} }\nC.prototype.valueOf = h;\no[Symbol.toPrimitive] = k;\nvar { toString: t } = o;\nconsole.log(o.valueOf());\n";
+        // b7-1b: con los contadores de rama; sin `with`, nada que cambiar aunque haya `&&=`.
+        assert_eq!(interruptores_with("with(o)t&&=k;", k).unwrap().unwrap(), "with (__difuzzNeutroWith(o))t &&= (__difuzzNeutroRama(0), k);\n");
+        assert_eq!(interruptores_with("t&&=k;", k), Some(None));
+        // b7-1b (revision 7.1, H2 d03): y el sensor de uso (al principio de cada helper que es una
+        // funcion; envolviendo el valor de los demas) y los contadores de rama.
+        let src = "var o = { valueOf() { return 1; }, toString: f, [Symbol.toPrimitive]: g, x: 1, get valueOf() { return 2 }, toString: function () { 'use strict'; return 3 }, valueOf: () => 4 };\nclass C { toString() {} }\nC.prototype.valueOf = h;\no[Symbol.toPrimitive] = k;\nvar { toString: t } = o;\nconsole.log(o.valueOf());\nt &&= 1;\n";
         let out = interruptores_coercion(src, k).unwrap().unwrap();
         for n in [
-            "[__difuzzNeutroClave(\"valueOf\")] ()",
-            "[__difuzzNeutroClave(\"toString\")]: f",
-            "[__difuzzNeutroClave(Symbol.toPrimitive)]: g",
-            "class C {\n    [__difuzzNeutroClave(\"toString\")]()",
-            "C.prototype[__difuzzNeutroClave(\"valueOf\")] = h",
-            "o[__difuzzNeutroClave(Symbol.toPrimitive)] = k",
+            "[__difuzzNeutroClave(\"valueOf\")] () {\n        __difuzzNeutroUso(\"valueOf\");\n        return 1;",
+            "[__difuzzNeutroClave(\"toString\")]: __difuzzNeutroValor(f, \"toString\")",
+            "[__difuzzNeutroClave(Symbol.toPrimitive)]: __difuzzNeutroValor(g, \"toPrimitive\")",
+            "get [__difuzzNeutroClave(\"valueOf\")] () {\n        __difuzzNeutroUso(\"valueOf\");",
+            "function() {\n        'use strict';\n        __difuzzNeutroUso(\"toString\");",
+            "[__difuzzNeutroClave(\"valueOf\")]: ()=>(__difuzzNeutroUso(\"valueOf\"), 4)",
+            "class C {\n    [__difuzzNeutroClave(\"toString\")]() {\n        __difuzzNeutroUso(\"toString\");",
+            "C.prototype[__difuzzNeutroClave(\"valueOf\")] = __difuzzNeutroValor(h, \"valueOf\")",
+            "o[__difuzzNeutroClave(Symbol.toPrimitive)] = __difuzzNeutroValor(k, \"toPrimitive\")",
+            "t &&= (__difuzzNeutroRama(0), 1)",
         ] {
             assert!(out.contains(n), "{n}: {out}");
         }
         assert!(out.contains("toString: t") && out.contains("o.valueOf()"), "{out}");
         assert_eq!(interruptores_coercion("var { toString } = o;\n", k), Some(None));
+    }
+
+    /// b7-1b (revision 7.1, H1): los contadores de rama donde V8 no separa bloques: el lado
+    /// derecho de `&&=`/`||=`/`??=` (identificador o miembro) y los valores por defecto (parametro,
+    /// declaracion, asignacion, `for`, `catch`). Una definicion anonima no (NamedEvaluation).
+    #[test]
+    fn contadores_de_rama() {
+        use super::instrumentar_ramas;
+        let k = SourceKind::Script;
+        let src = "let e=``,t=1;t&&=e=``;t||=1;t??=f();o.p&&=g();function g(t=e=``){}const[a=1]=[],{b=2}=o;({c=3}=o);[d=4]=o;y||=function(){};z=(q=function(){})=>q;for(const[w=5]of o);try{}catch({m=6}){}";
+        let out = instrumentar_ramas(src, k).unwrap().unwrap();
+        for n in [
+            "t &&= (__difuzzNeutroRama(0), e = ``)",
+            "t ||= (__difuzzNeutroRama(1), 1)",
+            "t ??= (__difuzzNeutroRama(2), f())",
+            "o.p &&= (__difuzzNeutroRama(3), g())",
+            "function g(t = (__difuzzNeutroRama(4), e = ``))",
+            "const [a = (__difuzzNeutroRama(5), 1)] = [], { b = (__difuzzNeutroRama(6), 2) } = o",
+            "({ c = (__difuzzNeutroRama(7), 3) } = o)",
+            "[d = (__difuzzNeutroRama(8), 4)] = o",
+            "y ||= function() {}",
+            "z = (q = function() {})=>q",
+            "for (const [w = (__difuzzNeutroRama(9), 5)] of o)",
+            "catch ({ m = (__difuzzNeutroRama(10), 6) })",
+        ] {
+            assert!(out.contains(n), "{n}: {out}");
+        }
+        assert_eq!(instrumentar_ramas("if (t) e = 1; t && (e = 1); x = a ?? b;", k), Some(None));
+        assert_eq!(instrumentar_ramas("let = ;", k), None);
+        assert_eq!(instrumentar_ramas("t &&= __difuzzNeutroRama;", k), None);
+    }
+
+    /// b7-1b (revision 7.1, H2, opcion (c)): se salan los literales de cadena en posicion de dato
+    /// (y las plantillas sin expresiones), no las comparaciones, los argumentos ni las claves.
+    #[test]
+    fn literales_salados() {
+        use super::salar_literales;
+        let k = SourceKind::Script;
+        let src = "const t = [\"\", \"abc\".substring(1, undefined)], u = `x`;\nx = { k: 'v', \"c\": 1 };\nif (typeof window === \"undefined\") f(\"arg\");\n";
+        let out = salar_literales(src, k).unwrap().unwrap();
+        for n in ["\"dz\"", "\"abcdz\".substring(1, undefined)", "u = `xdz`", "k: \"vdz\"", "\"c\": 1", "typeof window === \"undefined\"", "f(\"arg\")"] {
+            assert!(out.contains(n), "{n}: {out}");
+        }
+        assert_eq!(salar_literales("if (a === \"x\") f(\"y\");", k), Some(None));
+        assert_eq!(salar_literales("let = ;", k), None);
+    }
+
+    /// b7-1b (revision 7.1, H2 d07): el sensor del `this` de sloppy, en cada funcion sloppy que
+    /// usa su propio `this` (tambien desde una flecha), despues de las directivas; no en una
+    /// funcion con "use strict" (ni adentro), en una clase ni en una funcion sin `this`.
+    #[test]
+    fn interruptores_de_sloppy() {
+        use super::interruptores_sloppy;
+        let src = "function f(){'use x';return this}function g(){'use strict';return function(){return this}}var h=function(){return()=>this},i={m(){return this}};class C{m(){return this}}function j(){return function(){}}t??=1;";
+        let out = interruptores_sloppy(src).unwrap().unwrap();
+        for n in [
+            "function f() {\n    'use x';\n    __difuzzNeutroThis(this);\n    return this;",
+            "var h = function() {\n    __difuzzNeutroThis(this);\n    return ()=>this;",
+            "m () {\n        __difuzzNeutroThis(this);",
+            "t ??= (__difuzzNeutroRama(0), 1)",
+        ] {
+            assert!(out.contains(n), "{n}: {out}");
+        }
+        assert_eq!(out.matches("__difuzzNeutroThis").count(), 3, "{out}");
+        assert_eq!(interruptores_sloppy("'use strict';function f(){return this}"), Some(None));
+        assert_eq!(interruptores_sloppy("function f(){return 1}"), Some(None));
     }
 
     /// t-principio: se renombran las definiciones de helpers de coercion (literal,
@@ -1599,6 +2092,66 @@ mod tests {
         let o = "var o1 = { valueOf: function () { t1(); } };\nvar o2 = { valueOf: function () { t2(); } };\nvar r1 = o1 <= o2;\n";
         let m = "var o1 = { valueOf: function () { t1(); } };\nvar o2 = { valueOf: function () { t2(); } };\n";
         assert_eq!(coercion_matters(&r, rc, o, m, &r.run(o), &r.run(m)), Recheck::Explica);
+    }
+
+    /// b7-1b (revision 7.1, H1/H2), con node y oxc: B toma la asuncion como dato (un indice, una
+    /// clave, lo que devuelve un helper nativo o un built-in pisado) o por una forma que la
+    /// cobertura de V8 no separa (`&&=` que oxc arma de un `if`), sin cambiar de camino. Antes
+    /// Explica (known/); ahora el sensor de uso lo ve. El texto de una funcion nativa ya no se
+    /// fija (d05: NoExplica). Los positivos siguen en Explica.
+    #[test]
+    fn dependencia_por_datos() {
+        use super::{builtins_matter, coercion_matters, contenido_matters};
+        if !crate::test_util::requiere_node() {
+            return;
+        }
+        let preload = Preload::write_tagged("b71b").unwrap();
+        let r = Runner::new(&preload, crate::test_util::id_runner(), std::time::Duration::from_secs(20));
+        let cfg = Preset::CarrilA.build(Minifier::Oxc, SourceKind::Script);
+        let prep = |src: &str| {
+            let crate::minify::Outcome::Ok { original, minified, .. } = crate::minify::prepare(src, &cfg) else {
+                panic!("no minifica: {src}");
+            };
+            let (a, b) = (r.run(&original), r.run(&minified));
+            (original, minified, a, b)
+        };
+        let ab = |src: &str| {
+            let x = prep(src);
+            assert_eq!((x.2.stdout.as_str(), x.3.stdout.as_str()), ("\"bc\"\n", "\"\"\n"), "oxc ya no pliega mal substring: buscar otro bug\n{}", x.1);
+            x
+        };
+        let usa = |x: &Recheck, que: &str| matches!(x, Recheck::Inconcluso(ref n) if n.contains(&format!("B usa la asuncion: {que}")));
+        let rc = (Minifier::Oxc, Preset::CarrilA, SourceKind::Script);
+        let bug = "\"abc\".substring(1, undefined)";
+        let (o, m, a, b) = ab(&format!("const t = [\"\", {bug}];\nconsole.log(JSON.stringify(t[+(typeof window === \"undefined\")]));\n"));
+        let g = globals_matter(&r, SourceKind::Script, &o, &m, &a, &b);
+        assert!(usa(&g, "global window"), "d01: {g:?}");
+        let (o, m, a, b) = ab(&format!("let s = \"\";\nlet u = typeof window === \"undefined\";\nif (u) u = (s = {bug});\nconsole.log(JSON.stringify(s));\n"));
+        assert!(m.contains("&&="), "g05b: oxc ya no arma `&&=`: {m}");
+        let g = globals_matter(&r, SourceKind::Script, &o, &m, &a, &b);
+        assert!(usa(&g, "global window"), "g05b: {g:?}");
+        let (o, m, a, b) = prep(&format!("globalThis.k = \"\";\nvar o = {{ k: {bug} }};\nwith (o) {{ globalThis.s = k; }}\nconsole.log(JSON.stringify(globalThis.s));\n"));
+        let w = with_matters(&r, rc, &o, &m, &a, &b);
+        assert!(usa(&w, "with k"), "d02b: {w:?}");
+        let (o, m, a, b) = ab(&format!("const o = {{ toString: Array.prototype.join, 0: \"x\", length: 1 }};\nconst t = {{ x: {bug}, \"[object Object]\": \"\" }};\nconsole.log(JSON.stringify(t[o]));\n"));
+        let c = coercion_matters(&r, rc, &o, &m, &a, &b);
+        assert!(usa(&c, "coercion toString"), "d03: {c:?}");
+        let (o, m, a, b) = ab(&format!("Array.prototype.includes = Boolean;\nconst t = [\"\", {bug}];\nconsole.log(JSON.stringify(t[+[1].includes(2)]));\n"));
+        let bi = builtins_matter(&r, &o, &m, &a, &b);
+        assert!(usa(&bi, "builtins p2 includes"), "d04: {bi:?}");
+        let (o, m, a, b) = ab(&format!("const t = [\"\", {bug}];\nconsole.log(JSON.stringify(t[+(String(Math.max) === \"function max() {{ [native code] }}\")]));\n"));
+        let ct = contenido_matters(&r, &o, &m, &a, &b, &r.run_salted(&o));
+        assert_eq!(ct, Recheck::NoExplica, "d05");
+        // Positivos: 16-builtins-positivo (B ya no lee lo pisado), 17-tostring-positivo (el texto
+        // de una funcion del programa sigue fijo) y el `with` de collapse_vars_eval_and_with (B ya
+        // no resuelve nada en el objeto).
+        let (o, m, a, b) = prep("String.prototype.toUpperCase = function () { return \"pisado\"; };\nconsole.log(\"abc\".toUpperCase());\n");
+        assert_eq!(builtins_matter(&r, &o, &m, &a, &b), Recheck::Explica, "16-builtins-positivo: {m}");
+        let (o, m, a, b) = prep("function suma(primero, segundo) { return primero + segundo; }\nconsole.log(String(suma));\n");
+        assert_eq!(contenido_matters(&r, &o, &m, &a, &b, &r.run_salted(&o)), Recheck::Explica, "17-tostring-positivo: {m}");
+        let (o, m, a, b) = prep("(function f1() { var o = { a: 1 }, a = 2; with (o) console.log(a); })();\n");
+        assert!(m.contains("with"), "{m}");
+        assert_eq!(with_matters(&r, rc, &o, &m, &a, &b), Recheck::Explica, "collapse_vars_eval_and_with: {m}");
     }
 
     /// b4-a: la posicion de V8 (0-based, UTF-16) a byte, y la neutralizacion por clase.

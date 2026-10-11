@@ -365,6 +365,23 @@ pub fn interruptores_coercion(src: &str, kind: SourceKind) -> Result<Option<Opti
     correr("int_coercion", kind, &[src]).map(|v| v.map(|mut v| v.pop()))
 }
 
+/// b7-1b (revision 7.1, H1): `recheck::instrumentar_ramas` (sobre el minificado), como
+/// `interruptores_with`.
+pub fn ramas(src: &str, kind: SourceKind) -> Result<Option<Option<String>>, String> {
+    correr("int_ramas", kind, &[src]).map(|v| v.map(|mut v| v.pop()))
+}
+
+/// b7-1b (revision 7.1, H2): `recheck::interruptores_sloppy` (carril A), como
+/// `interruptores_with`.
+pub fn interruptores_sloppy(src: &str) -> Result<Option<Option<String>>, String> {
+    correr("int_sloppy", SourceKind::Script, &[src]).map(|v| v.map(|mut v| v.pop()))
+}
+
+/// b7-1b (revision 7.1, H2, opcion (c)): `recheck::salar_literales`, como `interruptores_with`.
+pub fn salar(src: &str, kind: SourceKind) -> Result<Option<Option<String>>, String> {
+    correr("salar", kind, &[src]).map(|v| v.map(|mut v| v.pop()))
+}
+
 /// b4-a: `recheck::neutralize_violaciones` (`spec`: una violacion por linea).
 pub fn sin_violaciones(src: &str, kind: SourceKind, spec: &str) -> Result<Option<String>, String> {
     correr("violaciones", kind, &[src, spec]).map(|v| v.and_then(|mut v| v.pop()))
@@ -422,6 +439,9 @@ fn ejecutar(op: &str, kind: SourceKind, p: &[&str]) -> Option<Vec<String>> {
         ("coercion", [src]) => crate::recheck::neutralize_coercion(src, kind).map(|s| vec![s]),
         ("int_with", [src]) => crate::recheck::interruptores_with(src, kind).map(|s| s.into_iter().collect()),
         ("int_coercion", [src]) => crate::recheck::interruptores_coercion(src, kind).map(|s| s.into_iter().collect()),
+        ("int_ramas", [src]) => crate::recheck::instrumentar_ramas(src, kind).map(|s| s.into_iter().collect()),
+        ("int_sloppy", [src]) => crate::recheck::interruptores_sloppy(src).map(|s| s.into_iter().collect()),
+        ("salar", [src]) => crate::recheck::salar_literales(src, kind).map(|s| s.into_iter().collect()),
         ("violaciones", [src, spec]) => crate::recheck::neutralize_violaciones(src, kind, spec).map(|s| vec![s]),
         ("checks", [src, o, m, minifier]) => {
             let minifier = Minifier::parse(minifier)?;

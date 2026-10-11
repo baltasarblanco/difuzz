@@ -156,7 +156,8 @@ confianza (paquetes de npm, código real) eso es un riesgo.
   `--invocar`, envoltorio de módulos, stubs) corre con el modelo de permisos de node 24:
   `--permission`, `--allow-fs-read` solo para el preload, el programa (y el envoltorio de
   módulos) y el directorio de trabajo del caso, `--allow-fs-write` solo para ese directorio y
-  el canal de control de difuzz, y `--allow-inspector` cuando corre el sensor de violaciones.
+  el canal de control de difuzz, y `--allow-inspector` (con `--disable-sigusr1`) cuando corre el
+  sensor de violaciones o la cobertura de un re-chequeo (ver abajo).
   Sin `--allow-child-process`, `--allow-worker`, `--allow-addons` ni `--allow-wasi`: no hay
   procesos hijos, workers, addons nativos ni WASI (tampoco `process.binding`). Como el modelo de
   permisos no cubre las señales ni la prioridad de otros procesos, un filtro seccomp (sin root;
@@ -230,8 +231,15 @@ bloque 7: un bug real al lado va a descartes en vez de `div/`).
 - Un permiso negado que el programa atrapa en silencio (sin imprimirlo) sin el sensor de
   violaciones (swc) o en un callback no se reconoce: A y B ven lo mismo y se comparan.
 - Un programa que imprime por su cuenta uno de los textos de la marca se descarta de más.
-- `--allow-inspector` le deja al programa usar `node:inspector` (con `--sandbox` solo,
-  `inspector.open()` escucha en un puerto local).
+- `--allow-inspector` (las corridas con el sensor de violaciones, oxc, y las de la cobertura de
+  los re-chequeos, también swc) le deja al programa abrir una sesión del inspector **en su propio
+  proceso** (`new inspector.Session()`), que node avisa que "puede invalidar el modelo de
+  permisos". Abrir un **puerto** no: medido con node 24.14.1, sin más que `--allow-inspector` un
+  programa lo abre con `inspector.open()`, `inspector/promises.open()`, `process._debugProcess()`
+  o SIGUSR1; `--disable-sigusr1` corta los dos últimos y el preload cambia `open` por una función
+  que niega (`ERR_ACCESS_DENIED`) y marca el sandbox. `NODE_V8_COVERAGE` (cobertura sin
+  inspector) no sirve: con `--permission` node no escribe nada (medido, con y sin
+  `--allow-fs-write` sobre el directorio).
 - Los comandos `repro_original:`/`repro_minificado:` de `meta.txt` no llevan las flags del
   sandbox.
 - Con `--sandbox` (y `--sandbox-red`), node se lanza con `fork` + `exec` en vez de
@@ -376,31 +384,66 @@ Principios:
     `[Symbol.toPrimitive]` pasan por un interruptor del preload; `"use sloppy"` contra
     `"use strict"`, del mismo largo), y las dos coberturas tienen que coincidir. Si el minifier
     aprovechó la asunción, en B ya no queda nada que dependa de ella y el camino no cambia. Si
-    cambia (o no se puede ver), inconcluso: `div/`. Cuesta 2 ejecuciones de node más (y una
-    instrumentación del minificado con SWC para `with` y coerción), solo cuando todo lo demás
-    ya daba `Explica`.
+    cambia (o no se puede ver), inconcluso: `div/`. La cobertura de V8 no separa el lado derecho
+    de `&&=`/`||=`/`??=` ni los valores por defecto de parámetros y desestructuraciones (medido
+    con node 24.14.1; oxc arma `t&&=e=...` de un `if (t) t = (e = ...)`): B corre con un contador
+    delante de cada uno, y las cuentas entran a la comparación. Los scripts de `vm` también
+    cuentan.
+  - el camino no ve una dependencia **por datos**: la asunción elige un índice, una clave o un
+    valor y B recorre el mismo código con y sin ella (`["", bug][+(typeof window > "u")]`). Por
+    eso, en esas mismas corridas, un **sensor de uso**: B no tiene que tocar la asunción. Toca
+    `global_conocido` si lee el global (`typeof window` también; con los stubs, cada uno es un
+    accessor que anota), `with` si un nombre resuelve en el objeto (un Proxy), `builtins` si lee
+    un built-in después de pisarlo (accessor), `coercion` si llama a un helper (el principio de
+    cada uno anota; un valor que no es una función literal, como `Array.prototype.join`, va
+    envuelto) y solo sloppy si una función sloppy recibe un `this` que sloppy cambia (en la
+    corrida en estricto). Si lo toca, inconcluso; si no se pudo sensar (un built-in redefinido o
+    borrado), también. El contenido fijo ya no fija el texto de una función nativa
+    (`function max() { [native code] }`): es el mismo en A y en B.
+  - para contenido y solo sloppy, que no tienen un sensor de uso completo (el texto de una
+    función del programa es justo lo que lee un positivo como `String(f)`; el `arguments` atado a
+    los parámetros), un `Explica` se confirma con el original **salado**: cada literal de cadena
+    en posición de dato con `dz` al final, minificado igual, y el mismo re-chequeo tiene que dar
+    `Explica` también ahí (con otro valor por defecto la coincidencia se rompe). Sin literales que
+    salar, o si el salado no diverge, no cambia nada.
+
+    Cuesta, solo cuando todo lo demás ya daba `Explica`: 2 ejecuciones de node (en solo sloppy,
+    además, 1 o 2 `node --check`), una instrumentación del minificado con SWC y, para contenido y
+    solo sloppy con literales, 1 minificación y 2 node más el re-chequeo sobre el salado.
 
   En oxc todos los flags de su tabla tienen re-chequeo. En swc, `proxy`, `tdz`, `callee`,
   `redefine_global`, el backlog y la asunción por ruta (`issue_2719`) clasifican directo, sin
   re-chequeo.
 
-  **Límites conocidos** (lo que no se prueba): el re-chequeo compara salidas y el camino de B,
-  no el de A' contra el de B. Lo que cubre el chequeo del camino de B (medido con oxc 0.153.0):
-  los 11 programas de la revisión de la noche 2 (tdz, symbol, global_conocido, with,
-  solo_sloppy, builtins, coercion y profundidad; 72 filas de `known/` en 8 celdas) van a `div/`,
-  y de 99 variantes (11 familias × 9 valores por defecto: `""`, `undefined`, `[]`, `+=` de
-  números y de strings, `false`, `NaN`, `++` que no corre, un objeto sin la clave), de 476 filas
-  en `known/` quedan 32. Esas 32 son lo que no cubre: oxc pliega mal la condición de adentro
-  (`Number.isInteger(5e-324)`, `"abc".substring(1, undefined)`) y con eso borra la rama entera
-  (`if (typeof window === "undefined")`, la rama sloppy, el cuerpo del `with`); B ya no tiene
-  ninguna rama que dependa de la asunción y da el valor por defecto, como un minificado que
-  aprovechó la asunción. Desde las corridas de B no se distingue. Tampoco se cubre:
-  - la cobertura cuenta los scripts del programa (y los de `eval`), no lo que corre en un
-    listener de `exit` que el programa registra, en workers ni en procesos hijos;
+  **Límites conocidos** (lo que no se prueba): el re-chequeo compara salidas, el camino de B y si
+  B toca la asunción; no el camino de A' contra el de B. El chequeo es de control y de uso, no de
+  flujo de datos completo. Medido con oxc 0.153.0 (8 celdas): los 11 programas de la revisión de
+  la noche 2, los 4 de `&&=`/`||=`/valor por defecto y los 6 de dependencia por datos de la
+  revisión de 7.1 (H1, H2) van a `div/`; de 75 variantes propias (12 familias × 6 formas: tabla,
+  clave, `&&=`, `||=`, valor por defecto, rama; más 3 de `with`) y 18 más (3 familias × 6: texto de función y
+  `.stack` elegidos por datos sin `&&`, un valor por defecto que no es literal), lo que queda en
+  `known/` son positivos (B no corre el bug: con los nombres mangleados la condición sobre el
+  `.stack` ya es falsa en B). Lo que no cubre:
+  - el pliegue que borra la rama (de las 99 variantes de 7.1 quedan 24 filas de 656: `global` y
+    `with` × contador y objeto): oxc pliega mal la condición de adentro (`Number.isInteger(5e-324)`,
+    `"abc".substring(1, undefined)`) y borra la rama entera; B ya no toca la asunción y da el valor
+    por defecto, como un minificado que la aprovechó. Desde B no se distingue.
+  - una dependencia por datos de una asunción sin sensor de uso completo cuyo valor por defecto
+    no sale de un literal de cadena: el `arguments` atado o el texto de una función del programa
+    elegidos por datos contra un valor calculado (`[].join()`); la sal no lo cambia. En las
+    variantes medidas, todas las de esas familias usan literales y van a `div/`.
+  - el sensor de uso de `global_conocido` ve lecturas (`typeof`, `window`, `globalThis.window`),
+    no `"window" in globalThis` ni `hasOwnProperty`; el de `builtins`, lecturas después de pisar
+    (si el programa redefine o borra la propiedad, inconcluso); el de coerción, las definiciones
+    que ve `neutralize_coercion` (no la forma abreviada `{ valueOf }`, que ya es inconclusa); el de
+    sloppy, solo el `this`.
+  - la cobertura no ve lo que corre en un listener de `exit` que el programa registra (el sensor
+    de uso sí: anota hasta el final), en workers ni en procesos hijos. Los scripts de `vm` sí.
   - un programa cuyo camino cambia entre dos corridas del mismo texto (reloj, `Math.random`,
     GC) da otra cobertura: va a `div/` aunque sea una asunción, igual que un B que cambia de
-    camino con la neutralización sin que se vea en la salida (en el corpus de SWC, la
-    aceptación y el golden no hay ninguno: ningún caso cambió de destino);
+    camino o toca la asunción sin que se vea en la salida. En el corpus de SWC (7 celdas), la
+    aceptación, el golden y los 14 corpus adversariales ningún caso cambió de destino respecto
+    de 7.1 ni de fe0cd86.
   - sin el sensor entero en B (`sensor_caido`, `sensor_tope`), los re-chequeos de las
     violaciones y de `extends` quedan inconclusos (cuando A o B pasan el tope, el camino de B
     sale de otra corrida de B con el sensor y un tope mayor, que tiene que tomar el mismo camino
@@ -439,9 +482,11 @@ Principios:
   256 excepciones atrapadas ya no va a `div/` si su violación cae entre las primeras 256 pausas.
   El camino de B, que no es simétrico (sale de una corrida con el sensor), se mira solo cuando
   todo lo demás ya da `Explica`: B corre otra vez con el sensor y un tope de 4096 pausas, y otra
-  sin el sensor, las dos con la cobertura de bloques de V8; cuenta solo si la corrida con el sensor
-  es entera, da lo mismo que B y tiene la misma cobertura que la de sin el sensor (un programa que
-  nota el sensor y cambia de camino no pasa). Si no, el camino no se sabe y va a `div/`
+  sin el sensor, las dos con la cobertura de bloques de V8 y sobre el minificado con los contadores
+  de rama (los mismos que los demás caminos por cobertura: V8 no separa el lado derecho de `&&=`
+  ni un valor por defecto); cuenta solo si la corrida con el sensor es entera, da lo mismo que B y
+  tiene la misma cobertura que la de sin el sensor (un programa que nota el sensor y cambia de
+  camino no pasa, tampoco si el cambio está solo en el lado derecho de un `&&=`). Si no, el camino no se sabe y va a `div/`
   (inconcluso). Cuesta 2 node más, uno de ellos con el sensor y hasta 4096 pausas: con muchos
   marcos puede llegar al timeout (y entonces node se repite sin el sensor, un node más) y el
   positivo se pierde. Una violación de A atrapada después del tope no se ve: el caso va a `div/`.
@@ -476,8 +521,8 @@ Sin `node` en el `PATH`, los tests que lo necesitan fallan con un mensaje claro.
 
 - **Golden de detección** (`tests/golden/`): 16 casos con bugs conocidos de oxc y swc, en 8
   celdas, más `--invocar` y `--stubs`; la clase esperada de cada caso está en `esperado.tsv`.
-- **Aceptación de los re-chequeos** (`tests/aceptacion/rechequeos/`): 111 casos que combinan un
-  bug real de oxc con un flag de asunción, en las 4 celdas de oxc (444 comparaciones).
+- **Aceptación de los re-chequeos** (`tests/aceptacion/rechequeos/`): 127 casos que combinan un
+  bug real de oxc con un flag de asunción, en las 4 celdas de oxc (508 comparaciones).
 
 ```sh
 tests/golden/verificar.sh --jobs 4                    # sale con 0 y "comparaciones=N fallas=0"

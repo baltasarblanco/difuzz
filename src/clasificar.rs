@@ -154,7 +154,15 @@ pub fn clasificar<'a>(
             // t-principio: que A dependa del contenido no dice que la divergencia venga
             // de ahi (a03/a04: un bug ajeno al lado iba a known/). A' y B' con el
             // contenido fijo, y `veredicto`.
-            match recheck::contenido_matters(runner, original, minified, a, b, &salted) {
+            // b7-1b (revision 7.1, H2, opcion (c)): sin sensor de uso para el texto de una funcion
+            // del programa (17-tostring-positivo lo usa), un Explica se confirma salado.
+            let r = match (recheck::contenido_matters(runner, original, minified, a, b, &salted), ctx.medido) {
+                (recheck::Recheck::Explica, Some(m)) => recheck::con_literales_salados(runner, (m.minifier, m.preset, m.kind), original, |o2, m2, a2, b2| {
+                    recheck::contenido_matters(runner, o2, m2, a2, b2, &runner.run_salted(o2))
+                }),
+                (r, _) => r,
+            };
+            match r {
                 recheck::Recheck::Explica => {
                     traza.paso("contenido", "Explica (A depende del contenido y con el contenido fijo la divergencia desaparece)")
                 }
@@ -194,7 +202,7 @@ pub fn clasificar<'a>(
     let a_otra_vez = || runner.run(original);
     // b7-1 (r04: B todavia llega al limite de la pila y corre el catch con el bug): B con la
     // pila de siempre y con mas pila, con cobertura.
-    let camino = |b2: &runner::Exec| recheck::camino_entorno(runner, minified, b, b2, (&[runner::DEEP_STACK], &[]));
+    let camino = |b2: &runner::Exec| recheck::camino_entorno(runner, minified, b, b2, (&[runner::DEEP_STACK], &[]), &[]);
     match depth_recheck(a, b, &deep, a_otra_vez, || runner.run_with_args(minified, &[runner::DEEP_STACK]), camino) {
         None => traza.paso("profundidad", "no aplica (A con mas pila da lo mismo, o la corrida honda fallo)"),
         Some(recheck::Recheck::Explica) => {
@@ -290,7 +298,26 @@ pub fn clasificar<'a>(
     // M17: solo si la politica del backend lo pide y en el carril A (sloppy).
     let sloppy = ctx.medido.filter(|m| m.kind == minify::SourceKind::Script).and_then(|m| Some((m, m.minifier.politica().solo_sloppy?)));
     if let (None, Some((m, razon))) = (&why, sloppy) {
-        match sloppy_only(runner, (m.minifier, m.preset), original, minified, a, b) {
+        // b7-1b (revision 7.1, H2, opcion (c)): el sensor de uso de sloppy solo ve el `this`; un
+        // Explica por el estricto (`Si`, `SiRenombrando`) se confirma con los literales salados.
+        let s = match sloppy_only(runner, (m.minifier, m.preset), original, minified, a, b) {
+            Ok(si @ (Sloppy::Si | Sloppy::SiRenombrando)) => {
+                let r = recheck::con_literales_salados(runner, (m.minifier, m.preset, m.kind), original, |o2, m2, a2, b2| {
+                    match sloppy_only(runner, (m.minifier, m.preset), o2, m2, a2, b2) {
+                        Ok(Sloppy::No) => recheck::Recheck::NoExplica,
+                        Ok(_) => recheck::Recheck::Explica,
+                        Err(n) => recheck::Recheck::Inconcluso(n),
+                    }
+                });
+                match r {
+                    recheck::Recheck::Explica => Ok(si),
+                    recheck::Recheck::NoExplica => Err("re-chequeo sloppy inconcluso: con los literales salados ya no explica".into()),
+                    recheck::Recheck::Inconcluso(n) => Err(format!("re-chequeo sloppy inconcluso: {n}")),
+                }
+            }
+            otro => otro,
+        };
+        match s {
             Ok(Sloppy::Si) => {
                 flags.push("solo_sloppy");
                 why = Some(razon.into());
@@ -779,6 +806,48 @@ mod tests {
         assert!(s.as_ref().is_err_and(|n| n.contains("B != A'")), "{s:?}");
     }
 
+    /// b7-1b (revision 7.1, H1/H2), con node y oxc: la rama sloppy con el bug deja el valor por
+    /// defecto y B elige ese valor por el `this` de sloppy (d07: el sensor de uso), por un `&&=`
+    /// que oxc arma de un `if` (los contadores de rama) o por el `arguments` atado como dato (la
+    /// opcion (c): con los literales salados B != A'). Antes, Explica.
+    #[test]
+    fn solo_sloppy_dependencia_por_datos() {
+        use super::{sloppy_only, Sloppy};
+        use crate::{backend::Minifier, minify, minify::Preset, recheck, runner};
+        if !crate::test_util::requiere_node() {
+            return;
+        }
+        let preload = runner::Preload::write_tagged("b71b-sloppy").unwrap();
+        let r = runner::Runner::new(&preload, crate::test_util::id_runner(), std::time::Duration::from_secs(20));
+        let rc = (Minifier::Oxc, Preset::CarrilA);
+        let ab = |src: &str| {
+            let cfg = Preset::CarrilA.build(Minifier::Oxc, minify::SourceKind::Script);
+            let minify::Outcome::Ok { original, minified, .. } = minify::prepare(src, &cfg) else {
+                panic!("no minifica: {src}");
+            };
+            let (a, b) = (r.run(&original), r.run(&minified));
+            assert_eq!((a.stdout.as_str(), b.stdout.as_str()), ("\"bc\"\n", "\"\"\n"), "oxc ya no pliega mal substring: buscar otro bug\n{minified}");
+            (original, minified, a, b)
+        };
+        let bug = "\"abc\".substring(1, undefined)";
+        let (o, m, a, b) = ab(&format!("var t = [\"\", {bug}];\nconsole.log(JSON.stringify(t[+((function () {{ return this; }})() !== undefined)]));\n"));
+        let s = sloppy_only(&r, rc, &o, &m, &a, &b);
+        assert!(s.as_ref().is_err_and(|n| n.contains("B usa la asuncion: sloppy this")), "d07: {s:?}");
+        let (o, m, a, b) = ab(&format!("function al(a) {{ arguments[0] = 2; return a; }}\nlet s = \"\";\nlet u = al(1) === 2;\nif (u) u = (s = {bug});\nconsole.log(JSON.stringify(s));\n"));
+        assert!(m.contains("&&="), "oxc ya no arma `&&=`: {m}");
+        let s = sloppy_only(&r, rc, &o, &m, &a, &b);
+        assert!(s.as_ref().is_err_and(|n| n.contains("cobertura de bloques")), "sloppy-args-andasig: {s:?}");
+        // El `arguments` atado como dato: ni el camino ni el sensor lo ven (Si); con la sal, no.
+        let (o, m, a, b) = ab(&format!("function al(a) {{ arguments[0] = 2; return a; }}\nconst t = [\"\", {bug}];\nconsole.log(JSON.stringify(t[+(al(1) === 2)]));\n"));
+        assert_eq!(sloppy_only(&r, rc, &o, &m, &a, &b), Ok(Sloppy::Si), "sloppy-args-tabla sin la sal");
+        let c = recheck::con_literales_salados(&r, (rc.0, rc.1, minify::SourceKind::Script), &o, |o2, m2, a2, b2| match sloppy_only(&r, rc, o2, m2, a2, b2) {
+            Ok(Sloppy::No) => recheck::Recheck::NoExplica,
+            Ok(_) => recheck::Recheck::Explica,
+            Err(n) => recheck::Recheck::Inconcluso(n),
+        });
+        assert!(matches!(c, recheck::Recheck::Inconcluso(ref n) if n.contains("literales salados")), "sloppy-args-tabla salado: {c:?}");
+    }
+
     /// R2-H10: un original que liga `arguments` no compila en estricto. El
     /// re-chequeo sloppy lo prueba con el binding renombrado y el mismo
     /// veredicto: el caso del corpus pasa a "solo sloppy"; un bug real al lado
@@ -1084,6 +1153,9 @@ mod tests {
             ("t02-5000", t02_5000, (0, 1), "tampoco corrio entero (sensor_tope)"),
             ("i01", leer("23-i01-sensor-detectado-tope-b"), (0, 1), "con el sensor B toma otro camino que sin el"),
             ("i02", leer("23-i02-sensor-detectado-b-entero"), (0, 1), "con el sensor B toma otro camino que sin el"),
+            // Integracion 7.1b: el cambio de camino esta solo en el lado derecho de un `&&=` (la cobertura
+            // de V8 no lo separa); lo separan los contadores de rama de 7.1b.
+            ("i03", leer("23-i03-sensor-detectado-andasig"), (0, 1), "con el sensor B toma otro camino que sin el"),
         ] {
             let minify::Outcome::Ok { original, minified, .. } = minify::prepare(&src, &cfg) else { panic!("no minifica") };
             let a = r.run(&original);

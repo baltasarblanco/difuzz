@@ -494,6 +494,11 @@ impl Runner {
         self
     }
 
+    /// b7-1b: script o modulo (lo que corre este runner), para instrumentar el minificado.
+    pub fn kind(&self) -> SourceKind {
+        self.kind
+    }
+
     /// M12: `--invocar` tambien en el envoltorio de modulos (carril B).
     pub fn with_invocar(mut self, invocar: bool) -> Runner {
         self.invocar = invocar;
@@ -1016,6 +1021,10 @@ fn permisos_node(r: &Runner, sensor: bool) -> Vec<std::ffi::OsString> {
     v.push(flag("--allow-fs-write=", &r.ctl));
     if sensor {
         v.push("--allow-inspector".into());
+        // b7-1b (revision 7.1, H5): con el inspector permitido, el programa podria abrir un
+        // puerto con `process._debugProcess` o SIGUSR1 (MEDIDO, node 24.14.1); esto los corta
+        // (MEDIDO). `inspector.open` lo niega el preload.
+        v.push("--disable-sigusr1".into());
     }
     v
 }

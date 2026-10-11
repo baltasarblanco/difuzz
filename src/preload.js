@@ -304,6 +304,38 @@
   // toString y el mismo .stack para cualquier codigo, asi A' y B' no dependen del texto.
   const FIJO = process.env.DIFUZZ_SALT === 'fijo';
   delete process.env.DIFUZZ_SALT;
+  // b7-1b: corrida con cobertura (recheck::camino_*): la cobertura de bloques (al final), los
+  // ganchos del minificado instrumentado y el sensor de uso (antes de la foto de globals).
+  const COBERTURA = process.env.DIFUZZ_COBERTURA === '1';
+  delete process.env.DIFUZZ_COBERTURA;
+  // Las cuentas de `__difuzzNeutroRama` (abajo), para el hash de la cobertura.
+  let cuentasDeRamas = null;
+  // b7-1b: lo que usan los ganchos, tomado antes de que corra el programa (corren en medio
+  // del programa, que puede pisar los built-ins).
+  const aplicar = Reflect.apply;
+  const construir = Reflect.construct;
+  const tiene = Reflect.has;
+  const ObjetoReal = Object;
+  const definir = Object.defineProperty;
+  const strEndsWith = String.prototype.endsWith;
+  const strStartsWith = String.prototype.startsWith;
+  const termina = (s, x) => aplicar(strEndsWith, s, [x]);
+  const empieza = (s, x) => aplicar(strStartsWith, s, [x]);
+  // b7-1b (revision 7.1, H2): sensor de uso. `uso <que>`: B toco la asuncion (leyo el global
+  // conocido, resolvio un nombre en el objeto de un `with`, llamo a un helper de coercion, leyo
+  // un built-in despues de pisarlo, uso el `this` de sloppy); `uso? <que>`: no se pudo sensar.
+  // recheck::comparar_caminos: con cualquiera de las dos, B no es concluyente. Sin repetir y con
+  // tope (16): con una alcanza.
+  const usos = Object.create(null);
+  let nUsos = 0;
+  const marcarUso = (s) => {
+    if (usos[s] === true || nUsos >= 16) return;
+    usos[s] = true;
+    nUsos++;
+    ctl(s);
+  };
+  const uso = (s) => marcarUso(`uso ${s}`);
+  const usoNoSensado = (s) => marcarUso(`uso? ${s}`);
 
   // Node usa primordials internos: console.log(f) no pasa por aca, solo el programa.
   const realToString = Function.prototype.toString;
@@ -313,7 +345,11 @@
         flags.add('fn_tostring');
         // 7.2: `process._kill` envuelto se ve como el nativo.
         const s = realToString.call(killPropio !== null && this === killPropio ? killReal : this);
-        if (FIJO) return 'function () { [native code] }';
+        // b7-1b (revision 7.1, H2 d05): el texto de una funcion nativa (`function max() {
+        // [native code] }`) es el mismo en A y en B: el minifier no lo cambia y la asuncion no
+        // habla de el. Fijarlo hacia que un programa que elige un valor por ese texto diera en
+        // A' otro valor, que podia coincidir con el del bug en B. Queda el de verdad.
+        if (FIJO) return termina(s, '{ [native code] }') ? s : 'function () { [native code] }';
         return SALT ? `${s}/*dz*/` : s;
       },
     }.toString,
@@ -763,7 +799,25 @@
       for (const n of names.split(',')) {
         try {
           if (n && !(n in globalThis)) {
-            Object.defineProperty(globalThis, n, { value: stub(n), writable: true, configurable: true, enumerable: false });
+            if (COBERTURA) {
+              // b7-1b (revision 7.1, H2 d01): con cobertura (el camino de B con los stubs), un
+              // accessor que anota cada lectura: `typeof window` o `window` en B es uso de la
+              // asuncion aunque B no cambie de camino. Las escrituras se leen de vuelta.
+              let v = stub(n);
+              Object.defineProperty(globalThis, n, {
+                get() {
+                  uso(`global ${n}`);
+                  return v;
+                },
+                set(x) {
+                  v = x;
+                },
+                configurable: true,
+                enumerable: false,
+              });
+            } else {
+              Object.defineProperty(globalThis, n, { value: stub(n), writable: true, configurable: true, enumerable: false });
+            }
           }
         } catch {}
       }
@@ -776,15 +830,65 @@
   // uno sin propiedades (cada nombre resuelve afuera, como `{ o; S; }`) y la clave de un
   // helper de coercion pasa a `__dz_<nombre>` (como neutralize_coercion). Antes de la foto
   // de globals: no son globals del programa. Sin la variable no se define nada.
+  // b7-1b (revision 7.1, H1/H2): con DIFUZZ_COBERTURA=1, ademas, los ganchos que pone en el
+  // minificado recheck::instrumentar_* y el sensor de uso:
+  //   - `__difuzzNeutroRama(i)`: cuenta cada vez que corre una parte condicional que la
+  //     cobertura de V8 no separa (el lado derecho de `&&=`/`||=`/`??=`, el valor por defecto
+  //     de un parametro o de una desestructuracion: MEDIDO, node 24.14.1); las cuentas entran
+  //     al hash de la cobertura (abajo).
+  //   - con DIFUZZ_NEUTRO=0, el objeto de cada `with` pasa a un Proxy que anota cada nombre que
+  //     resuelve en el (`uso with <nombre>`); con 1, como antes. Un Proxy cambia el `this` de una
+  //     funcion llamada por un nombre del `with`, pero eso ya es uso.
+  //   - `__difuzzNeutroUso(k)` (al principio del cuerpo de cada helper de coercion definido como
+  //     funcion) y `__difuzzNeutroValor(v, k)` (envuelve el valor de los demas: si es una
+  //     funcion, tambien nativa, la llamada se anota): `uso coercion <k>`, salvo con
+  //     DIFUZZ_NEUTRO=1 (ahi la clave ya es otra y la coercion no los llama).
+  //   - `__difuzzNeutroThis(this)` (al principio de cada funcion sloppy que usa `this`): en la
+  //     corrida en estricto, un `this` que sloppy hubiera cambiado (undefined, null, primitivo)
+  //     es `uso sloppy this`. En sloppy nunca lo es.
   {
     const neutro = process.env.DIFUZZ_NEUTRO;
     delete process.env.DIFUZZ_NEUTRO;
+    const def = (k, v) => Object.defineProperty(globalThis, k, { value: v, writable: false, configurable: false, enumerable: false });
+    const PROPIO = '__difuzzNeutro';
     if (neutro === '0' || neutro === '1') {
       const n = neutro === '1';
-      const def = (k, v) => Object.defineProperty(globalThis, k, { value: v, writable: false, configurable: false, enumerable: false });
       try {
-        def('__difuzzNeutroWith', (o) => (n ? Object.create(null) : o));
+        def('__difuzzNeutroWith', (o) => {
+          if (n) return Object.create(null);
+          if (!COBERTURA || o === null || o === undefined) return o;
+          return new RealProxy(ObjetoReal(o), {
+            has(t, k) {
+              const h = tiene(t, k);
+              if (h && !(typeof k === 'string' && empieza(k, PROPIO))) uso(`with ${typeof k === 'string' ? k : 'symbol'}`);
+              return h;
+            },
+          });
+        });
         def('__difuzzNeutroClave', (k) => (n ? `__dz_${typeof k === 'symbol' ? 'toPrimitive' : k}` : k));
+      } catch {}
+    }
+    if (COBERTURA) {
+      const sinUso = neutro === '1';
+      const ramas = Object.create(null);
+      cuentasDeRamas = ramas;
+      try {
+        def('__difuzzNeutroRama', (i) => {
+          ramas[i] = (ramas[i] | 0) + 1;
+        });
+        def('__difuzzNeutroUso', (k) => {
+          if (!sinUso) uso(`coercion ${k}`);
+        });
+        def('__difuzzNeutroValor', (v, k) => {
+          if (sinUso || typeof v !== 'function') return v;
+          return function () {
+            uso(`coercion ${k}`);
+            return new.target ? construir(v, arguments, new.target) : aplicar(v, this, arguments);
+          };
+        });
+        def('__difuzzNeutroThis', (t) => {
+          if (t === undefined || t === null || (typeof t !== 'object' && typeof t !== 'function')) uso('sloppy this');
+        });
       } catch {}
     }
   }
@@ -879,6 +983,62 @@
           ctl(`builtin_no_fijado ${spec}`);
         }
       }
+    }
+  }
+  // b7-1b (revision 7.1, H2 d04): DIFUZZ_BUILTINS_USO=<lo mismo que FIJOS> (el camino de B con lo
+  // pisado libre, recheck::builtins_matter): cada propiedad pasa a un accessor configurable que
+  // guarda lo que el programa escribe y anota `uso builtins <spec>` en cada lectura DESPUES de una
+  // escritura (leer lo pisado es usar la asuncion, aunque B no cambie de camino: `[1].includes(2)`
+  // con `includes = Boolean`). Una escritura sobre otro objeto que hereda la propiedad crea la
+  // propiedad propia, como con un dato. Si el programa la redefine o la borra, o era un accessor,
+  // no se puede sensar: `uso? builtins <spec>` (al salir, o al instalarlo).
+  {
+    const specs = process.env.DIFUZZ_BUILTINS_USO;
+    delete process.env.DIFUZZ_BUILTINS_USO;
+    if (specs && COBERTURA) {
+      const instalados = [];
+      for (const spec of specs.split(',')) {
+        try {
+          const [id, ks] = spec.split(' ');
+          const o = objetoDe(id);
+          const k = leerClave(ks);
+          if (!o || k === undefined) throw new Error('sin objeto');
+          const d = Object.getOwnPropertyDescriptor(o, k);
+          if (d && !('value' in d)) throw new Error('accessor');
+          if (d && !d.configurable) throw new Error('no configurable');
+          let v = d ? d.value : undefined;
+          let pisado = false;
+          const get = function () {
+            if (pisado) uso(`builtins ${spec}`);
+            return v;
+          };
+          const set = function (x) {
+            if (this !== o) {
+              if (this !== null && (typeof this === 'object' || typeof this === 'function')) {
+                definir(this, k, { value: x, writable: true, enumerable: true, configurable: true });
+              }
+              return;
+            }
+            v = x;
+            pisado = true;
+          };
+          Object.defineProperty(o, k, { get, set, enumerable: d ? d.enumerable : false, configurable: true });
+          instalados.push([o, k, get, spec]);
+        } catch {
+          usoNoSensado(`builtins ${spec}`);
+        }
+      }
+      process.on('exit', () => {
+        for (let i = 0; i < instalados.length; i++) {
+          const x = instalados[i];
+          try {
+            const d = descriptorPropio(x[0], x[1]);
+            if (!d || d.get !== x[2]) usoNoSensado(`builtins ${x[3]}`);
+          } catch {
+            usoNoSensado(`builtins ${x[3]}`);
+          }
+        }
+      });
     }
   }
   // Lo pisado respecto de la foto: claves cambiadas, borradas o nuevas.
@@ -1353,9 +1513,31 @@
   // codigo del programa); los que registre el programa corren despues y no cuentan.
   // `takePreciseCoverage` contesta sincronico en el hilo principal (MEDIDO, node 24.14.1,
   // con salida normal, process.exit y throw no atrapado).
-  const conCobertura = process.env.DIFUZZ_COBERTURA === '1';
-  delete process.env.DIFUZZ_COBERTURA;
-  if (conCobertura) {
+  // b7-1b (revision 7.1, H4): los scripts de `vm` (url `evalmachine.<anonymous>` o el `filename`
+  // que se le da) tambien cuentan; afuera quedan este preload y los de node (`node:`). Y las
+  // cuentas de `__difuzzNeutroRama` (los ganchos de arriba) entran al hash.
+  //
+  // b7-1b (revision 7.1, H5): con --permission y --allow-inspector (el sensor y esta cobertura
+  // usan una sesion del inspector en el proceso), el programa podria abrir un puerto del
+  // inspector (MEDIDO, node 24.14.1: `inspector.open`, `inspector/promises.open`,
+  // `process._debugProcess` y SIGUSR1). Los dos ultimos los corta `--disable-sigusr1`
+  // (runner::permisos_node, MEDIDO); los dos primeros, esto: `open` niega como el modelo de
+  // permisos (ERR_ACCESS_DENIED) y anota `sandbox`, como un permiso negado. Las sesiones en el
+  // proceso (`inspector.Session`) siguen: es lo que usa el preload.
+  try {
+    if (conPermisos && process.permission.has('inspector')) {
+      const negar = () => {
+        ctl('sandbox');
+        const e = new Error('Access to this API has been restricted (difuzz: inspector.open)');
+        e.code = 'ERR_ACCESS_DENIED';
+        throw e;
+      };
+      for (const m of ['inspector', 'inspector/promises']) {
+        Object.defineProperty(require(m), 'open', { value: negar, writable: false, configurable: false, enumerable: true });
+      }
+    }
+  } catch {}
+  if (COBERTURA) {
     try {
       const PRELOAD_URL = require('url').pathToFileURL(__filename).href;
       const sesion = new (require('inspector').Session)();
@@ -1377,7 +1559,7 @@
             };
             for (const sc of res.result) {
               const url = typeof sc.url === 'string' ? sc.url : '';
-              if (url === PRELOAD_URL || (url !== '' && !url.startsWith('file:'))) continue;
+              if (url === PRELOAD_URL || url.startsWith('node:') || url.startsWith('difuzz-stub:')) continue;
               mezclar(`s${url}|`);
               for (const f of sc.functions || []) {
                 mezclar('f');
@@ -1386,6 +1568,10 @@
                   mezclar(`${r.startOffset},${r.endOffset},${r.count};`);
                 }
               }
+            }
+            if (cuentasDeRamas !== null) {
+              mezclar('r');
+              for (const i of Object.keys(cuentasDeRamas)) mezclar(`${i}:${cuentasDeRamas[i]};`);
             }
             const hex = (x) => (x >>> 0).toString(16).padStart(8, '0');
             ctl(`cobertura ${hex(h1)}${hex(h2)} ${rangos}`);

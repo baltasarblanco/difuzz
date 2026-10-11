@@ -521,3 +521,77 @@
 23-i02-sensor-detectado-b-entero	oxc-a-carril_a	div:Stdout
 23-i02-sensor-detectado-b-entero	oxc-b-core_defaults	div:Stdout
 23-i02-sensor-detectado-b-entero	oxc-b-carril_a	div:Stdout
+# Integracion 7.1b (b7-int/sensor-rhs a01): como i01, pero el programa nota el sensor con un `push` nativo atado (no
+# aparece en la cobertura) y cambia de camino solo en el lado derecho de un `&&=` (V8 no lo separa); el bug F queda en un
+# indice elegido por datos. Con paso F (cobertura sin contadores): known en las 4 celdas (MEDIDO). Con los contadores de
+# rama de 7.1b en las dos corridas de B (con y sin el sensor): div/.
+23-i03-sensor-detectado-andasig	oxc-a-core_defaults	div:Stdout
+23-i03-sensor-detectado-andasig	oxc-a-carril_a	div:Stdout
+23-i03-sensor-detectado-andasig	oxc-b-core_defaults	div:Stdout
+23-i03-sensor-detectado-andasig	oxc-b-carril_a	div:Stdout
+# b7-1b (revision 7.1, H1 y H2): mas formas en que B == A' es coincidencia y B corre el bug (substring). H1: oxc
+# arma `t&&=e=...` de un `if (t) t = (e = ...)`, y la cobertura de bloques de V8 no separa el lado derecho de
+# `&&=`/`||=`/`??=` ni los valores por defecto (h1-*: programas de rev-7.1/H1). H2: la asuncion elige un valor (un
+# indice, una clave, lo que devuelve un helper nativo o un built-in pisado, el texto de una funcion nativa, el
+# `this` de sloppy) y B recorre el mismo codigo con y sin ella (h2-*: rev-7.1/H2). Con el binario de 7.1 iban a
+# known/ en todas sus filas de carril A y B (MEDIDO, trabajo-10oct/b7-1b). Ahora: contadores de rama en el
+# minificado (h1, v-sloppy-args-andasig), sensor de uso (global, with, coercion, built-ins, this de sloppy), texto
+# nativo sin fijar (d05) y, para contenido y solo sloppy, la confirmacion con los literales salados
+# (v-sloppy-args-tabla, v-tostring-user3-tabla: el `arguments` atado y el texto de una funcion del programa como
+# dato). v-global-sinlit-tabla: el valor por defecto no es un literal (la sal no lo ve; el sensor de uso si).
+# En B, `with` no parsea (descarte) y lo sloppy no diverge (igual).
+23-b71b-h1-g05-andasig	oxc-a-core_defaults	div:Stdout
+23-b71b-h1-g05-andasig	oxc-a-carril_a	div:Stdout
+23-b71b-h1-g05-andasig	oxc-b-core_defaults	div:Stdout
+23-b71b-h1-g05-andasig	oxc-b-carril_a	div:Stdout
+23-b71b-h1-g05b-if-a-andasig	oxc-a-core_defaults	div:Stdout
+23-b71b-h1-g05b-if-a-andasig	oxc-a-carril_a	div:Stdout
+23-b71b-h1-g05b-if-a-andasig	oxc-b-core_defaults	div:Stdout
+23-b71b-h1-g05b-if-a-andasig	oxc-b-carril_a	div:Stdout
+23-b71b-h1-g05c-or-a-orasig	oxc-a-core_defaults	div:Stdout
+23-b71b-h1-g05c-or-a-orasig	oxc-a-carril_a	div:Stdout
+23-b71b-h1-g05c-or-a-orasig	oxc-b-core_defaults	div:Stdout
+23-b71b-h1-g05c-or-a-orasig	oxc-b-carril_a	div:Stdout
+23-b71b-h1-g15-param-default	oxc-a-core_defaults	div:Stdout
+23-b71b-h1-g15-param-default	oxc-a-carril_a	div:Stdout
+23-b71b-h1-g15-param-default	oxc-b-core_defaults	div:Stdout
+23-b71b-h1-g15-param-default	oxc-b-carril_a	div:Stdout
+23-b71b-h2-d01-global-tabla	oxc-a-core_defaults	div:Stdout
+23-b71b-h2-d01-global-tabla	oxc-a-carril_a	div:Stdout
+23-b71b-h2-d01-global-tabla	oxc-b-core_defaults	div:Stdout
+23-b71b-h2-d01-global-tabla	oxc-b-carril_a	div:Stdout
+23-b71b-h2-d02b-with-global	oxc-a-core_defaults	div:Stdout
+23-b71b-h2-d02b-with-global	oxc-a-carril_a	div:Stdout
+23-b71b-h2-d02b-with-global	oxc-b-core_defaults	descarte:parse_script
+23-b71b-h2-d02b-with-global	oxc-b-carril_a	descarte:parse_script
+23-b71b-h2-d03-coercion-nativa	oxc-a-core_defaults	div:Stdout
+23-b71b-h2-d03-coercion-nativa	oxc-a-carril_a	div:Stdout
+23-b71b-h2-d03-coercion-nativa	oxc-b-core_defaults	div:Stdout
+23-b71b-h2-d03-coercion-nativa	oxc-b-carril_a	div:Stdout
+23-b71b-h2-d04-builtins-nativa	oxc-a-core_defaults	div:Stdout
+23-b71b-h2-d04-builtins-nativa	oxc-a-carril_a	div:Stdout
+23-b71b-h2-d04-builtins-nativa	oxc-b-core_defaults	div:Stdout
+23-b71b-h2-d04-builtins-nativa	oxc-b-carril_a	div:Stdout
+23-b71b-h2-d05-tostring-tabla	oxc-a-core_defaults	div:Stdout
+23-b71b-h2-d05-tostring-tabla	oxc-a-carril_a	div:Stdout
+23-b71b-h2-d05-tostring-tabla	oxc-b-core_defaults	div:Stdout
+23-b71b-h2-d05-tostring-tabla	oxc-b-carril_a	div:Stdout
+23-b71b-h2-d07-sloppy-tabla	oxc-a-core_defaults	div:Stdout
+23-b71b-h2-d07-sloppy-tabla	oxc-a-carril_a	div:Stdout
+23-b71b-v-global-sinlit-tabla	oxc-a-core_defaults	div:Stdout
+23-b71b-v-global-sinlit-tabla	oxc-a-carril_a	div:Stdout
+23-b71b-v-global-sinlit-tabla	oxc-b-core_defaults	div:Stdout
+23-b71b-v-global-sinlit-tabla	oxc-b-carril_a	div:Stdout
+23-b71b-v-sloppy-args-andasig	oxc-a-core_defaults	div:Stdout
+23-b71b-v-sloppy-args-andasig	oxc-a-carril_a	div:Stdout
+23-b71b-v-sloppy-args-tabla	oxc-a-core_defaults	div:Stdout
+23-b71b-v-sloppy-args-tabla	oxc-a-carril_a	div:Stdout
+23-b71b-v-tostring-user3-tabla	oxc-a-core_defaults	div:Stdout
+23-b71b-v-tostring-user3-tabla	oxc-a-carril_a	div:Stdout
+23-b71b-v-tostring-user3-tabla	oxc-b-core_defaults	div:Stdout
+23-b71b-v-tostring-user3-tabla	oxc-b-carril_a	div:Stdout
+# b7-1b (rev-int H3): q02 con la linea elegida por datos; con 7.5 + 7.1b, div/ por la confirmacion salada del contenido (MEDIDO sobre paso E + incremental). Sin 7.5 (fe0cd86 + 7.1b) es igual: el marco se normaliza.
+23-b71b-q02t-marco-forjado-tabla	oxc-a-core_defaults	div:Stdout
+23-b71b-q02t-marco-forjado-tabla	oxc-a-carril_a	div:Stdout
+23-b71b-q02t-marco-forjado-tabla	oxc-b-core_defaults	div:Stdout
+23-b71b-q02t-marco-forjado-tabla	oxc-b-carril_a	div:Stdout

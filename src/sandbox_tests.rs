@@ -143,6 +143,20 @@ fn sandbox_con_sensor() {
     let e = r.run(&format!("try {{ require('fs').readFileSync({}); }} catch {{}}\nconsole.log(1);\n", js_str(&senuelo)));
     assert_eq!(e.stdout.trim(), "1");
     assert!(e.toco_sandbox(), "atrapado en silencio: {}", e.ctl);
+    // b7-1b (revision 7.1, H5): con `--allow-inspector` el programa no abre un puerto del
+    // inspector: `open` lo niega el preload (y marca), `_debugProcess` y SIGUSR1 los corta
+    // `--disable-sigusr1`. Lo mismo en una corrida con cobertura.
+    for m in ["inspector", "inspector/promises"] {
+        let (out, toco, _) = intento(&r, &format!("require('{m}').open(0, '127.0.0.1')"));
+        assert!(out.starts_with("err ERR_ACCESS_DENIED") && toco, "{m}: {out}");
+    }
+    for c in ["process._debugProcess(process.pid)", "process.kill(process.pid, 'SIGUSR1')"] {
+        // Con el sandbox, `_debugProcess` ademas lanza (lo niega el filtro de senales).
+        let js = format!("try {{ {c}; }} catch {{}}\nsetTimeout(() => console.log(String(require('inspector').url())), 300);\n");
+        for e in [r.run(&js), r.run_con_cobertura(&js, &[], &[])] {
+            assert_eq!(e.stdout.trim(), "undefined", "{c}: {:?} {}", e.status, e.ctl);
+        }
+    }
     drop(r);
     let _ = std::fs::remove_dir_all(&b);
 }

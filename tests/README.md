@@ -41,7 +41,7 @@ tests/golden/verificar.sh [--jobs N] [BINARIO] [DIR_SALIDA]
 
 ## Aceptación de los re-chequeos — `tests/aceptacion/rechequeos/`
 
-111 casos que combinan un bug real de oxc con un flag de asunción, en las 4 celdas de oxc (111 × 4 = 444
+127 casos que combinan un bug real de oxc con un flag de asunción, en las 4 celdas de oxc (127 × 4 = 508
 comparaciones): 21 de la revisión 1 (C4, `00-` a `10-`), 9 adversariales del revisor de la fase R (`r01` a
 `r10`, sin `r05`), `14-tdz-positivo`, 11 de los flags que antes no tenían re-chequeo (`15-` coerción, `16-`
 built-ins, `17-` contenido de `toString`/`.stack`, `18-` profundidad: positivos y adversariales con el Issue A),
@@ -52,10 +52,11 @@ positivos), 5 de `.stack` (`22-`, de n-ruido: el bug cambia nombre, cuenta u ord
 tope del sensor (`23-t`, ítem 7.4: 1000 excepciones atrapadas y una TDZ atrapada), 13 del valor por defecto
 (`23-b71-`, ítem 7.1: B == A' porque el bug deja justo el valor que la variable tiene cuando la rama de la
 violación no corre; el re-chequeo mira además el camino de B), 1 de los timers opacos (`23-b01-timer-repeat`,
-ítem 7.3: el bug solo se ve en `_repeat` de un timer cancelado) y 2 de la revisión de la integración (`23-i01`,
-`23-i02`: el programa nota el sensor por su `Error.prepareStackTrace` y solo sin él corre el bug). Los `19-`,
-`20-` y `22-` esperan `div/` en todas
-las celdas; los `21-` y `23-`, `div/` salvo los positivos.
+ítem 7.3: el bug solo se ve en `_repeat` de un timer cancelado) y 3 de la revisión de la integración (`23-i01`,
+`23-i02`, `23-i03`: el programa nota el sensor por su `Error.prepareStackTrace` y solo sin él corre el bug; en
+`23-i03`, solo en el lado derecho de un `&&=`) y 15 de
+7.1b (`23-b71b-`: lados de `&&=`/`||=`/defaults que la cobertura no separa, dependencia por datos, y `q02t`, la
+línea con forma de marco elegida por datos). Los `19-`, `20-` y `22-` esperan `div/` en todas las celdas; los `21-` y `23-`, `div/` salvo los positivos.
 Destino esperado en `esperado.tsv` (mismo formato que el golden). Reutiliza `tests/golden/verificar.sh`.
 Lo que la aceptación no cubre: un programa en que oxc pliega mal la condición y borra la rama entera de la
 violación (B no depende de la asunción y no se distingue de un minificado que la aprovechó; ver "Límites
