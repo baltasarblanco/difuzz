@@ -345,7 +345,9 @@ nombres de `util.inspect` sin borrar (parsear e imprimir no tiene por qué tocar
 cuelgan e imprimieron lo mismo, es `timeout`. Si difieren, no se da por diferente sin repetirlo: el
 crudo y A corren otra vez, dos veces cada uno y en fresco. Si alguno no se repite a sí mismo, o el A
 fresco no repite al A del caso, es `no_determinista` (si el A del caso terminó y los frescos se
-colgaron, antes se repiten con un timeout mayor, por si fue la carga); dos timeouts cuentan como
+colgaron, antes se repiten con un timeout mayor, por si fue la carga; si el A del caso salió de la
+caché y los frescos se repiten entre sí, la entrada es vieja: se lapida, como en la confirmación de
+A contra B, y sigue el A fresco); dos timeouts cuentan como
 repetidos aunque hayan impreso distinto, como en el oráculo. Si ahora coinciden, iguales (o
 `timeout`, si los dos se cuelgan). Si los dos se cuelgan y cada uno imprime siempre lo mismo antes
 de colgarse, pero no lo mismo que el otro, lo impreso es la diferencia y sigue (kind `Stdout`); si
@@ -419,7 +421,14 @@ el programa imprime en stdout, con los mismos límites que el oráculo: `console
 `[warn] ...`, `[trace] ...`), pero el stderr de node no, y de un `throw` o un rechazo no
 atrapados solo se compara el tipo (`!dz throw <Tipo>`), no el mensaje: un crudo y un A que
 lanzan el mismo tipo con otro mensaje dan iguales. Un bug del parser que hace que el texto no
-parsee (`descarte:parse_*`) no llega al chequeo.
+parsee (`descarte:parse_*`) no llega al chequeo. Si el crudo y A se cuelgan los dos e imprimen lo
+mismo (o algo que cambia entre corridas), no hay nada que comparar: cuentan en `timeout=`, sin
+directorio y con una línea por stderr (`crudo: los dos se cuelgan: <caso>`); es lo mismo que A
+contra B, que descarta un original que no termina, y un bug de codegen que no cambia lo impreso
+antes del cuelgue no se ve. Un timeout por carga en una sola de las corridas frescas (un lado
+que se cuelga en una y en la otra no, o un A del caso que no salió de la caché, se colgó y en
+fresco termina) da `no_determinista`, también con su línea por stderr (`crudo: no determinista
+...`), aunque la diferencia con el crudo fuera confirmable.
 
 ## Celdas
 
