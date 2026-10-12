@@ -269,6 +269,12 @@ pub fn tomar_nota_asserts() -> Option<NotaAsserts> {
     NOTA_ASSERTS.with(|n| n.borrow_mut().take())
 }
 
+/// 10.1c: deja `n` como la nota del caso en curso (`main::crudo_sin_perder_el_caso` restaura la
+/// que habia antes del chequeo del crudo).
+pub fn poner_nota_asserts(n: Option<NotaAsserts>) {
+    NOTA_ASSERTS.with(|x| *x.borrow_mut() = n);
+}
+
 thread_local! {
     /// M22: ubicacion del ultimo panic en este hilo (la escribe el hook de main).
     static PANIC_LOCATION: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };

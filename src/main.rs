@@ -1383,9 +1383,33 @@ fn process_case(
 /// `runner` (un error de difuzz), con una linea por stderr. Los contadores del chequeo se suman
 /// solo si termino; si no, `comparados`, `runner` y los aciertos de cache que ya hubo (la suma de
 /// `comparados` se mantiene). Lo que el chequeo ya hubiera escrito en codegen/ queda.
+///
+/// 10.1c (N2 de la revision A y M2 de la revision B de 10.1b): el estado por hilo del caso tambien
+/// queda aislado. El chequeo puede minificar (la sal de literales del paso `contenido`,
+/// `Lados::Crudo`) y analizar con SWC (`salar`, la instrumentacion de ramas): un debug_assert del
+/// backend ahi llenaba `minify::NOTA_ASSERTS` (`get_or_insert`, y el crudo corre antes que A contra
+/// B) y un fallo del analisis, `analisis::NOTAS`, y el caso contaba `solo_asserts`, iba a
+/// `asserts/` o llevaba la nota en su meta.txt (o sumaba `fallos_analisis`) por algo del crudo: A
+/// contra B dependia de `--crudo`. Ahora se guarda lo del caso antes, se restaura despues (tambien
+/// con panic), y lo que dejo el chequeo sale por stderr con el caso.
 fn crudo_sin_perder_el_caso(st: &mut CrudoStats, rel: &Path, chequeo: impl FnOnce(&mut CrudoStats)) {
+    let (asserts_caso, notas_caso) = (minify::tomar_nota_asserts(), analisis::tomar_notas());
     let mut propio = CrudoStats::default();
-    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| chequeo(&mut propio))) {
+    let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| chequeo(&mut propio)));
+    let (asserts_crudo, notas_crudo) = (minify::tomar_nota_asserts(), analisis::tomar_notas());
+    minify::poner_nota_asserts(asserts_caso);
+    analisis::poner_notas(notas_caso);
+    if let Some(n) = asserts_crudo {
+        eprintln!(
+            "crudo: el backend con debug assertions hizo panic con un texto del chequeo del crudo (el oraculo sin debug assertions minifico; no se atribuye al caso): {}: {}",
+            rel.display(),
+            n.panic.lines().next().unwrap_or_default()
+        );
+    }
+    for n in notas_crudo {
+        eprintln!("analisis de difuzz fallo en el chequeo del crudo de {}: {}", rel.display(), n.lines().next().unwrap_or_default());
+    }
+    match r {
         Ok(()) => st.merge(&propio),
         Err(_) => {
             st.comparados += 1;
@@ -2839,6 +2863,36 @@ mod tests {
             s.iguales += 1;
         });
         assert_eq!((st.comparados, st.iguales, st.codegen, st.runner), (2, 1, 0, 1));
+    }
+
+    /// 10.1c (N2/M2 de las revisiones de 10.1b): lo que el chequeo del crudo deja en el estado por
+    /// hilo (la nota de asserts y las notas del analisis) no queda en el caso, con panic o sin el;
+    /// lo que el caso ya tenia, si.
+    #[test]
+    fn el_crudo_no_deja_notas_al_caso() {
+        use crate::{analisis, minify};
+        let nota = |p: &str| minify::NotaAsserts { panic: p.into(), minificado: String::new() };
+        let rel = std::path::Path::new("x/input.js");
+        let _ = (minify::tomar_nota_asserts(), analisis::tomar_notas());
+        let mut st = super::CrudoStats::default();
+        super::crudo_sin_perder_el_caso(&mut st, rel, |s| {
+            s.comparados += 1;
+            s.iguales += 1;
+            minify::poner_nota_asserts(Some(nota("del crudo")));
+            analisis::registrar("crudo", "nota del crudo");
+        });
+        assert!(minify::tomar_nota_asserts().is_none());
+        assert!(analisis::tomar_notas().is_empty());
+        minify::poner_nota_asserts(Some(nota("del caso")));
+        analisis::registrar("caso", "nota del caso");
+        super::crudo_sin_perder_el_caso(&mut st, rel, |_| {
+            minify::poner_nota_asserts(Some(nota("del crudo")));
+            analisis::registrar("crudo", "nota del crudo");
+            panic!("prueba: panic en el chequeo del crudo");
+        });
+        assert_eq!(minify::tomar_nota_asserts().map(|n| n.panic).as_deref(), Some("del caso"));
+        assert_eq!(analisis::tomar_notas(), ["caso: nota del caso"]);
+        assert_eq!((st.comparados, st.iguales, st.runner), (2, 1, 1));
     }
 
     /// El aviso final nombra los directorios que de verdad tienen hallazgos:

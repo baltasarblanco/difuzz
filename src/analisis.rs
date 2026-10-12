@@ -115,6 +115,12 @@ pub fn tomar_notas() -> Vec<String> {
     NOTAS.with(|n| std::mem::take(&mut *n.borrow_mut()))
 }
 
+/// 10.1c: deja `v` como las notas del caso en curso (`main::crudo_sin_perder_el_caso` restaura
+/// las que habia antes del chequeo del crudo).
+pub fn poner_notas(v: Vec<String>) {
+    NOTAS.with(|n| *n.borrow_mut() = v);
+}
+
 fn forzar() {
     #[cfg(test)]
     if FORZAR.with(|f| f.get()) || std::env::var_os("DIFUZZ_TEST_PANIC_ANALISIS").is_some() {
