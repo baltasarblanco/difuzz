@@ -1515,8 +1515,10 @@ enum Crudo {
 ///    (`clasificar::paso_contenido`, el crudo como original y A como minificado): `Contenido`
 ///    solo si el crudo salado da otra salida, con el contenido fijo (DIFUZZ_SALT=fijo) el crudo
 ///    y A coinciden, A se comporta como el crudo fijo (o difiere solo en lineas que muestran
-///    contenido), la cobertura de A no cambia con el contenido fijo y la sal de literales lo
-///    confirma. Si no (o no se puede saber), sigue a `Codegen`.
+///    contenido), la cobertura de A no cambia con el contenido fijo y, si hay literales que
+///    salar, el mismo paso con los literales del crudo salados tambien da Explica (sin literales,
+///    `Salado::SinLiterales` cuenta como confirmado, como en A contra B). Si no (o no se puede
+///    saber), sigue a `Codegen`.
 fn comparar_crudo(
     ctx: &Ctx,
     runner: &runner::Runner,

@@ -341,20 +341,27 @@ Con `--crudo`, por cada caso difuzz corre además el **texto crudo** (el `input.
 aplicada, lo que lee el backend) con el mismo runner que A (mismo archivo, preload, sensor y
 sandbox), antes de cualquier descarte de A, y lo compara con A: el estado de salida y el stdout,
 con las posiciones de los marcos de stack borradas (al reimprimir cambian líneas y columnas) y los
-nombres de `util.inspect` sin borrar (parsear e imprimir no tiene por qué tocarlos). Si difieren,
-no se da por diferente sin repetirlo: el crudo y A corren otra vez, dos veces cada uno y en fresco
-(si alguno no se repite a sí mismo, `no_determinista`; dos timeouts cuentan como repetidos aunque
-hayan impreso distinto, como en el oráculo; si ahora coinciden, iguales; si los dos se cuelgan,
-`timeout`); un lado en timeout se repite con un timeout mayor, como B en la confirmación, y si
-sigue colgado (sea el crudo o A) va a `codegen/` con kind `Timeout`; si alguno no corrió entero
-con el sensor de violaciones, los dos sin él. Si el crudo leyó `Function.prototype.toString` o
+nombres de `util.inspect` sin borrar (parsear e imprimir no tiene por qué tocarlos). Si los dos se
+cuelgan e imprimieron lo mismo, es `timeout`. Si difieren, no se da por diferente sin repetirlo: el
+crudo y A corren otra vez, dos veces cada uno y en fresco. Si alguno no se repite a sí mismo, o el A
+fresco no repite al A del caso, es `no_determinista` (si el A del caso terminó y los frescos se
+colgaron, antes se repiten con un timeout mayor, por si fue la carga); dos timeouts cuentan como
+repetidos aunque hayan impreso distinto, como en el oráculo. Si ahora coinciden, iguales (o
+`timeout`, si los dos se cuelgan). Si los dos se cuelgan y cada uno imprime siempre lo mismo antes
+de colgarse, pero no lo mismo que el otro, lo impreso es la diferencia y sigue (kind `Stdout`); si
+lo impreso cambia entre corridas (un bucle que imprime), `timeout`. Un lado en timeout se repite
+con un timeout mayor, como B en la confirmación, y si sigue colgado (sea el crudo o A) va a
+`codegen/` con kind `Timeout`; si alguno no corrió entero con el sensor de violaciones, los dos sin
+él (cada uno con el timeout con el que terminó). Si el crudo leyó `Function.prototype.toString` o
 `.stack`, se aplica el mismo paso `contenido` que a A contra B (`clasificar::paso_contenido`, con
 el crudo como original y A como minificado): es `contenido` (la asunción de `toString` de oxc, no
 un hallazgo) solo si el crudo con otro contenido (salado) da otra salida, con el contenido fijo del
 preload el crudo y A coinciden, A se comporta como el crudo fijo (o difiere solo en líneas que
 muestran ese contenido: un `toString` impreso, un marco salvo la posición), la cobertura de A no
-cambia con el contenido fijo y la sal de literales lo confirma. Si no, o si no se puede saber,
-sigue a `codegen/` con el paso en `pasos:`. Así, un bug de codegen en una rama que depende del
+cambia con el contenido fijo y, si el crudo tiene literales en posición de dato, el mismo paso
+sobre el crudo con esos literales salados también lo explica (sin literales que salar no hay
+confirmación con la sal y alcanza con lo anterior, como en A contra B). Si no, o si no se puede
+saber, sigue a `codegen/` con el paso en `pasos:`. Así, un bug de codegen en una rama que depende del
 texto de `toString` o de `.stack`, o que solo se ve en un marco del stack, ya no se excusa (10.1b,
 MEDIDO con O8 de oxc 0.153.0: los tres repros de las revisiones de 10.1 van a `codegen/`). El
 precio, el mismo que en A contra B: un valor derivado del contenido (`String(f).length`,
@@ -375,10 +382,12 @@ crudo (10.1): comparados=N identicos=N iguales=N CODEGEN=N contenido=N no_determ
 ```
 
 `comparados = identicos + iguales + CODEGEN + contenido + no_determinista + timeout + runner`
-(`identicos`: el texto crudo ya es el impreso; `timeout`: los dos sin terminar; `runner`: error de
-difuzz con el crudo, también un panic de difuzz en el chequeo, que no corta la comparación de A
-con B del caso). El crudo se guarda en la caché de A (no depende del preset: lo comparten las
-celdas del mismo carril); `cache_hits` cuenta esos aciertos. Con `--indice`, cada `codegen/` es una
+(`identicos`: el texto crudo ya es el impreso; `timeout`: los dos sin terminar y nada estable que
+comparar; `runner`: error de difuzz con el crudo, también un panic de difuzz en el chequeo, que no
+corta la comparación de A con B del caso). El chequeo no toca el estado del caso: si su sal hace
+saltar un `debug_assert` del backend o falla un análisis de difuzz, sale por stderr con el caso y no
+llega a `asserts/`, al `meta.txt` de A contra B ni a `fallos_analisis` (10.1c). El crudo se guarda
+en la caché de A (no depende del preset: lo comparten las celdas del mismo carril); `cache_hits` cuenta esos aciertos. Con `--indice`, cada `codegen/` es una
 fila con destino `codegen`, y `--cruce` agrega `codegen=N` a los totales por celda (solo si alguna
 celda dejó uno). La celda no cambia de nombre.
 
