@@ -1334,7 +1334,7 @@ fn process_case(
     // 10.1: el crudo contra A antes de cualquier descarte de A: un codegen que rompe A lo
     // descartaria (`invalido`, `exit`) sin que nadie lo viera.
     if cli.crudo && !matches!(a.status, Status::Failed(_)) {
-        crudo_sin_perder_el_caso(&mut stats.crudo, rel, |st| chequeo_crudo(ctx, runner, st, rel, &src, &original, &a));
+        crudo_sin_perder_el_caso(&mut stats.crudo, rel, |st| chequeo_crudo(ctx, runner, st, rel, &src, &original, (&a, a_cached)));
     }
     if original_no_compila(runner, &a, &original) {
         stats.a_invalid += 1;
@@ -1430,7 +1430,8 @@ fn crudo_sin_perder_el_caso(st: &mut CrudoStats, rel: &Path, chequeo: impl FnOnc
 /// confirma; lo confirmado va a `codegen/` (`Reporter::codegen`). No cambia nada de lo que
 /// sigue: el caso se compara con B como siempre (un bug del minificador nunca se pierde por esto;
 /// tampoco con un panic aca: `crudo_sin_perder_el_caso`).
-fn chequeo_crudo(ctx: &Ctx, runner: &runner::Runner, st: &mut CrudoStats, rel: &Path, crudo: &str, original: &str, a: &runner::Exec) {
+/// `a`: el A del caso y si salio de la cache (10.1d).
+fn chequeo_crudo(ctx: &Ctx, runner: &runner::Runner, st: &mut CrudoStats, rel: &Path, crudo: &str, original: &str, a: (&runner::Exec, bool)) {
     st.comparados += 1;
     // El mismo texto es el mismo programa (no pasa: el codegen minify saca espacios).
     if crudo == original {
@@ -1439,7 +1440,11 @@ fn chequeo_crudo(ctx: &Ctx, runner: &runner::Runner, st: &mut CrudoStats, rel: &
     }
     match comparar_crudo(ctx, runner, &mut st.cache_hits, crudo, original, a) {
         Crudo::Igual => st.iguales += 1,
-        Crudo::Timeout => st.timeout += 1,
+        // 10.1d (R1 de la revision A de 10.1c): sin directorio, pero con rastro.
+        Crudo::Timeout => {
+            st.timeout += 1;
+            eprintln!("crudo: los dos se cuelgan: {}", rel.display());
+        }
         Crudo::Runner(e) => {
             st.runner += 1;
             eprintln!("runner (crudo): {e}");
@@ -1504,7 +1509,8 @@ enum Crudo {
 /// 2. si difieren: el crudo y A otra vez cada uno, dos veces y en fresco. Si alguno no se
 ///    repite a si mismo, o el A fresco no repite al del caso (10.1c; si el del caso termino y los
 ///    frescos se colgaron, antes se repiten con el timeout largo), `NoDeterminista` (la cache del
-///    crudo se lapida si fue ella); dos Timeout se repiten aunque hayan impreso distinto (10.1b).
+///    crudo se lapida si fue ella; 10.1d: si el A del caso salio de la cache y los frescos se
+///    repiten entre si, se lapida la entrada de A y sigue el fresco, como en `confirm`); dos Timeout se repiten aunque hayan impreso distinto (10.1b).
 ///    Si los dos frescos se cuelgan: `Timeout`, salvo que cada uno imprima siempre lo mismo antes
 ///    de colgarse y no sea lo mismo (10.1c), que sigue. Si los frescos coinciden, `Igual`;
 /// 3. un lado en Timeout y el otro no: se repite con `max(4 x timeout, 20 x elapsed del otro)`
@@ -1525,7 +1531,7 @@ fn comparar_crudo(
     hits: &mut usize,
     crudo: &str,
     original: &str,
-    a: &runner::Exec,
+    (a, a_cached): (&runner::Exec, bool),
 ) -> Crudo {
     let mismo = oracle::mismo_programa;
     let colgados = |x: &runner::Exec, y: &runner::Exec| x.status == Status::Timeout && y.status == Status::Timeout;
@@ -1566,7 +1572,14 @@ fn comparar_crudo(
             }
         }
     }
-    if !repite(&r1, &r2) || !repite(&a1, &a2) || !repite(a, &a1) {
+    // 10.1d (N1 de la revision B de 10.1c): un A del caso que salio de la cache y no repite a los
+    // frescos (que si se repiten entre si) es una entrada vieja, no un A no determinista: se lapida,
+    // como en `confirm`, y se sigue con el A fresco. Solo un A del caso fresco tiene que repetirse.
+    if a_cached && !repite(a, &a1) && repite(&a1, &a2) {
+        ctx.cache.tombstone(runner, original);
+        pasos.push("el A del caso salio de la cache y el fresco da otra cosa: se lapida la entrada de A y sigue el A fresco".into());
+    }
+    if !repite(&r1, &r2) || !repite(&a1, &a2) || (!a_cached && !repite(a, &a1)) {
         if r_cached && !repite(&r1, &r) {
             ctx.cache.tombstone(runner, crudo);
         }

@@ -412,6 +412,46 @@ fn crudo_timeout_es_timeout() {
     for n in ["pid", "marca"] {
         assert!(err(&o).contains(&format!("crudo: no determinista (el crudo o A no se repiten): {n}/")), "{n}: {}", err(&o));
     }
+    // 10.1d (R1 de la revision A de 10.1c): los dos colgados dejan rastro por stderr.
+    assert!(err(&o).contains("crudo: los dos se cuelgan: los-dos/"), "{}", err(&o));
+    std::fs::remove_dir_all(&b).unwrap();
+}
+
+/// 10.1d (N1 de la revision B de 10.1c): con `--cache`, un A del caso que sale de una entrada vieja
+/// (el programa lee un archivo que cambio entre corridas) y no repite a los A frescos, que si se
+/// repiten entre si, no hace `no_determinista` una diferencia confirmable: la entrada de A se lapida
+/// (como en `confirm`) y el crudo se compara con el A fresco. Antes de 10.1c seguia con el fresco;
+/// en 10.1c daba `no_determinista`.
+#[test]
+fn crudo_con_cache_vieja_de_a_sigue_con_el_fresco() {
+    if !test_util::requiere_node() {
+        return;
+    }
+    let b = base("crudo-cache-vieja");
+    let corpus = b.join("corpus");
+    let flag = b.join("flag.txt");
+    std::fs::write(&flag, "X").unwrap();
+    let src = format!(
+        "let h; (h) = function(){{}}; console.log(require(\"fs\").readFileSync({:?}, \"utf8\"), JSON.stringify(h.name));\n",
+        flag.to_str().unwrap()
+    );
+    caso(&corpus, "c1", src.as_bytes());
+    let cache = b.join("cache");
+    let correr = |out: &str| {
+        let out = b.join(out);
+        let o = difuzz(&b, &[corpus.to_str().unwrap(), "--out", out.to_str().unwrap(), "--cache", cache.to_str().unwrap(), "--jobs", "1", "--crudo"]);
+        assert_eq!(rc(&o), Some(0), "{}", err(&o));
+        let stdout = String::from_utf8_lossy(&o.stdout).into_owned();
+        let linea = stdout.lines().find(|l| l.starts_with("crudo (10.1): ")).unwrap_or_else(|| panic!("{stdout}")).to_string();
+        (linea, err(&o), out.join("oxc+carril_a+tal_cual/codegen/c1/meta.txt"))
+    };
+    let (linea, e, _) = correr("out1");
+    assert_eq!((campo(&linea, "CODEGEN"), campo(&linea, "no_determinista")), (1, 0), "{linea}\n{e}");
+    std::fs::write(&flag, "Y").unwrap();
+    let (linea, e, meta) = correr("out2");
+    assert_eq!((campo(&linea, "CODEGEN"), campo(&linea, "no_determinista"), campo(&linea, "cache_hits")), (1, 0, 1), "{linea}\n{e}");
+    let meta = std::fs::read_to_string(meta).unwrap();
+    assert!(meta.contains("se lapida la entrada de A y sigue el A fresco"), "{meta}");
     std::fs::remove_dir_all(&b).unwrap();
 }
 
