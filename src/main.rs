@@ -639,7 +639,8 @@ struct CrudoStats {
     no_determinista: usize,
     /// Los dos no terminaron a tiempo: nada que comparar.
     timeout: usize,
-    /// Falla del runner con el crudo (error de difuzz).
+    /// Falla del runner con el crudo, o panic de difuzz en el chequeo (`crudo_sin_perder_el_caso`):
+    /// un error de difuzz.
     runner: usize,
     /// Ejecuciones del crudo que salieron de la cache de A (ortogonal).
     cache_hits: usize,

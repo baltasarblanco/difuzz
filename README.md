@@ -343,11 +343,22 @@ sandbox), antes de cualquier descarte de A, y lo compara con A: el estado de sal
 con las posiciones de los marcos de stack borradas (al reimprimir cambian líneas y columnas) y los
 nombres de `util.inspect` sin borrar (parsear e imprimir no tiene por qué tocarlos). Si difieren,
 no se da por diferente sin repetirlo: el crudo y A corren otra vez, dos veces cada uno y en fresco
-(si alguno no se repite a sí mismo, `no_determinista`; si ahora coinciden, iguales); un lado en
-timeout se repite con un timeout mayor, como B en la confirmación; si alguno no corrió entero con
-el sensor de violaciones, los dos sin él; y si el programa leyó `Function.prototype.toString` o
-`.stack`, los dos con el contenido fijo del preload: si así coinciden, la diferencia es de ese
-contenido (la asunción de `toString` de oxc), `contenido`, no un hallazgo.
+(si alguno no se repite a sí mismo, `no_determinista`; dos timeouts cuentan como repetidos aunque
+hayan impreso distinto, como en el oráculo; si ahora coinciden, iguales; si los dos se cuelgan,
+`timeout`); un lado en timeout se repite con un timeout mayor, como B en la confirmación, y si
+sigue colgado (sea el crudo o A) va a `codegen/` con kind `Timeout`; si alguno no corrió entero
+con el sensor de violaciones, los dos sin él. Si el crudo leyó `Function.prototype.toString` o
+`.stack`, se aplica el mismo paso `contenido` que a A contra B (`clasificar::paso_contenido`, con
+el crudo como original y A como minificado): es `contenido` (la asunción de `toString` de oxc, no
+un hallazgo) solo si el crudo con otro contenido (salado) da otra salida, con el contenido fijo del
+preload el crudo y A coinciden, A se comporta como el crudo fijo (o difiere solo en líneas que
+muestran ese contenido: un `toString` impreso, un marco salvo la posición), la cobertura de A no
+cambia con el contenido fijo y la sal de literales lo confirma. Si no, o si no se puede saber,
+sigue a `codegen/` con el paso en `pasos:`. Así, un bug de codegen en una rama que depende del
+texto de `toString` o de `.stack`, o que solo se ve en un marco del stack, ya no se excusa (10.1b,
+MEDIDO con O8 de oxc 0.153.0: los tres repros de las revisiones de 10.1 van a `codegen/`). El
+precio, el mismo que en A contra B: un valor derivado del contenido (`String(f).length`,
+`stack.length`) da inconcluso y va a `codegen/` aunque solo difiera el texto.
 
 Lo confirmado va a `codegen/<caso>/`: `crudo.cjs` y `original.cjs` (`.mjs` en el carril B), lo que
 imprimió cada uno (`crudo.stdout`, `a.stdout`, ...) y un `meta.txt` con el `kind` (el crudo hace de
@@ -365,7 +376,8 @@ crudo (10.1): comparados=N identicos=N iguales=N CODEGEN=N contenido=N no_determ
 
 `comparados = identicos + iguales + CODEGEN + contenido + no_determinista + timeout + runner`
 (`identicos`: el texto crudo ya es el impreso; `timeout`: los dos sin terminar; `runner`: error de
-difuzz con el crudo). El crudo se guarda en la caché de A (no depende del preset: lo comparten las
+difuzz con el crudo, también un panic de difuzz en el chequeo, que no corta la comparación de A
+con B del caso). El crudo se guarda en la caché de A (no depende del preset: lo comparten las
 celdas del mismo carril); `cache_hits` cuenta esos aciertos. Con `--indice`, cada `codegen/` es una
 fila con destino `codegen`, y `--cruce` agrega `codegen=N` a los totales por celda (solo si alguna
 celda dejó uno). La celda no cambia de nombre.
@@ -377,19 +389,28 @@ caché, el crudo se ahorra en las celdas siguientes del mismo carril. La línea 
 destinos son los mismos con y sin la opción. De 2754 casos comparados en el A (3032 en el B):
 `CODEGEN=0`, `contenido=2` (`terser/compress/evaluate/issue_2919` y `prop_function`, que imprimen
 `Function.prototype.toString`), `timeout=6` (los mismos 6 que A no termina) y `no_determinista=0`.
-El stack impreso en stdout de `issue_2208_8` da iguales (las posiciones se borran) y el
-`Math.random` de `fixture/issues/8119` también (el preload lo fija). Los casos `contenido` y
+Con el criterio de `contenido` de 10.1b, las mismas cifras en los dos carriles (MEDIDO, 12-oct,
+mismo corpus y opciones): los dos `contenido` imprimen el `toString` entero. El stack impreso
+en stdout de `issue_2208_8` da iguales (las posiciones se borran) y el `Math.random` de
+`fixture/issues/8119` también (el preload lo fija). Los casos `contenido` y
 `no_determinista` no tienen directorio: salen por stderr (`crudo: ...`). En `tests/codegen/` (142
 casos) el costo es despreciable.
 
 **Qué cubre y qué no.** El punto ciego queda cubierto solo donde se usa la opción y solo para lo
-que el corpus ejercita: en los fixtures de SWC y en el corpus real el chequeo no encontró ningún bug
-(ver arriba), y el de los paréntesis salió de formas escritas a propósito, que están en
-`tests/codegen/` (ver [Tests y verificaciones](#tests-y-verificaciones)). No mira la pasada
-observada (el epílogo de un programa mudo), el envoltorio de módulos del carril B, `--invocar` ni
-las variantes de `--mutaciones`: un mudo se compara solo por su estado de salida y sus globals. El
-stderr no se compara. Un bug del parser que hace que el texto no parsee (`descarte:parse_*`) no
-llega al chequeo.
+que el corpus ejercita. `--crudo` corrió sobre los fixtures de SWC (oxc, carriles A y B: 0
+`CODEGEN`, ver arriba) y no sobre el corpus real: el 0 de ese corpus es del arnés aparte del
+agente codegen-fidelidad (24 933 ejecuciones de los fixtures de SWC y del corpus real, 11-oct;
+ver [`tests/codegen/README.md`](tests/codegen/README.md)), no de esta opción. El bug de los
+paréntesis salió de formas escritas a propósito, que están en `tests/codegen/` (ver
+[Tests y verificaciones](#tests-y-verificaciones)). No mira la pasada observada (el epílogo de un
+programa mudo), el envoltorio de módulos del carril B, `--invocar` ni las variantes de
+`--mutaciones`: un mudo se compara solo por su estado de salida y sus globals. Se compara lo que
+el programa imprime en stdout, con los mismos límites que el oráculo: `console.error`,
+`console.warn` y `console.trace` sí cuentan (el preload los pasa a stdout como `[error] ...`,
+`[warn] ...`, `[trace] ...`), pero el stderr de node no, y de un `throw` o un rechazo no
+atrapados solo se compara el tipo (`!dz throw <Tipo>`), no el mensaje: un crudo y un A que
+lanzan el mismo tipo con otro mensaje dan iguales. Un bug del parser que hace que el texto no
+parsee (`descarte:parse_*`) no llega al chequeo.
 
 ## Celdas
 
