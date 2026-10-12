@@ -11,7 +11,7 @@
 #   --esperado TSV    default: esperado.tsv junto a este script
 #   --celdas "C..."   celdas <minifier>-<carril>-<preset> separadas por espacios (default: las 8)
 #   --sin-modos       no correr la comparacion de modos opt-in (--invocar, --stubs)
-#   --difuzz "ARGS"   argumentos extra para difuzz en cada celda (p. ej. "--crudo", 10.1)
+#   --difuzz "ARGS"   argumentos extra para difuzz en cada celda y en los modos (p. ej. "--crudo", 10.1)
 #   --jobs N          workers de difuzz (default ${VERIFICAR_JOBS:-4})
 # Sale con 0 si todas las comparaciones coinciden (y con --help/-h), 1 si hay alguna diferencia,
 # 2 por argumentos.
@@ -29,14 +29,19 @@ extra=()
 celdas=()
 for m in swc oxc; do for k in a b; do for p in core_defaults carril_a; do celdas+=("$m-$k-$p"); done; done; done
 pos=()
+# 10.10 (B-H6 de la revision B de 10.1): una opcion sin valor es un error de uso (2), no el rc 1 de
+# `${2:?}`.
+valor() { # opcion valor
+  [ -n "${2:-}" ] || { echo "$1 necesita valor" >&2; exit 2; }
+}
 while (($#)); do
   case $1 in
-    --corpus) corpus=${2:?--corpus necesita valor}; shift 2;;
-    --esperado) esperado=${2:?--esperado necesita valor}; shift 2;;
-    --celdas) read -r -a celdas <<< "${2:?--celdas necesita valor}"; shift 2;;
+    --corpus) valor "$@"; corpus=$2; shift 2;;
+    --esperado) valor "$@"; esperado=$2; shift 2;;
+    --celdas) valor "$@"; read -r -a celdas <<< "$2"; shift 2;;
     --sin-modos) modos=0; shift;;
-    --difuzz) read -r -a extra <<< "${2:?--difuzz necesita valor}"; shift 2;;
-    --jobs) jobs=${2:?--jobs necesita valor}; shift 2;;
+    --difuzz) valor "$@"; read -r -a extra <<< "$2"; shift 2;;
+    --jobs) valor "$@"; jobs=$2; shift 2;;
     -h|--help) rg '^#( |$)' -N "$0" | rg -v '^#!'; exit 0;;
     --*) echo "opcion desconocida: $1" >&2; exit 2;;
     *) pos+=("$1"); shift;;
@@ -160,16 +165,19 @@ for cel in "${celdas[@]}"; do
 done
 # Los modos opt-in no pueden perder lo que la celda base encuentra (H01: --invocar lo perdia).
 # Corre oxc-b-core_defaults y oxc-a-core_defaults con cada modo y exige que cada div/panic de la base siga en div/panic.
+# 10.10 (B-H4 de la revision B de 10.1): con los mismos --difuzz que la celda base, y se compara el destino de A contra
+# B (clase_caso), sin el codegen/ ortogonal: antes, con --difuzz "--crudo" la clase de la base empezaba con codegen: y
+# el caso se salteaba sin aviso.
 if [ $modos -eq 1 ]; then
 for k in a b; do for modo in "--invocar" "--stubs"; do
   cel="oxc-$k-core_defaults"; tag="$cel${modo// /}"
   [ -d "$out/$cel" ] || { echo "modo $tag: falta la celda base $cel (usar --sin-modos)"; fallas=$((fallas+1)); continue; }
   "$bin" "$corpus" --out "$out/$tag" --minifier oxc --carril "$k" --config core_defaults --no-cache --jobs "$jobs" $modo \
-    > "$out/$tag.log" 2>&1
+    "${extra[@]}" > "$out/$tag.log" 2>&1
   rc=$?
   if [ $rc -ne 0 ]; then echo "modo $tag: difuzz salio con $rc (ver $out/$tag.log)"; fallas=$((fallas+1)); continue; fi
   for caso in "${casos[@]}"; do
-    base=$(clase_de "$out/$cel" "$caso"); got=$(clase_de "$out/$tag" "$caso")
+    base=$(clase_caso "$out/$cel" "$caso"); got=$(clase_caso "$out/$tag" "$caso")
     case "$base" in div:*|panic) total=$((total+1))
       if [ "$base" != "$got" ]; then echo "MAL $tag $caso: base=$base modo=$got"; fallas=$((fallas+1)); fi ;;
     esac

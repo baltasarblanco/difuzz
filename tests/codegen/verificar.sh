@@ -12,6 +12,10 @@
 # todo coincide.
 set -u
 here=$(cd "$(dirname "$0")" && pwd)
+# 10.10 (B-H6 de la revision B de 10.1): la ayuda es la de este script (antes, la del golden).
+for a in "$@"; do
+  case $a in -h|--help) rg '^#( |$)' -N "$0"; exit 0;; esac
+done
 exec "$here/../golden/verificar.sh" \
   --corpus "$here/corpus" \
   --esperado "$here/esperado.tsv" \
