@@ -522,6 +522,17 @@ pub enum Parseo {
     Recuperado,
     /// No hubo AST: ese texto queda sin analizar.
     Perdido,
+    /// 10.9: sin analizar porque fallo el analisis de difuzz (panic, abort o memoria del hijo de
+    /// analisis, o de los chequeos en el backend), no porque SWC no lo parsee: el motivo va en
+    /// `analisis_de_difuzz_fallo`. Cuenta como `Perdido` (`perdido`, `lint_valido`).
+    Fallido,
+}
+
+impl Parseo {
+    /// Ese texto quedo sin analizar (`Perdido` o `Fallido`).
+    fn sin_ast(self) -> bool {
+        matches!(self, Parseo::Perdido | Parseo::Fallido)
+    }
 }
 
 /// R1-H13: el estado del analisis de los tres textos de un caso. Con el
@@ -538,20 +549,21 @@ pub struct Analisis {
 impl Analisis {
     /// b2-int: los tres textos sin analizar (fallo el analisis entero: panic,
     /// abort o memoria del hijo de analisis, o de los chequeos en el backend).
-    pub const PERDIDO: Analisis = Analisis { fuente: Parseo::Perdido, original: Parseo::Perdido, minificado: Parseo::Perdido };
+    /// 10.9: `Fallido`, no `Perdido` (la nota decia "SWC no lo parsea" con el hijo matado por memoria).
+    pub const PERDIDO: Analisis = Analisis { fuente: Parseo::Fallido, original: Parseo::Fallido, minificado: Parseo::Fallido };
 
     pub fn limpio(&self) -> bool {
         *self == Analisis::default()
     }
 
     pub fn perdido(&self) -> bool {
-        [self.fuente, self.original, self.minificado].contains(&Parseo::Perdido)
+        [self.fuente, self.original, self.minificado].iter().any(|p| p.sin_ast())
     }
 
     /// El lint compara las escrituras del original y del minificado: si falta
     /// uno de los dos lados, la comparacion no dice nada (0 contra N).
     pub fn lint_valido(&self) -> bool {
-        self.original != Parseo::Perdido && self.minificado != Parseo::Perdido
+        !self.original.sin_ast() && !self.minificado.sin_ast()
     }
 
     /// Para meta.txt. `None` si el analisis fue limpio.
@@ -563,6 +575,7 @@ impl Analisis {
             Parseo::Limpio => None,
             Parseo::Recuperado => Some(format!("{efecto} con errores recuperados")),
             Parseo::Perdido => Some(format!("{efecto}: SWC no lo parsea, sin analizar")),
+            Parseo::Fallido => Some(format!("{efecto}: sin analizar, fallo el analisis de difuzz (ver analisis_de_difuzz_fallo)")),
         };
         let partes: Vec<String> = [
             estado(self.fuente, "fuente (flags estaticos)"),
@@ -576,12 +589,13 @@ impl Analisis {
     }
 
     /// Para el protocolo del hijo de analisis (operacion `checks`, b2-int):
-    /// tres letras (`l`, `r`, `p`).
+    /// tres letras (`l`, `r`, `p`; 10.9: `f`).
     pub fn codigo(&self) -> String {
         let c = |p: Parseo| match p {
             Parseo::Limpio => 'l',
             Parseo::Recuperado => 'r',
             Parseo::Perdido => 'p',
+            Parseo::Fallido => 'f',
         };
         [c(self.fuente), c(self.original), c(self.minificado)].iter().collect()
     }
@@ -591,6 +605,7 @@ impl Analisis {
             'l' => Some(Parseo::Limpio),
             'r' => Some(Parseo::Recuperado),
             'p' => Some(Parseo::Perdido),
+            'f' => Some(Parseo::Fallido),
             _ => None,
         };
         let mut it = s.chars();
@@ -712,5 +727,12 @@ mod tests {
         let n = a.nota().unwrap();
         assert!(n.contains("fuente (flags estaticos) con errores recuperados") && n.contains("minificado (lint): SWC no lo parsea"), "{n}");
         assert!(!n.contains("original"), "{n}");
+        // 10.9: un analisis que fallo (hijo matado por memoria, panic) no es "SWC no lo parsea",
+        // pero cuenta igual: perdido y sin lint.
+        let f = Analisis::PERDIDO;
+        let n = f.nota().unwrap();
+        assert!(!n.contains("no lo parsea") && n.contains("fallo el analisis de difuzz (ver analisis_de_difuzz_fallo)"), "{n}");
+        assert!(f.perdido() && !f.lint_valido() && !f.limpio());
+        assert_eq!(Analisis::de_codigo(&f.codigo()), Some(f));
     }
 }
