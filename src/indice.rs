@@ -70,6 +70,9 @@ impl Index {
         // misma celda, al menos las lineas no se intercalan a la mitad.
         if let Err(e) = f.write_all(line.as_bytes()) {
             eprintln!("indice: no pude escribir: {e}");
+            // 10.4 (M1 de rev-b9-A): una linea perdida del indice es un hallazgo que `--cruce`
+            // no ve; antes la corrida cerraba `completa` y con 0.
+            crate::oracle::write_failed();
         }
     }
 }
@@ -494,5 +497,19 @@ mod tests {
         assert_eq!(cab, ["id", "A.tc", "oxc", "A.tc", "caso"], "{t}");
         assert_eq!(Cell::parse("identidad+carril_a+tal_cual").backend, "identidad");
         assert!(t.contains("identidad+carril_a+tal_cual: div=1"), "{t}");
+    }
+
+    /// 10.4 (M1 de rev-b9-A): una linea del indice que no se pudo escribir (disco lleno) cuenta
+    /// como escritura perdida (`oracle::write_errors`): la corrida no cierra `completa` ni con 0.
+    #[test]
+    fn linea_perdida_del_indice_cuenta() {
+        if !std::path::Path::new("/dev/full").exists() {
+            return;
+        }
+        let full = std::fs::OpenOptions::new().write(true).open("/dev/full").unwrap();
+        let ix = Index { cell: "oxc+carril_a+tal_cual".into(), file: Mutex::new(full), tmp: "/no/existe.tmp".into(), dest: "/no/existe".into() };
+        let antes = crate::oracle::write_errors();
+        ix.record("caso", "div", "Stdout", 1);
+        assert!(crate::oracle::write_errors() > antes);
     }
 }

@@ -414,6 +414,8 @@ impl Reporter {
             let line = format!("{}\t{cause}\t{}\n", case.display(), elapsed.as_millis());
             if let Err(e) = f.write_all(line.as_bytes()) {
                 eprintln!("reporter: no pude escribir descartes.tsv: {e}");
+                // 10.4 (M1 de rev-b9-A): como `new` cuando no lo puede crear.
+                write_failed();
             }
         }
     }
@@ -424,6 +426,9 @@ impl Reporter {
             if complete {
                 if let Err(e) = ix.commit() {
                     eprintln!("indice: no pude cerrar: {e}");
+                    // 10.4 (M1 de rev-b9-A): queda el indice anterior y `--cruce` lo muestra sin
+                    // aviso; antes la corrida cerraba `completa` y con 0. `main` lo cuenta despues.
+                    write_failed();
                 }
             } else {
                 ix.abandon();
@@ -762,7 +767,7 @@ pub fn write_errors() -> usize {
     WRITE_ERRORS.load(std::sync::atomic::Ordering::Relaxed)
 }
 
-fn write_failed() {
+pub(crate) fn write_failed() {
     WRITE_ERRORS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 }
 
@@ -1096,6 +1101,30 @@ mod tests {
             assert!(meta.contains(&format!("buscar en minified.{ext} ")), "{meta}");
             assert!(!meta.contains(&format!("minified.{otra}")), "{meta}");
             assert!(d.join(format!("lint/c/minified.{ext}")).is_file());
+        }
+        std::fs::remove_dir_all(&d).unwrap();
+    }
+
+    /// 10.4 (M1 de rev-b9-A): una linea de descartes.tsv que no se pudo escribir y un indice que
+    /// no se pudo cerrar cuentan como escrituras perdidas (antes: solo stderr, `completa` y 0).
+    #[test]
+    fn descartes_e_indice_perdidos_cuentan() {
+        use super::{write_errors, Reporter};
+        let d = std::env::temp_dir().join(format!("difuzz-test-perdidas-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        let ix = crate::indice::Index::create(&d.join("indice"), "celda").unwrap();
+        let r = Reporter::new(&d, "celda".into(), "//preload").with_index(ix);
+        // El .tmp del indice ya no esta: el rename del cierre falla.
+        std::fs::remove_file(d.join("indice/index-celda.tsv.tmp")).unwrap();
+        let antes = write_errors();
+        r.finish(true);
+        assert!(write_errors() > antes, "el cierre fallido del indice no conto");
+        if std::path::Path::new("/dev/full").exists() {
+            let full = std::fs::OpenOptions::new().write(true).open("/dev/full").unwrap();
+            *r.descartes.lock().unwrap() = Some(full);
+            let antes = write_errors();
+            r.discard(std::path::Path::new("c/input.js"), "timeout", std::time::Duration::ZERO);
+            assert!(write_errors() > antes, "la linea perdida de descartes.tsv no conto");
         }
         std::fs::remove_dir_all(&d).unwrap();
     }
