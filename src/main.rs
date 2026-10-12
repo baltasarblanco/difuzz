@@ -1413,9 +1413,13 @@ fn chequeo_crudo(ctx: &Ctx, runner: &runner::Runner, st: &mut CrudoStats, rel: &
             let (r, a, pasos) = *c;
             // El crudo hace de original y A de minificado (con los nombres crudos: el kind
             // tiene que ver la diferencia que vio `mismo_programa`).
+            // 10.1b (H2 de la revision A de 10.1): si uno de los dos se colgo (confirmado con el
+            // timeout largo) y el otro no, el kind es Timeout, de cualquier lado: `compare` solo lo
+            // ve en A (el que hace de minificado) y con el crudo colgado daba Stdout.
             let kind = {
                 let _crudos = oracle::con_nombres_crudos(true);
                 match oracle::compare(&r, &a) {
+                    _ if r.status == Status::Timeout || a.status == Status::Timeout => oracle::Kind::Timeout,
                     oracle::Verdict::Divergence(k) => k,
                     oracle::Verdict::Same if r.status != a.status => oracle::Kind::ExitStatus,
                     oracle::Verdict::Same => oracle::Kind::Stdout,
@@ -1430,7 +1434,9 @@ fn chequeo_crudo(ctx: &Ctx, runner: &runner::Runner, st: &mut CrudoStats, rel: &
 /// 10.1: como termino la comparacion del crudo con A (`comparar_crudo`).
 enum Crudo {
     Igual,
-    /// El crudo y A no terminaron a tiempo (con el timeout de la celda): nada que comparar.
+    /// El crudo y A no terminaron a tiempo (con el timeout de la celda, confirmado en fresco):
+    /// nada que comparar, como un original que no termina en A contra B. Si se cuelga uno solo
+    /// (tambien con el timeout largo), es `Codegen` con kind Timeout.
     Timeout,
     Runner(String),
     NoDeterminista,
@@ -1445,9 +1451,11 @@ enum Crudo {
 /// sin repetirlo:
 /// 1. el crudo (de la cache de A, si esta: no depende del preset) contra el A del caso;
 /// 2. si difieren: el crudo y A otra vez cada uno, dos veces y en fresco. Si alguno no se
-///    repite a si mismo, `NoDeterminista` (la cache del crudo se lapida si fue ella);
-///    si los frescos coinciden, `Igual`;
-/// 3. un lado en Timeout y el otro no: se repite con `max(4 x timeout, 20 x elapsed del otro)`;
+///    repite a si mismo, `NoDeterminista` (la cache del crudo se lapida si fue ella); dos
+///    Timeout se repiten aunque hayan impreso distinto (10.1b); si los frescos coinciden,
+///    `Igual`; si los dos se cuelgan, `Timeout`;
+/// 3. un lado en Timeout y el otro no: se repite con `max(4 x timeout, 20 x elapsed del otro)`
+///    (como B en `confirm`); si sigue colgado, termina en `Codegen` con kind Timeout;
 /// 4. alguno corrio sin el sensor entero (`sensor_degradado`): los dos sin el sensor;
 /// 5. con `fn_tostring` o `stack` en los flags del crudo: el paso `contenido` de A contra B
 ///    (`clasificar::paso_contenido`, el crudo como original y A como minificado): `Contenido`
@@ -1482,13 +1490,17 @@ fn comparar_crudo(
             return Crudo::Runner(e.clone());
         }
     }
-    if !mismo(&r1, &r2) || !mismo(&a1, &a2) {
-        if r_cached && !mismo(&r1, &r) {
+    // 10.1b (H2 de la revision A de 10.1): dos Timeout se repiten (solo el status, como
+    // `oracle::compare`, que da Timeout sin mirar el stdout). Antes, un crudo que se colgaba
+    // imprimiendo cortaba en otro lugar cada vez y quedaba como `no_determinista`.
+    let repite = |x: &runner::Exec, y: &runner::Exec| mismo(x, y) || (x.status == Status::Timeout && y.status == Status::Timeout);
+    if !repite(&r1, &r2) || !repite(&a1, &a2) {
+        if r_cached && !repite(&r1, &r) {
             ctx.cache.tombstone(runner, crudo);
         }
         return Crudo::NoDeterminista;
     }
-    if r_cached && !mismo(&r1, &r) {
+    if r_cached && !repite(&r1, &r) {
         ctx.cache.tombstone(runner, crudo);
     }
     let (mut r, mut a) = (r1, a1);

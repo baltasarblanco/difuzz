@@ -355,6 +355,44 @@ fn crudo_contenido_solo_si_el_contenido_explica() {
     std::fs::remove_dir_all(&b).unwrap();
 }
 
+/// 10.1b (H2 de la revision A de 10.1): un timeout del crudo es un timeout. Si se cuelga uno solo
+/// (el crudo imprimiendo o mudo, o A), confirmado con el timeout largo, va a codegen/ con kind
+/// Timeout (antes: `no_determinista` si imprimia, kind Stdout si no); si se cuelgan los dos,
+/// `timeout=`. Un crudo que no se repite a si mismo (el pid) es `no_determinista` (la doble
+/// repeticion; revision A, H7).
+#[test]
+fn crudo_timeout_es_timeout() {
+    if !test_util::requiere_node() {
+        return;
+    }
+    let b = base("crudo-timeout");
+    let corpus = b.join("corpus");
+    let colgados: [(&str, &[u8]); 3] = [
+        ("imprime", b"let h;\n(h) = function () {};\nlet i = 0;\nwhile (h.name === \"\") { if (++i % 100000 === 0) console.log(i); }\nconsole.log(\"fin\");\n"),
+        ("mudo", b"let h;\n(h) = function () {};\nwhile (h.name === \"\") {}\nconsole.log(\"fin\");\n"),
+        ("a-colgado", b"let h;\n(h) = function () {};\nwhile (h.name === \"h\") {}\nconsole.log(\"fin\");\n"),
+    ];
+    for (n, src) in colgados {
+        caso(&corpus, n, src);
+    }
+    caso(&corpus, "los-dos", b"let i = 0;\nwhile (true) { if (++i % 100000 === 0) console.log(i); }\n");
+    caso(&corpus, "pid", b"console.log(require(\"fs\").readFileSync(\"/proc/self/stat\", \"utf8\").split(\" \")[0]);\n");
+    let out = b.join("out");
+    let o = difuzz(&b, &[corpus.to_str().unwrap(), "--out", out.to_str().unwrap(), "--no-cache", "--jobs", "5", "--timeout-ms", "1000", "--crudo"]);
+    assert_eq!(rc(&o), Some(0), "{}", err(&o));
+    let stdout = String::from_utf8_lossy(&o.stdout).into_owned();
+    let linea = stdout.lines().find(|l| l.starts_with("crudo (10.1): ")).unwrap_or_else(|| panic!("{stdout}"));
+    for (c, n) in [("comparados", 5), ("iguales", 0), ("CODEGEN", 3), ("contenido", 0), ("no_determinista", 1), ("timeout", 1), ("runner", 0)] {
+        assert_eq!(campo(linea, c), n, "{c}: {linea}\n{}", err(&o));
+    }
+    for (n, _) in colgados {
+        let meta = std::fs::read_to_string(out.join("oxc+carril_a+tal_cual/codegen").join(n).join("meta.txt")).unwrap_or_else(|e| panic!("{n}: {e}\n{}", err(&o)));
+        assert!(meta.contains("kind: Timeout") && meta.contains("en Timeout: repetido con"), "{n}: {meta}");
+    }
+    assert!(err(&o).contains("crudo: no determinista (el crudo o A no se repiten): pid"), "{}", err(&o));
+    std::fs::remove_dir_all(&b).unwrap();
+}
+
 /// 9.4: `difuzz` con stdout y/o stderr en un pipe cerrado (el que lee ya se fue: EPIPE). Antes,
 /// rc 101 (panic de `println!`/`eprintln!`) y, con stderr cerrado a mitad de corrida, la
 /// divergencia se perdia: el panic del `DIVERGENCIA ...` llegaba antes que el reporter.
