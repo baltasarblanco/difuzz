@@ -362,7 +362,7 @@ if ! hecho arnes; then
 fi
 
 # --- 9 informe de diferencias -----------------------------------------------
-DESTINOS=(div known panic asserts lint recursos)
+DESTINOS=(div known panic asserts lint recursos codegen)
 # raiz de la celda dentro de un --out del arnes (un solo directorio, salvo cache-a)
 raiz() { local d; mapfile -t d < <(eza -1 --only-dirs "$1" 2>/dev/null | rg -v '^(cache-a)?$'); ((${#d[@]} == 1)) && printf '%s\n' "$1/${d[0]}"; }
 # indice de una celda: "caso<TAB>estado<TAB>dir" (estado: div:<kind>, known:<kind>, panic, ..., descarte:<causa>)

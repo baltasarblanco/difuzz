@@ -39,7 +39,8 @@
 #   - stdout entero (las lineas de stats: total=, analisis..., oraculo..., invocar..., mutaciones...);
 #   - CORRIDA.txt (estado, casos, procesados, backend, node, stats), sin inicio/fin/pid/comando;
 #   - stderr como multiconjunto de lineas (orden libre: los workers intercalan), sin el progreso [n/m];
-#   - el conjunto de casos de div, known, panic, asserts, lint y recursos (perdidos, nuevos, movidos);
+#   - el conjunto de casos de div, known, panic, asserts, lint, recursos y codegen (10.1, --crudo;
+#     perdidos, nuevos, movidos);
 #   - por caso en el mismo destino: meta.txt normalizado entero, el conjunto de archivos del caso
 #     y el contenido de cada uno (sha256 tras normalizar rutas);
 #   - descartes.tsv como (caso, causa) ordenado; known-sintomas.tsv ordenado; lint-triage.tsv si hay.
@@ -48,6 +49,8 @@
 #     comparan), el --out -> <OUT>, el directorio del binario -> <BIN>;
 #   - tiempos: "<n>(ns|us|µs|ms|s)" -> <T> en meta.txt y en stderr; "<n> MiB" -> <N> MiB
 #     (mensajes de recursos/ y del aviso de memoria);
+#   - meta.txt: el hash de la cobertura de bloques de V8 ("<hash16> <n> contra <hash16> <n>" ->
+#     "<HASH> <n> contra <HASH> <n>"): no es determinista entre corridas del mismo binario (10.10);
 #   - CORRIDA.txt: inicio, fin, pid, comando;
 #   - stdout: cache_a_hits=N (con --no-cache siempre 0, pero no es determinista con cache);
 #   - lo que se pida con --ignorar-campo / --ignorar-linea.
@@ -182,6 +185,13 @@ rutas() { # raiz_celda out bindir
 tiempos() {
   sd '\b[0-9]+(\.[0-9]+)?(ns|us|µs|ms|s)\b' '<T>' | sd '\b[0-9]+ MiB\b' '<N> MiB'
 }
+# 10.10: el hash de la cobertura de bloques de V8 (`<hash16> <rangos> contra <hash16> <rangos>`,
+# recheck::comparar_caminos y camino_sensor_i3) no es determinista entre corridas del mismo binario
+# (MEDIDO en la revision de 10.1: 27 diferencias base contra base en la aceptacion, 5 celdas). Se
+# cambia solo el hash; la cantidad de rangos se compara.
+cobertura() {
+  sd '\b[0-9a-f]{16} ([0-9]+) contra [0-9a-f]{16} ([0-9]+)\b' '<HASH> $1 contra <HASH> $2'
+}
 # normalizar ARCHIVO OUT BINDIR TIPO   (TIPO: meta | stdout | stderr | corrida | crudo)
 normalizar() {
   local f=$1 out=$2 bd=$3 tipo=$4 celda=$2
@@ -189,7 +199,7 @@ normalizar() {
   [[ $out == "$salida/base/"* || $out == "$dir_base/"* ]] && celda=$rb_actual || celda=$rn_actual
   [[ -f $f ]] || { echo "<no existe>"; return; }
   case $tipo in
-    meta)    quitar_campos < "$f" | quitar_lineas | rutas "$celda" "$out" "$bd" | tiempos;;
+    meta)    quitar_campos < "$f" | quitar_lineas | rutas "$celda" "$out" "$bd" | tiempos | cobertura;;
     stdout)  quitar_lineas < "$f" | rutas "$celda" "$out" "$bd" | sd ' cache_a_hits=[0-9]+' '' | tiempos;;
     stderr)  rg -v -e '^\[[0-9]+/[0-9]+\]$' -e '^borre [0-9]+ temporales de corridas anteriores cortadas' "$f" | quitar_lineas | rutas "$celda" "$out" "$bd" | tiempos | sort;;
     corrida) rg -v '^(inicio|fin|pid|comando):' "$f" | quitar_campos | quitar_lineas | rutas "$celda" "$out" "$bd" | sd ' cache_a_hits=[0-9]+' '';;
@@ -217,7 +227,7 @@ comparar_textos() { # titulo archivo_base archivo_nuevo
   fi
 }
 
-DESTINOS=(div known panic asserts lint recursos)
+DESTINOS=(div known panic asserts lint recursos codegen)
 
 comparar_celda() { # celda
   local celda=$1 et ob on rb rn eb en ba na d c f
