@@ -245,7 +245,7 @@ observada, la de `--invocar` y la de bloques, porque cada una corre A y B de nue
 por texto. Por ejemplo, un mudo que guarda `require('node:constants')` en un binding (los nombres de
 errno están entre sus claves) suma 1 por la pasada observada y 1 más con `--invocar`, que lo vuelve
 a imprimir: así da `ambos=2` con `--invocar --stubs --sandbox-red` el caso `cjs/00490` del corpus real
-(`signal-exit/all-signals.js`; 9.4, medido).
+(`npm:foreground-child-3.3.1.tgz:package/dist/commonjs/all-signals.js` en `fuentes.tsv`; 9.4, medido).
 Esas pasadas se comparan igual, con la nota; `J`: casos y variantes descartados con causa
 `sandbox_corto`, que también cuentan en `K` porque los dos tocaron el sandbox). Una variante
 `sandbox_corto` tiene su fila en `descartes.tsv`, cuenta en `original=` de las mutaciones y no
@@ -597,16 +597,21 @@ Principios:
   - la profundidad, cuando la salida depende como dato de un desborde de pila **nativo** (por
     ejemplo, si `JSON.stringify` de un arreglo anidado 7000 veces lanzó o no) y el bug deja en B
     el valor de A con más pila en la misma línea que un literal salado que el programa imprime
-    tal cual (`console.log(etiqueta, [1, +bug][i])`: la sal llega a la línea por la etiqueta, no
-    por la coincidencia). El re-chequeo de profundidad no tiene sensor de uso, y con una recursión
+    tal cual, antes o después del valor (`console.log("valor:", [0, bug.length][i])` o
+    `console.log([true, bug][i], "es entero")`): la sal llega a la línea por la etiqueta, no por
+    la coincidencia, `sal_alcanza` la da por alcanzada y la traza dice igual `confirmado con los
+    literales salados`. MEDIDO en la revisión del bloque 9 (rev-b9-A, `corpus-sal` s01 y s02,
+    oxc 0.153.0, B ejecutando el bug): `known/` en las 4 celdas de oxc; sin la etiqueta (s01c),
+    `div/`. Cerrarlo pide localizar dentro de la línea, y localizar por tokens se engaña
+    (decisión del 10-oct, `18-profundidad-cuenta`). El re-chequeo de profundidad no tiene sensor de uso, y con una recursión
     nativa B recorre los mismos bloques con y sin más pila, así que su camino no cambia; desde 8.1
     su `Explica` se confirma salado y desde 9.2 la sal tiene que llegar a la línea (ver arriba).
     Medido con oxc 0.153.0 en las 4 celdas de oxc: con `9e52cef` iban a `known/` la tabla con los
     valores en argumentos (`[String(""), String("abc").substring(1, undefined)]`, sin nada que
     salar), la misma con un literal salable que no es el de la coincidencia, un booleano
     (`[true, Number.isInteger(5e-324)]`), un número (`[0, bug.length]`, el residuo de 8.1), la
-    etiqueta en otra línea y la tabla en las ramas de un `?:`; con 9.2 van a `div/`. La forma de
-    la etiqueta en la misma línea sigue en `known/`. El costo: un positivo de verdad (el original
+    etiqueta en otra línea y la tabla en las ramas de un `?:`; con 9.2 van a `div/`. Las formas de
+    la etiqueta en la misma línea (antes o después del valor) siguen en `known/`. El costo: un positivo de verdad (el original
     desborda y el minificado no) que imprime un número o un booleano (`console.log(rec(4800))`)
     no tiene nada que salar y va a `div/` como `profundidad_inconcluso`; con la tabla en un
     arreglo, en las ramas de un `?:`, en un `return`, en un argumento, en una plantilla o pasada
@@ -684,6 +689,14 @@ Principios:
   sensor (`recheck::comparar_caminos`, `camino_sensor_i3`) pasa por `compare` y también los ve
   crudos: si el texto instrumentado cambiara un nombre inferido, el camino queda sin probar y el
   caso va a `div/` (la dirección segura; no medido aparte).
+- **La pasada observada y `--invocar` no ven el `.name` de una función**: lo que exporta o
+  devuelve el programa pasa por `ser` del preload (`src/preload.js`, `case 'function': return
+  'fn'`), que escribe toda función como `fn`, sin nombre. Un bug de keep_names que solo se ve en
+  lo que exporta un módulo mudo queda en `iguales`, también en carril_a: MEDIDO en la revisión del
+  bloque 9 (rev-b9-A, `corpus-obs`, carril B de oxc, con y sin `--invocar`): `export function
+  make(handler = () => {}) { return handler; }` (o01) y un objeto exportado con esa función (o02)
+  dan `iguales` en las 2 celdas del carril B, con y sin `--invocar`; el mismo `handler` impreso con `console.log` (o01c) va a `div/` en
+  carril_a por 9.1. Es previo al bloque 9 y no se cambió.
 - **El sensor de violaciones atrapadas se apaga a las 256 pausas** (`MAX_PAUSAS` en el preload):
   cada excepción atrapada lo pausa y cuesta de 0,5 ms (sin marcos) a 1,4 ms (50 marcos de
   profundidad); sin tope, 10 000 excepciones atrapadas tardan de 5 a 15 s y llegan al timeout por
