@@ -394,7 +394,14 @@ fila con destino `codegen`, y `--cruce` agrega `codegen=N` a los totales por cel
 celda dejó uno). La celda no cambia de nombre.
 
 **Costo y ruido** (MEDIDO, 12-oct, fixtures de SWC, 3119 casos, oxc carril_a, `--no-cache`,
-`--jobs 8`): una ejecución de node más por caso (y cuatro más, solo en los que difieren). La
+`--jobs 8`): una ejecución de node más por caso (y cuatro más, solo en los que difieren: el crudo
+y A dos veces cada uno). A eso se suman, solo donde aplica (`main::comparar_crudo`, 10.10): dos
+más de A con el timeout largo si terminó en el caso y las dos frescas se colgaron; una del lado
+colgado con el timeout largo si uno solo se cuelga; las dos sin el sensor si alguno corrió sin el
+sensor entero; y, si el crudo tiene `fn_tostring` o `stack`, el paso `contenido` de A contra B
+(`clasificar::paso_contenido`): el crudo salado, el crudo y A con el contenido fijo, hasta dos de A
+con cobertura y, si da `Explica`, la sal de literales (una reimpresión con SWC, una minificación,
+dos node y el mismo paso sobre lo salado). La
 corrida pasa de 43,0 s a 68,3 s en el carril A (+59 %) y de 51,8 s a 79,3 s en el B (+53 %); con la
 caché, el crudo se ahorra en las celdas siguientes del mismo carril. La línea `total=` y los
 destinos son los mismos con y sin la opción. De 2754 casos comparados en el A (3032 en el B):
