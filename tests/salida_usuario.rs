@@ -495,6 +495,26 @@ fn pipe_cerrado_ayuda_y_uso() {
     std::fs::remove_dir_all(&b).unwrap();
 }
 
+/// 10.5 (M2 de rev-b9-A): `--preparar --info` (la identidad del oraculo) sin `println!`. Antes,
+/// rc 101 (panic) con el stdout en un pipe cerrado o en /dev/full.
+#[test]
+fn preparar_info_sin_panic() {
+    let b = base("pipe-info");
+    let (codigo, leido) = difuzz_con_pipe_cerrado(&b, &["--preparar", "--info"], true, false);
+    assert_eq!(codigo, Some(0), "pipe cerrado: {leido}");
+    assert!(!leido.contains("panicked"), "{leido}");
+    let o = difuzz(&b, &["--preparar", "--info"]);
+    assert_eq!(rc(&o), Some(0), "{}", err(&o));
+    assert!(!o.stdout.is_empty() && o.stdout.ends_with(b"\n"), "{:?}", String::from_utf8_lossy(&o.stdout));
+    if Path::new("/dev/full").exists() {
+        let full = std::fs::OpenOptions::new().write(true).open("/dev/full").unwrap();
+        let o = Command::new(BIN).args(["--preparar", "--info"]).stdout(Stdio::from(full)).stderr(Stdio::piped()).output().unwrap();
+        assert_eq!(rc(&o), Some(1), "{}", err(&o));
+        assert!(err(&o).starts_with("no pude escribir en stdout: "), "{}", err(&o));
+    }
+    std::fs::remove_dir_all(&b).unwrap();
+}
+
 #[test]
 fn pipe_cerrado_no_pierde_la_divergencia() {
     if !test_util::requiere_node() {

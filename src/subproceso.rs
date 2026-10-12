@@ -794,8 +794,15 @@ pub(crate) fn intern_flag(s: &str) -> &'static str {
 pub fn serve(args: &[String]) -> i32 {
     // R1-H05: `--preparar --info`, la identidad que valida `configurar_oraculo`.
     if args == ["--info"] {
-        println!("{}", info(cfg!(debug_assertions)));
-        return 0;
+        // 10.5 (M2 de rev-b9-A): sin `println!`, que hace panic (rc 101) si stdout no se puede
+        // escribir. Un pipe cerrado no es error (el padre ya no lee); otro (disco lleno), 1.
+        return match crate::a_stdout(&format!("{}\n", info(cfg!(debug_assertions)))) {
+            Ok(()) => 0,
+            Err(e) => {
+                eprintln!("no pude escribir en stdout: {e}");
+                1
+            }
+        };
     }
     // El hook de main no llega aca (el subcomando sale antes): sin esto cada
     // panic del minifier se imprimiria en stderr, y se pierde la ubicacion (M22).
