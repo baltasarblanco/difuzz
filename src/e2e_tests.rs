@@ -498,3 +498,49 @@ fn sensor_omitido_de_punta_a_punta() {
     drop(preload);
     let _ = std::fs::remove_dir_all(&base);
 }
+
+/// 10.3 (R2 de rev-b9-A): con `--invocar`, la funcion que devuelve una funcion observada se
+/// serializa con su `.name` (antes `fn`). El bug de keep_names de oxc 0.153.0 (parametro con default
+/// anonimo: `handler` -> `e`, 24-b83h1) llega a la comparacion en carril_a (keep_names: div/); en
+/// core_defaults los nombres se borran (`nombres_de_celda`) y queda igual. Antes, iguales en las dos.
+#[test]
+fn nombre_de_funcion_invocada_de_punta_a_punta() {
+    if !crate::test_util::requiere_node() {
+        return;
+    }
+    let base: PathBuf = std::env::temp_dir().join(format!("difuzz-test-e2e-b103-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&base);
+    let corpus = base.join("corpus");
+    const MUDO: &str = "function make(handler = () => {}) {\n  return handler;\n}\n";
+    std::fs::create_dir_all(corpus.join("o01")).unwrap();
+    std::fs::write(corpus.join("o01").join("input.js"), MUDO).unwrap();
+    let preload = crate::runner::Preload::write_tagged("e2e-b103").unwrap();
+    for (config, dir) in [("core_defaults", None), ("carril_a", Some("div"))] {
+        let out = base.join(format!("out-{config}"));
+        let args = [corpus.to_str().unwrap(), "--out", out.to_str().unwrap(), "--no-cache", "--jobs", "1", "--timeout-ms", "20000", "--minifier", "oxc", "--config", config, "--invocar"];
+        let cli = crate::Cli::parse(args.iter().map(|s| s.to_string()).collect()).unwrap();
+        let reporter = crate::oracle::Reporter::new(&out, cli.cell(), crate::runner::PRELOAD);
+        let known = crate::known::Known::load(&corpus, &out, 0, Minifier::Oxc);
+        let cache = crate::cache::CacheA::new(None, &[]);
+        let triage = crate::triage::Triage::load(&out);
+        let runner = crate::runner_de_celda(&preload, crate::test_util::id_runner(), &cli);
+        let cfg = Back::Celda.config(&cli);
+        let names_cfg = crate::configs_de_celda(&cli).1;
+        let ctx = crate::Ctx { reporter: &reporter, known: &known, cache: &cache, triage: &triage, medido: Some(crate::medido_de_celda(&cli)) };
+        let mut st = crate::Stats::default();
+        crate::process_case(&ctx, &runner, &cfg, names_cfg.as_ref(), &cli, &mut st, &corpus.join("o01").join("input.js"));
+        drop(runner);
+        match dir {
+            None => assert_eq!((st.same, st.divergences, st.known), (1, 0, 0), "{config}: {}", st.line()),
+            Some(d) => {
+                assert_eq!((st.same, st.divergences, st.known), (0, 1, 0), "{config}: {}", st.line());
+                assert_eq!(donde(&out, "o01"), [d], "{config}");
+                let a = std::fs::read_to_string(out.join(d).join("o01").join("a.stdout")).unwrap();
+                let b = std::fs::read_to_string(out.join(d).join("o01").join("b.stdout")).unwrap();
+                assert!(a.contains("make() = [Function: handler]\n") && !b.contains("[Function: handler]"), "{config}:\n{a}\n{b}");
+            }
+        }
+    }
+    drop(preload);
+    let _ = std::fs::remove_dir_all(&base);
+}

@@ -802,14 +802,21 @@ Principios:
   sensor (`recheck::comparar_caminos`, `camino_sensor_i3`) pasa por `compare` y también los ve
   crudos: si el texto instrumentado cambiara un nombre inferido, el camino queda sin probar y el
   caso va a `div/` (la dirección segura; no medido aparte).
-- **La pasada observada y `--invocar` no ven el `.name` de una función**: lo que exporta o
-  devuelve el programa pasa por `ser` del preload (`src/preload.js`, `case 'function': return
-  'fn'`), que escribe toda función como `fn`, sin nombre. Un bug de keep_names que solo se ve en
-  lo que exporta un módulo mudo queda en `iguales`, también en carril_a: MEDIDO en la revisión del
-  bloque 9 (rev-b9-A, `corpus-obs`, carril B de oxc, con y sin `--invocar`): `export function
-  make(handler = () => {}) { return handler; }` (o01) y un objeto exportado con esa función (o02)
-  dan `iguales` en las 2 celdas del carril B, con y sin `--invocar`; el mismo `handler` impreso con `console.log` (o01c) va a `div/` en
-  carril_a por 9.1. Es previo al bloque 9 y no se cambió.
+- **La pasada observada y `--invocar` ven el `.name` de una función desde 10.3**: lo que
+  exporta, observa o devuelve el programa pasa por `ser` del preload (`src/preload.js`,
+  `serFuncion`), que hasta 10.3 escribía toda función como `fn`, sin nombre: un bug de keep_names
+  que solo se veía en lo que exporta un módulo mudo quedaba en `iguales` también en carril_a
+  (MEDIDO en la revisión del bloque 9, rev-b9-A `corpus-obs`: `export function make(handler = ()
+  => {}) { return handler; }` con `--invocar`, o01, y un objeto exportado con esa función, o02).
+  Ahora la escribe como `util.inspect`, `[Function: handler]` o `[Function (anonymous)]`, y la
+  comparación la trata como al resto de los nombres (arriba): borrada en core_defaults, cruda en
+  carril_a (o02 va a `div/` en oxc carril B carril_a, caso `26-b103-o02`; o01 con `--invocar`, el
+  test `e2e_tests::nombre_de_funcion_invocada_de_punta_a_punta`). Sin getters ni traps: un
+  `name` que no es un dato string (un `static get name()`, un Proxy) sale `[Function]`. Una clase
+  sale también `[Function: A]` (no `[class A]`: el tipo saldría del código fuente). El constructor
+  de una instancia serializada no se escribe (`inst{...}`): un nombre de clase solo visible así
+  sigue sin verse. El preload es parte de la clave de la caché de A (`main.rs`, `cache_parts`):
+  las entradas viejas no se reusan.
 - **El sensor de violaciones atrapadas se apaga a las 256 pausas** (`MAX_PAUSAS` en el preload):
   cada excepción atrapada lo pausa y cuesta de 0,5 ms (sin marcos) a 1,4 ms (50 marcos de
   profundidad); sin tope, 10 000 excepciones atrapadas tardan de 5 a 15 s y llegan al timeout por
@@ -896,9 +903,9 @@ Sin `node` en el `PATH`, los tests que lo necesitan fallan con un mensaje claro.
 
 - **Golden de detección** (`tests/golden/`): 16 casos con bugs conocidos de oxc y swc, en 8
   celdas, más `--invocar` y `--stubs`; la clase esperada de cada caso está en `esperado.tsv`.
-- **Aceptación de los re-chequeos** (`tests/aceptacion/rechequeos/`): 174 casos que combinan un
+- **Aceptación de los re-chequeos** (`tests/aceptacion/rechequeos/`): 175 casos que combinan un
   bug real de oxc con un flag de asunción (o con la forma en que se imprime), en las 4 celdas de oxc
-  (696 comparaciones).
+  (700 comparaciones).
 - **Corpus de codegen** (`tests/codegen/`, 10.1): 142 formas propias cuya semántica depende de la
   sintaxis exacta (paréntesis, comas, directivas, ASI, claves computadas, escapes), con `--crudo`
   en 8 celdas (1136 comparaciones). Las 9 del bug de los paréntesis de oxc van a `codegen/`; los

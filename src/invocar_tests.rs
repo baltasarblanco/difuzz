@@ -53,20 +53,20 @@ function t() { return this === undefined ? 'u' : typeof this; }
     assert_eq!(
         stdout,
         "\
-f = fn
-g = fn
-h = fn
-r = fn
-C = fn
+f = [Function: f]
+g = [Function: g]
+h = [Function: h]
+r = [Function: r]
+C = [Function: C]
 k = 7
-e = fn
-t = fn
+e = [Function: e]
+t = [Function: t]
 f() = 42
 g() throws TypeError
 h() = promesa
 r() = promesa
 C() throws TypeError
-e() = fn
+e() = [Function: inner]
 t() = \"object\"
 !dz promesa h() = [1]
 !dz promesa r() throws RangeError
@@ -87,7 +87,7 @@ fn sin_invocar_la_salida_no_cambia() {
     let Some((code, stdout)) = run_node("b", &epilogo) else {
         panic!("run_node({:?}) no pudo correr node", "b");
     };
-    assert_eq!((code, stdout.as_str()), (0, "f = fn\nk = 7\n"));
+    assert_eq!((code, stdout.as_str()), (0, "f = [Function: f]\nk = 7\n"));
 }
 
 /// M6: un Error observado o devuelto se serializa solo con su tipo: el mensaje
@@ -103,7 +103,7 @@ fn error_observado_sin_mensaje() {
         panic!("run_node({:?}) no pudo correr node", "m6");
     };
     assert_eq!(code, 0, "{stdout}");
-    assert_eq!(stdout, "e = Error(TypeError)\nMio = fn\nm = Error(RangeError)\nf = fn\nMio() throws TypeError\nf() = Error(Error)\n");
+    assert_eq!(stdout, "e = Error(TypeError)\nMio = [Function: Mio]\nm = Error(RangeError)\nf = [Function: f]\nMio() throws TypeError\nf() = Error(Error)\n");
 }
 
 /// M31 (b): un programa que declara `__difuzzObserveInvocar` ya no sombrea la
@@ -122,7 +122,7 @@ fn invocar_no_se_sombrea() {
         panic!("run_node({:?}) no pudo correr node", "m31b");
     };
     // (Se invoca la del programa como un binding mas: imprime `mia`.)
-    assert_eq!((code, stdout.as_str()), (0, "__difuzzObserveInvocar = fn\nk = 1\nf = fn\nmia\n__difuzzObserveInvocar() = undefined\nf() = 2\n"), "{epi}");
+    assert_eq!((code, stdout.as_str()), (0, "__difuzzObserveInvocar = [Function: __difuzzObserveInvocar]\nk = 1\nf = [Function: f]\nmia\n__difuzzObserveInvocar() = undefined\nf() = 2\n"), "{epi}");
     // Lo mismo dentro de una funcion (forma en_funcion).
     let (code, stdout) = run_node("m31b2", &Forma::EnFuncion.apply(&epi)).unwrap();
     assert_eq!(code, 0);
@@ -131,7 +131,7 @@ fn invocar_no_se_sombrea() {
     let g = instrument("var globalThis = 1;\nfunction f() { return 2; }\n", true, SourceKind::Script).unwrap();
     assert!(g.contains("\n__difuzzObserveInvocar([\"globalThis\", globalThis], [\"f\", f]);\n"), "{g}");
     let (code, stdout) = run_node("m31b3", &g).unwrap();
-    assert_eq!((code, stdout.as_str()), (0, "globalThis = 1\nf = fn\nf() = 2\n"));
+    assert_eq!((code, stdout.as_str()), (0, "globalThis = 1\nf = [Function: f]\nf() = 2\n"));
     // Los dos declarados: no hay por donde invocar.
     let d = instrument("var globalThis = 1;\nfunction __difuzzObserveInvocar() {}\n", true, SourceKind::Script).unwrap();
     assert!(d.ends_with("\n__difuzzObserve([\"globalThis\", globalThis], [\"__difuzzObserveInvocar\", __difuzzObserveInvocar]);\n"), "{d}");
@@ -151,14 +151,14 @@ fn reobserva_despues_de_invocar() {
     };
     assert_eq!(
         (code, stdout.as_str()),
-        (0, "k = 1\no = {\"n\": 0}\ns = \"x\"\ninc = fn\ninc() = undefined\nk = 2 (tras invocar)\no = {\"n\": 5} (tras invocar)\n")
+        (0, "k = 1\no = {\"n\": 0}\ns = \"x\"\ninc = [Function: inc]\ninc() = undefined\nk = 2 (tras invocar)\no = {\"n\": 5} (tras invocar)\n")
     );
     // CJS: module.exports despues de invocar.
     let cjs = "module.exports = { n: 0, f() { module.exports.n = 3; } };\n";
     let (code, stdout) = run_node("m31c2", &instrument(cjs, true, SourceKind::Script).unwrap()).unwrap();
     assert_eq!(
         (code, stdout.as_str()),
-        (0, "module.exports = {\"n\": 0, \"f\": fn}\nmodule.exports.f() = undefined\nmodule.exports = {\"n\": 3, \"f\": fn} (tras invocar)\n")
+        (0, "module.exports = {\"n\": 0, \"f\": [Function: f]}\nmodule.exports.f() = undefined\nmodule.exports = {\"n\": 3, \"f\": [Function: f]} (tras invocar)\n")
     );
 }
 
@@ -174,7 +174,7 @@ fn reobserva_exports_despues_de_invocar() {
     let r = Runner::new(&preload, crate::test_util::id_runner(), std::time::Duration::from_secs(20)).with_kind(SourceKind::Module).with_invocar(true);
     let e = r.observing().run("export let n = 0;\nexport function f() { n = 4; }\nexport const c = 1;\n");
     assert_eq!(e.status, Status::Exited(0), "{}", e.stderr);
-    assert_eq!(e.stdout, "export c = 1\nexport f = fn\nexport n = 0\nexport f() = undefined\nexport n = 4 (tras invocar)\n");
+    assert_eq!(e.stdout, "export c = 1\nexport f = [Function: f]\nexport n = 0\nexport f() = undefined\nexport n = 4 (tras invocar)\n");
 }
 
 /// M36: un CJS sin bindings top-level se observa por `module.exports`, y con
@@ -193,14 +193,14 @@ fn observa_module_exports() {
     let Some((code, stdout)) = run_node("m36", &epi) else {
         panic!("run_node({:?}) no pudo correr node", "m36");
     };
-    assert_eq!((code, stdout.as_str()), (0, "module.exports = {\"a\": 1, \"f\": fn}\n"));
+    assert_eq!((code, stdout.as_str()), (0, "module.exports = {\"a\": 1, \"f\": [Function: f]}\n"));
     let inv = Forma::EnFuncion.apply(&instrument(src, true, SourceKind::Script).unwrap());
     let (code, stdout) = run_node("m36i", &inv).unwrap();
-    assert_eq!((code, stdout.as_str()), (0, "module.exports = {\"a\": 1, \"f\": fn}\nmodule.exports.f() = 2\n"));
+    assert_eq!((code, stdout.as_str()), (0, "module.exports = {\"a\": 1, \"f\": [Function: f]}\nmodule.exports.f() = 2\n"));
     // Una UMD que exporta una funcion: se la llama a ella y a sus metodos.
     let umd = "(function (root, factory) { typeof module === 'object' ? module.exports = factory() : root.x = factory(); })(this, function () { function x() { return 7; } x.y = function () { return 8; }; return x; });\n";
     let (code, stdout) = run_node("m36u", &instrument(umd, true, SourceKind::Script).unwrap()).unwrap();
-    assert_eq!((code, stdout.as_str()), (0, "module.exports = fn\nmodule.exports() = 7\nmodule.exports.y() = 8\n"));
+    assert_eq!((code, stdout.as_str()), (0, "module.exports = [Function: x]\nmodule.exports() = 7\nmodule.exports.y() = 8\n"));
     // Sin mencionar module/exports, nada cambia; `modules` no es `module`.
     assert!(instrument("modules.x = 1;\n", false, SourceKind::Script).is_none());
 }

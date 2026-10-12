@@ -840,3 +840,11 @@
 26-b102-p01-etiqueta-y-valor	oxc-a-carril_a	known
 26-b102-p01-etiqueta-y-valor	oxc-b-core_defaults	known
 26-b102-p01-etiqueta-y-valor	oxc-b-carril_a	known
+# 10.3 (R2 de rev-b9-A, o02): un modulo mudo que exporta un objeto con una funcion cuyo `.name` cambia con el bug de
+# keep_names de oxc (parametro con default anonimo, como 25-b91-p01). La pasada observada del carril B la escribia `fn`
+# (igual en las 4 celdas con c9eab79, MEDIDO); ahora `[Function: handler]`: div/ en carril_a, igual en core_defaults
+# (los nombres se borran). En el carril A no parsea.
+26-b103-o02-export-objeto-con-fn	oxc-a-core_defaults	descarte:parse_esm
+26-b103-o02-export-objeto-con-fn	oxc-a-carril_a	descarte:parse_esm
+26-b103-o02-export-objeto-con-fn	oxc-b-core_defaults	igual
+26-b103-o02-export-objeto-con-fn	oxc-b-carril_a	div:Stdout

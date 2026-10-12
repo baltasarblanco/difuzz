@@ -568,8 +568,25 @@
     clearImmediate(i);
   } catch {}
 
+  // 10.3 (R2 de rev-b9-A): una funcion con su `.name`, en el formato de util.inspect que
+  // `oracle::normalize_names` borra (`[Function: f]`, `[Function (anonymous)]`). Sin keep_names
+  // en la celda se borra como siempre (`oracle::nombres_de_celda`); con keep_names (carril_a)
+  // el minifier promete el `.name` y se compara crudo, como lo que el programa imprime (9.1).
+  // Antes, `fn`: la pasada observada y `--invocar` no veian un bug de keep_names. Sin getters
+  // ni traps de un Proxy: un `name` que no es un dato string sale `[Function]` (normalize_names
+  // lo deja igual). Clases y funciones async o generadoras tambien salen `[Function...]`: el
+  // tipo lo da el codigo fuente (toString), que el preload no lee.
+  const serFuncion = (f) => {
+    let d;
+    try {
+      d = esProxy(f) ? undefined : Object.getOwnPropertyDescriptor(f, 'name');
+    } catch {}
+    if (!d || !('value' in d) || typeof d.value !== 'string') return '[Function]';
+    return d.value === '' ? '[Function (anonymous)]' : `[Function: ${d.value}]`;
+  };
+
   // Serializador determinista. Nunca invoca getters (lee descriptores) y nunca imprime
-  // codigo fuente ni nombres de funciones: esos cambian legitimamente al minificar.
+  // codigo fuente; los nombres de funciones, como util.inspect (10.3, `serFuncion`).
   const ser = (v, depth, ancestors) => {
     switch (typeof v) {
       case 'undefined': return 'undefined';
@@ -578,7 +595,7 @@
       case 'string': return JSON.stringify(v);
       case 'boolean': return String(v);
       case 'symbol': return `Symbol(${JSON.stringify(v.description ?? '')})`;
-      case 'function': return 'fn';
+      case 'function': return serFuncion(v);
     }
     if (v === null) return 'null';
     if (ancestors.has(v)) return '[cycle]';
@@ -1221,7 +1238,8 @@
   //   - Sin argumentos y con this undefined: lo unico que no inventa nada. En sloppy
   //     this pasa a ser globalThis, igual en A y en B.
   //   - Sin `new`: una clase lanza TypeError al llamarla (determinista).
-  //   - El resultado pasa por `ser`: una funcion devuelta es 'fn', sin nombre ni length.
+  //   - El resultado pasa por `ser`: una funcion devuelta es `[Function: <name>]` (10.3), sin
+  //     length.
   //     El tipo de una excepcion sale de thrownType: sin mensaje (trae nombres).
   //   - Promesa nativa: se imprime `promesa` y su resultado sale al terminar
   //     (`!dz promesa <nombre>() ...`), en orden de observacion y no de resolucion: el

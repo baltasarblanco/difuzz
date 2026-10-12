@@ -41,8 +41,8 @@ tests/golden/verificar.sh [--jobs N] [BINARIO] [DIR_SALIDA]
 
 ## Aceptación de los re-chequeos — `tests/aceptacion/rechequeos/`
 
-174 casos que combinan un bug real de oxc con un flag de asunción (o con la forma en que se imprime), en las 4
-celdas de oxc (174 × 4 = 696 comparaciones): 21 de la revisión 1 (C4, `00-` a `10-`), 9 adversariales del revisor de la fase R (`r01` a
+175 casos que combinan un bug real de oxc con un flag de asunción (o con la forma en que se imprime), en las 4
+celdas de oxc (175 × 4 = 700 comparaciones): 21 de la revisión 1 (C4, `00-` a `10-`), 9 adversariales del revisor de la fase R (`r01` a
 `r10`, sin `r05`), `14-tdz-positivo`, 11 de los flags que antes no tenían re-chequeo (`15-` coerción, `16-`
 built-ins, `17-` contenido de `toString`/`.stack`, `18-` profundidad: positivos y adversariales con el Issue A),
 15 de la revisión de t-int (`19-`: el bug adentro del código que el re-chequeo neutraliza; r03, r06 y r13 son
@@ -82,7 +82,9 @@ llegar a la línea en que B difiere de A; `p01`, el positivo de `24-f1-p01` con 
 `?:`, sigue en `known/` y depende del mismo límite de pila) y 4 de R1 de la revisión del bloque 9 (`26-b102-`,
 ítem 10.2: la misma profundidad nativa con una etiqueta salable en la misma línea que el valor, antes, después
 o pegada; la sal tiene que caer en un token que difiere de A, no en la etiqueta: `div/`; `p01`, el positivo
-con la etiqueta, sigue en `known/`). Los `19-`, `20-` y `22-` esperan `div/` en todas
+con la etiqueta, sigue en `known/`) y 1 de R2 de la misma revisión (`26-b103-o02`, ítem 10.3: un módulo mudo que
+exporta una función cuyo `.name` cambia con el bug de keep_names; la pasada observada la escribe con su nombre:
+`div/` en carril_a, igual en core_defaults, descarte en el carril A). Los `19-`, `20-` y `22-` esperan `div/` en todas
 las celdas; los `21-`, `23-`, `24-`, `25-b92-`, `25-b93-` y `26-b102-`, `div/` salvo los positivos (menos `24-b83-p02` en
 core_defaults, que sigue en `div/`: el marco del stack cambia de nombre; y `25-b93-p03` en carril_a) y los
 `24-b83h1-` en core_defaults. Los `25-b91-p` esperan `div/` en carril_a e igual en core_defaults (sin

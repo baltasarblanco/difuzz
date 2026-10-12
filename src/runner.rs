@@ -1746,12 +1746,12 @@ mod tests {
         let epi = instrument(mudo, false, SourceKind::Module).expect("un modulo con bindings se observa");
         let e = r.run(&epi);
         assert_eq!(e.status, Status::Exited(0), "{}", e.stderr);
-        assert_eq!(e.stdout, "o = {\"a\": 1}\nn = 2\nf = fn\n");
+        assert_eq!(e.stdout, "o = {\"a\": 1}\nn = 2\nf = [Function: f]\n");
         // `import` no es un binding que observar; un script no parsea como modulo.
         assert!(instrument("import 'node:fs';\n", false, SourceKind::Module).is_none());
         let inv = r.with_invocar(true);
         let e = inv.observing().run("export function f() { return 2; }\nexport const k = 3;\n");
-        assert_eq!(e.stdout, "export f = fn\nexport k = 3\nexport f() = 2\n");
+        assert_eq!(e.stdout, "export f = [Function: f]\nexport k = 3\nexport f() = 2\n");
     }
 
     /// M16: los argumentos extra llegan a node.
@@ -1862,9 +1862,9 @@ mod tests {
         assert_eq!(a.status, Status::Exited(0), "{}", a.stderr);
         // b7-3: se ocultan el reloj, la lista enlazada y los ids de async_hooks; el resto
         // (delay, `_repeat`, `_destroyed`, refed, lo agregado) se imprime.
-        let t = "[Timeout]{\"_idleTimeout\": 5, \"_onTimeout\": fn, \"_timerArgs\": undefined, \"_repeat\": null, \"_destroyed\": false, [Symbol(refed)]: true, [Symbol(kHasPrimitive)]: false, [Symbol(kAsyncContextFrame)]: undefined}";
-        let v = "[Timeout]{\"_idleTimeout\": 7, \"_onTimeout\": fn, \"_timerArgs\": undefined, \"_repeat\": 7, \"_destroyed\": false, \"resultado\": \"PASS\", [Symbol(refed)]: true, [Symbol(kHasPrimitive)]: false, [Symbol(kAsyncContextFrame)]: undefined}";
-        let i = "[Immediate]{\"_onImmediate\": fn, \"_argv\": undefined, \"_destroyed\": false, [Symbol(refed)]: true, [Symbol(kAsyncContextFrame)]: undefined}";
+        let t = "[Timeout]{\"_idleTimeout\": 5, \"_onTimeout\": [Function (anonymous)], \"_timerArgs\": undefined, \"_repeat\": null, \"_destroyed\": false, [Symbol(refed)]: true, [Symbol(kHasPrimitive)]: false, [Symbol(kAsyncContextFrame)]: undefined}";
+        let v = "[Timeout]{\"_idleTimeout\": 7, \"_onTimeout\": [Function (anonymous)], \"_timerArgs\": undefined, \"_repeat\": 7, \"_destroyed\": false, \"resultado\": \"PASS\", [Symbol(refed)]: true, [Symbol(kHasPrimitive)]: false, [Symbol(kAsyncContextFrame)]: undefined}";
+        let i = "[Immediate]{\"_onImmediate\": [Function (anonymous)], \"_argv\": undefined, \"_destroyed\": false, [Symbol(refed)]: true, [Symbol(kAsyncContextFrame)]: undefined}";
         assert_eq!(a.stdout, format!("t = {t}\nv = {v}\ni = {i}\no = {{\"t\": {t}, \"d\": {{\"i\": {i}}}}}\nc = inst{{\"x\": 1}}\n"));
     }
 
