@@ -1333,7 +1333,7 @@ fn process_case(
     // 10.1: el crudo contra A antes de cualquier descarte de A: un codegen que rompe A lo
     // descartaria (`invalido`, `exit`) sin que nadie lo viera.
     if cli.crudo && !matches!(a.status, Status::Failed(_)) {
-        chequeo_crudo(ctx, runner, &mut stats.crudo, rel, &src, &original, &a);
+        crudo_sin_perder_el_caso(&mut stats.crudo, rel, |st| chequeo_crudo(ctx, runner, st, rel, &src, &original, &a));
     }
     if original_no_compila(runner, &a, &original) {
         stats.a_invalid += 1;
@@ -1376,6 +1376,25 @@ fn process_case(
     }
 }
 
+/// 10.1b (H2 de la revision B de 10.1): `chequeo` (`chequeo_crudo`) con su propio `catch_unwind`.
+/// Corre antes de `compare_base`, dentro del `catch_unwind` del worker: un panic ahi terminaba el
+/// caso como `panic_del_fuzzer` sin comparar A con B. Ahora el caso sigue y el crudo cuenta como
+/// `runner` (un error de difuzz), con una linea por stderr. Los contadores del chequeo se suman
+/// solo si termino; si no, `comparados`, `runner` y los aciertos de cache que ya hubo (la suma de
+/// `comparados` se mantiene). Lo que el chequeo ya hubiera escrito en codegen/ queda.
+fn crudo_sin_perder_el_caso(st: &mut CrudoStats, rel: &Path, chequeo: impl FnOnce(&mut CrudoStats)) {
+    let mut propio = CrudoStats::default();
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| chequeo(&mut propio))) {
+        Ok(()) => st.merge(&propio),
+        Err(_) => {
+            st.comparados += 1;
+            st.runner += 1;
+            st.cache_hits += propio.cache_hits;
+            eprintln!("runner (crudo): panic del fuzzer en el chequeo del crudo, el caso sigue con A contra B: {}", rel.display());
+        }
+    }
+}
+
 /// 10.1 (`--crudo`): el punto ciego de A. A no es el texto del caso sino el programa que el
 /// backend parseo e imprimio (`minify::prepare`: oxc con `oxc_codegen`; swc con `paren_remover`,
 /// `resolver`, `fixer` y su `emit`), y B sale del mismo programa parseado: un parser o un
@@ -1384,7 +1403,8 @@ fn process_case(
 /// con la forma aplicada) corre con el mismo runner que A (mismo archivo, preload, sensor y
 /// sandbox) y se compara con A (`oracle::mismo_programa`). Si difieren, `comparar_crudo`
 /// confirma; lo confirmado va a `codegen/` (`Reporter::codegen`). No cambia nada de lo que
-/// sigue: el caso se compara con B como siempre (un bug del minificador nunca se pierde por esto).
+/// sigue: el caso se compara con B como siempre (un bug del minificador nunca se pierde por esto;
+/// tampoco con un panic aca: `crudo_sin_perder_el_caso`).
 fn chequeo_crudo(ctx: &Ctx, runner: &runner::Runner, st: &mut CrudoStats, rel: &Path, crudo: &str, original: &str, a: &runner::Exec) {
     st.comparados += 1;
     // El mismo texto es el mismo programa (no pasa: el codegen minify saca espacios).
@@ -2762,6 +2782,27 @@ fn hint_lines(out: &Path, stats: &Stats) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
+    /// 10.1b (H2 de la revision B de 10.1): un panic en el chequeo del crudo no sale de
+    /// `crudo_sin_perder_el_caso` (el caso sigue con A contra B) y cuenta como `runner`, sin los
+    /// contadores a medias del chequeo; uno que termina suma lo suyo.
+    #[test]
+    fn panic_en_el_crudo_no_pierde_el_caso() {
+        let mut st = super::CrudoStats::default();
+        let rel = std::path::Path::new("x/input.js");
+        super::crudo_sin_perder_el_caso(&mut st, rel, |s| {
+            s.comparados += 1;
+            s.cache_hits += 1;
+            s.codegen += 1;
+            panic!("prueba: panic en el chequeo del crudo");
+        });
+        assert_eq!((st.comparados, st.codegen, st.runner, st.cache_hits), (1, 0, 1, 1));
+        super::crudo_sin_perder_el_caso(&mut st, rel, |s| {
+            s.comparados += 1;
+            s.iguales += 1;
+        });
+        assert_eq!((st.comparados, st.iguales, st.codegen, st.runner), (2, 1, 0, 1));
+    }
+
     /// El aviso final nombra los directorios que de verdad tienen hallazgos:
     /// con solo panics, `panic/` y no `div/` (antes decia "hallazgos en div").
     #[test]
