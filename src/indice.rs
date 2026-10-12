@@ -9,7 +9,8 @@
 //! `caso<TAB>celda<TAB>destino<TAB>kind<TAB>hash16`
 //!
 //! `caso` es el nombre del directorio del hallazgo (`div/<caso>`), `destino`
-//! es div | known | panic | lint y `hash16` el del sintoma (oracle.rs).
+//! es div | known | panic | lint | recursos | codegen (10.1, `--crudo`) y `hash16` el del
+//! sintoma (oracle.rs).
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Write;
@@ -312,16 +313,20 @@ pub fn cruce(dir: &Path) -> std::io::Result<String> {
         out.push('\n');
     }
     out.push_str("\n=== hallazgos por celda\n");
+    // 10.1: `codegen=` (al final) solo si alguna celda corrio con --crudo y dejo alguno: sin la
+    // opcion, la tabla queda como antes.
+    let con_codegen = rows.iter().any(|r| r.dest == "codegen");
     for c in &cells {
         let n = |d: &str| counts.get(&(c.as_str(), d)).copied().unwrap_or(0);
         out.push_str(&format!(
-            "{c}: div={} known={} panic={} lint={} recursos={}\n",
+            "{c}: div={} known={} panic={} lint={} recursos={}{}\n",
             n("div"),
             n("known"),
             n("panic"),
             n("lint"),
             // b2-int (R1-H08 / R2-H04): timeout o memoria del minificador.
-            n("recursos")
+            n("recursos"),
+            if con_codegen { format!(" codegen={}", n("codegen")) } else { String::new() }
         ));
     }
     let pendientes = sin_terminar(dir);
@@ -443,6 +448,30 @@ mod tests {
         assert!(!t.lines().any(|l| l.ends_with("fixture__conocida") || l.ends_with("fixture__lint")), "{t}");
         assert!(t.lines().next().unwrap().contains("P = panic/, R = recursos/"), "{t}");
         assert!(t.contains("oxc+core_defaults+tal_cual: div=0 known=1 panic=1 lint=1 recursos=1"), "{t}");
+    }
+
+    /// 10.1: `codegen=` al final de la linea por celda solo si alguna celda dejo un codegen/
+    /// (`--crudo`); no entra en la tabla por caso (ortogonal, como lint/).
+    #[test]
+    fn cruce_cuenta_codegen_solo_si_hay() {
+        let d = std::env::temp_dir().join(format!("difuzz-test-indice-codegen-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        let a = Index::create(&d, "oxc+carril_a+tal_cual").unwrap();
+        a.record("ne-assign-paren", "div", "Stdout", 1);
+        a.commit().unwrap();
+        drop(a);
+        let sin = cruce(&d).unwrap();
+        assert!(sin.contains("oxc+carril_a+tal_cual: div=1 known=0 panic=0 lint=0 recursos=0\n") && !sin.contains("codegen"), "{sin}");
+        let b = Index::create(&d, "oxc+core_defaults+tal_cual").unwrap();
+        b.record("ne-assign-paren", "codegen", "Stdout", 2);
+        b.commit().unwrap();
+        drop(b);
+        let con = cruce(&d).unwrap();
+        std::fs::remove_dir_all(&d).unwrap();
+        assert!(con.contains("oxc+carril_a+tal_cual: div=1 known=0 panic=0 lint=0 recursos=0 codegen=0\n"), "{con}");
+        assert!(con.contains("oxc+core_defaults+tal_cual: div=0 known=0 panic=0 lint=0 recursos=0 codegen=1\n"), "{con}");
+        let fila: Vec<&str> = con.lines().find(|l| l.ends_with("ne-assign-paren")).unwrap().split_whitespace().collect();
+        assert_eq!(fila, [".", "S", "ne-assign-paren"], "{con}");
     }
 
     /// 7b (aceptacion): un backend nuevo (el falso `identidad`) sale en `--cruce`

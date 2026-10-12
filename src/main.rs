@@ -61,7 +61,7 @@ use runner::Status;
 const USAGE: &str = "\
 uso: difuzz <corpus_dir> [--out DIR] [--minifier M] [--config C] [--forma F] [--carril K] [--timeout-ms N] [--limit N] [--jobs N] [--no-observe]
              [--invocar] [--mutaciones N] [--mutaciones-extra N] [--stubs] [--cache DIR | --no-cache] [--indice DIR] [--en-proceso]
-             [--mem-hijo MiB] [--sandbox | --sandbox-red]
+             [--mem-hijo MiB] [--sandbox | --sandbox-red] [--crudo]
        difuzz --cruce DIR
        difuzz --emitir ARCHIVO [--minifier M] [--config C] [--forma F] [--carril K]
        difuzz --help
@@ -94,6 +94,13 @@ uso: difuzz <corpus_dir> [--out DIR] [--minifier M] [--config C] [--forma F] [--
   --sandbox-red  --sandbox mas namespaces de Linux sin root (usuario, red, montajes): sin red
                  (solo un loopback propio), /run tapado y los sockets unix del sistema tapados.
                  Solo Linux con user namespaces; si no se puede armar, sale con 1 (default: off)
+  --crudo        10.1: ademas corre el texto crudo de cada caso (lo que lee el backend, antes de
+                 parsearlo e imprimirlo) con el mismo runner que el original y lo compara con el
+                 original impreso (A): status y stdout, sin posiciones de stack. Si difieren y se
+                 repite, el caso va tambien a codegen/ (un bug del parser o del codegen: A y B lo
+                 cargan igual, el oraculo no lo ve), ortogonal como lint/. Solo la pasada cruda del
+                 caso base (no las observadas ni las variantes). Una linea `crudo (10.1):` en las
+                 stats. Cuesta una ejecucion de node mas por caso (cacheable) (default: off)
   --cache DIR    cache de la ejecucion del original, compartible entre celdas (default: <out>/cache-a)
   --no-cache     no leer ni escribir la cache
                  (cache_a_hits no es determinista: con la cache en frio depende de --jobs y del
@@ -125,8 +132,8 @@ uso: difuzz <corpus_dir> [--out DIR] [--minifier M] [--config C] [--forma F] [--
 
   salida (R2-H06): cada caso termina en un destino, div/ known/ panic/ recursos/ (un directorio por
   caso), en iguales (sin archivo) o con una fila en descartes.tsv (caso, causa, elapsed_ms), incluidos
-  mudo_sin_bindings, ilegible y panic_del_fuzzer. lint/ y asserts/ son ortogonales (el caso cuenta
-  tambien donde termino). Sin --mutaciones (las variantes caso__mutK tambien dejan filas):
+  mudo_sin_bindings, ilegible y panic_del_fuzzer. lint/, asserts/ y codegen/ (--crudo) son ortogonales
+  (el caso cuenta tambien donde termino). Sin --mutaciones (las variantes caso__mutK tambien dejan filas):
     total = iguales + DIVERGENCIAS + conocidas + PANICS + RECURSOS + filas(descartes.tsv)
   (un panic del fuzzer despues de contar el caso lo cuenta dos veces: panics_del_fuzzer= lo dice)
 
@@ -289,6 +296,8 @@ struct Cli {
     emitir: Option<PathBuf>,
     /// R2-H04: `--mem-hijo MiB`, presupuesto de RSS de los hijos de un worker.
     mem_hijo: Option<u64>,
+    /// 10.1: `--crudo`, el texto crudo contra el original impreso (`chequeo_crudo`).
+    crudo: bool,
 }
 
 impl Cli {
@@ -346,6 +355,7 @@ impl Cli {
         let mut subproceso = true;
         let mut emitir = None;
         let mut mem_hijo = None;
+        let mut crudo = false;
 
         let mut it = args.into_iter();
         while let Some(arg) = it.next() {
@@ -407,6 +417,7 @@ impl Cli {
                     mutaciones_extra = v.parse().map_err(|_| format!("--mutaciones-extra invalido: {v}"))?;
                 }
                 "--stubs" => stubs = true,
+                "--crudo" => crudo = true,
                 // n-sandbox: --sandbox-red incluye --sandbox (en cualquier orden).
                 "--sandbox" => sandbox = sandbox.max(runner::Sandbox::Permisos),
                 "--sandbox-red" => sandbox = runner::Sandbox::PermisosYRed,
@@ -477,6 +488,7 @@ impl Cli {
             subproceso,
             emitir,
             mem_hijo,
+            crudo,
         })
     }
 }
@@ -605,6 +617,53 @@ struct Stats {
     /// R1-H13/H14: nota de la pasada en curso para meta.txt (la lee
     /// compare_and_report). No se suma en `merge`.
     nota_pasada: Option<String>,
+    /// 10.1 (`--crudo`): los casos cuyo crudo se comparo con A, y como termino cada uno
+    /// (`chequeo_crudo`). En una linea aparte, solo con la opcion: comparados = identicos +
+    /// iguales + codegen + contenido + no_determinista + timeout + runner.
+    crudo: CrudoStats,
+}
+
+/// 10.1: contadores de `--crudo` (ver `Stats::crudo`).
+#[derive(Default)]
+struct CrudoStats {
+    comparados: usize,
+    /// El crudo es byte a byte el original impreso: no se corre.
+    identicos: usize,
+    iguales: usize,
+    /// Distintos y confirmados: van a codegen/.
+    codegen: usize,
+    /// Distintos solo por el contenido de toString o de .stack (con el contenido fijo del
+    /// preload dan lo mismo): la asuncion de toString de oxc, no un bug.
+    contenido: usize,
+    /// El crudo o A no se repiten a si mismos.
+    no_determinista: usize,
+    /// Los dos no terminaron a tiempo: nada que comparar.
+    timeout: usize,
+    /// Falla del runner con el crudo (error de difuzz).
+    runner: usize,
+    /// Ejecuciones del crudo que salieron de la cache de A (ortogonal).
+    cache_hits: usize,
+}
+
+impl CrudoStats {
+    fn merge(&mut self, o: &CrudoStats) {
+        self.comparados += o.comparados;
+        self.identicos += o.identicos;
+        self.iguales += o.iguales;
+        self.codegen += o.codegen;
+        self.contenido += o.contenido;
+        self.no_determinista += o.no_determinista;
+        self.timeout += o.timeout;
+        self.runner += o.runner;
+        self.cache_hits += o.cache_hits;
+    }
+
+    fn line(&self) -> String {
+        format!(
+            "crudo (10.1): comparados={} identicos={} iguales={} CODEGEN={} contenido={} no_determinista={} timeout={} runner={} | cache_hits={}",
+            self.comparados, self.identicos, self.iguales, self.codegen, self.contenido, self.no_determinista, self.timeout, self.runner, self.cache_hits
+        )
+    }
 }
 
 impl Stats {
@@ -659,6 +718,7 @@ impl Stats {
         self.bloques += o.bloques;
         self.bloques_unica += o.bloques_unica;
         self.bloques_sin_salida += o.bloques_sin_salida;
+        self.crudo.merge(&o.crudo);
     }
 
     /// Devuelve la causa (M26: descartes.tsv).
@@ -1078,6 +1138,11 @@ fn main() {
     if stats.sensor_omitidos > 0 {
         linea!("sensor (b7-8): omitido_por_riesgo_v8={}", stats.sensor_omitidos);
     }
+    // 10.1: en una linea aparte, solo con --crudo (no cambia la de `total=`).
+    let linea_crudo = cli.crudo.then(|| stats.crudo.line());
+    if let Some(l) = &linea_crudo {
+        linea!("{l}");
+    }
     // n-sandbox: en una linea aparte, solo con --sandbox (no cambia la de `total=`).
     // 7.7 (MENOR 5): `solo_original=` cuenta pasadas, tambien las de las variantes.
     let solo_original = stats.solo_a_sandbox + stats.mutaciones.solo_a_sandbox;
@@ -1103,6 +1168,7 @@ fn main() {
     // muerto pierde los suyos) y sin escrituras perdidas es `completa`.
     let mut notas = vec![format!("procesados: {} de {total}", stats.total), format!("stats: {}", stats.line())];
     notas.extend(linea_sandbox);
+    notas.extend(linea_crudo);
     if lost > 0 {
         notas.push(format!("escrituras_perdidas: {lost}"));
     }
@@ -1264,6 +1330,11 @@ fn process_case(
     let runner = por_riesgo.as_ref().unwrap_or(runner);
     // Precondicion del oraculo: el original termina solo (exit 0 o lanzando).
     let (a, a_cached) = ctx.cache.run(runner, &original, &mut stats.cache_hits);
+    // 10.1: el crudo contra A antes de cualquier descarte de A: un codegen que rompe A lo
+    // descartaria (`invalido`, `exit`) sin que nadie lo viera.
+    if cli.crudo && !matches!(a.status, Status::Failed(_)) {
+        chequeo_crudo(ctx, runner, &mut stats.crudo, rel, &src, &original, &a);
+    }
     if original_no_compila(runner, &a, &original) {
         stats.a_invalid += 1;
         ctx.reporter.discard(rel, "invalido", a.elapsed);
@@ -1303,6 +1374,167 @@ fn process_case(
         let base_div = stats.last_div.take();
         process_mutants(ctx, runner_celda, cfg, names_cfg, cli, &mut stats.mutaciones, rel, &raw, base_div, base_lint);
     }
+}
+
+/// 10.1 (`--crudo`): el punto ciego de A. A no es el texto del caso sino el programa que el
+/// backend parseo e imprimio (`minify::prepare`: oxc con `oxc_codegen`; swc con `paren_remover`,
+/// `resolver`, `fixer` y su `emit`), y B sale del mismo programa parseado: un parser o un
+/// codegen que cambian la semantica (`(h) = function(){}` impreso sin los parentesis: el `.name`
+/// pasa de "" a "h") le pegan igual a A y a B y el oraculo no lo ve. Aca el texto crudo (`src`,
+/// con la forma aplicada) corre con el mismo runner que A (mismo archivo, preload, sensor y
+/// sandbox) y se compara con A (`oracle::mismo_programa`). Si difieren, `comparar_crudo`
+/// confirma; lo confirmado va a `codegen/` (`Reporter::codegen`). No cambia nada de lo que
+/// sigue: el caso se compara con B como siempre (un bug del minificador nunca se pierde por esto).
+fn chequeo_crudo(ctx: &Ctx, runner: &runner::Runner, st: &mut CrudoStats, rel: &Path, crudo: &str, original: &str, a: &runner::Exec) {
+    st.comparados += 1;
+    // El mismo texto es el mismo programa (no pasa: el codegen minify saca espacios).
+    if crudo == original {
+        st.identicos += 1;
+        return;
+    }
+    match comparar_crudo(ctx, runner, &mut st.cache_hits, crudo, original, a) {
+        Crudo::Igual => st.iguales += 1,
+        Crudo::Timeout => st.timeout += 1,
+        Crudo::Runner(e) => {
+            st.runner += 1;
+            eprintln!("runner (crudo): {e}");
+        }
+        // Por stderr, para saber cuales (no tienen directorio).
+        Crudo::NoDeterminista => {
+            st.no_determinista += 1;
+            eprintln!("crudo: no determinista (el crudo o A no se repiten): {}", rel.display());
+        }
+        Crudo::Contenido => {
+            st.contenido += 1;
+            eprintln!("crudo: difiere solo por el contenido de toString o .stack: {}", rel.display());
+        }
+        Crudo::Codegen(c) => {
+            st.codegen += 1;
+            let (r, a, pasos) = *c;
+            // El crudo hace de original y A de minificado (con los nombres crudos: el kind
+            // tiene que ver la diferencia que vio `mismo_programa`).
+            let kind = {
+                let _crudos = oracle::con_nombres_crudos(true);
+                match oracle::compare(&r, &a) {
+                    oracle::Verdict::Divergence(k) => k,
+                    oracle::Verdict::Same if r.status != a.status => oracle::Kind::ExitStatus,
+                    oracle::Verdict::Same => oracle::Kind::Stdout,
+                }
+            };
+            eprintln!("CODEGEN {kind:?} (crudo != original impreso): {}", rel.display());
+            ctx.reporter.codegen(rel, crudo, original, &r, &a, kind, &pasos);
+        }
+    }
+}
+
+/// 10.1: como termino la comparacion del crudo con A (`comparar_crudo`).
+enum Crudo {
+    Igual,
+    /// El crudo y A no terminaron a tiempo (con el timeout de la celda): nada que comparar.
+    Timeout,
+    Runner(String),
+    NoDeterminista,
+    /// Difieren solo por el contenido de `Function.prototype.toString` o de `.stack`.
+    Contenido,
+    /// Confirmado: el crudo, A (los de la confirmacion) y los pasos, para `codegen/`.
+    Codegen(Box<(runner::Exec, runner::Exec, String)>),
+}
+
+/// 10.1: compara el crudo con A como `confirm` compara A con B, sin dar nada por diferente
+/// sin repetirlo:
+/// 1. el crudo (de la cache de A, si esta: no depende del preset) contra el A del caso;
+/// 2. si difieren: el crudo y A otra vez cada uno, dos veces y en fresco. Si alguno no se
+///    repite a si mismo, `NoDeterminista` (la cache del crudo se lapida si fue ella);
+///    si los frescos coinciden, `Igual`;
+/// 3. un lado en Timeout y el otro no: se repite con `max(4 x timeout, 20 x elapsed del otro)`;
+/// 4. alguno corrio sin el sensor entero (`sensor_degradado`): los dos sin el sensor;
+/// 5. con `fn_tostring` o `stack` en los flags: los dos con el contenido fijo del preload
+///    (DIFUZZ_SALT=fijo, el de `recheck::contenido_matters`); si asi coinciden, `Contenido`.
+fn comparar_crudo(
+    ctx: &Ctx,
+    runner: &runner::Runner,
+    hits: &mut usize,
+    crudo: &str,
+    original: &str,
+    a: &runner::Exec,
+) -> Crudo {
+    let mismo = oracle::mismo_programa;
+    let (r, r_cached) = ctx.cache.run(runner, crudo, hits);
+    if let Status::Failed(e) = r.status {
+        return Crudo::Runner(e);
+    }
+    if r.status == Status::Timeout && a.status == Status::Timeout {
+        return Crudo::Timeout;
+    }
+    if mismo(&r, a) {
+        return Crudo::Igual;
+    }
+    let mut pasos = vec![format!("1ra comparacion distinta (crudo {}, A del caso)", if r_cached { "de la cache" } else { "fresco" })];
+    let (r1, r2) = (runner.run(crudo), runner.run(crudo));
+    let (a1, a2) = (runner.run(original), runner.run(original));
+    for e in [&r1, &r2, &a1, &a2] {
+        if let Status::Failed(e) = &e.status {
+            return Crudo::Runner(e.clone());
+        }
+    }
+    if !mismo(&r1, &r2) || !mismo(&a1, &a2) {
+        if r_cached && !mismo(&r1, &r) {
+            ctx.cache.tombstone(runner, crudo);
+        }
+        return Crudo::NoDeterminista;
+    }
+    if r_cached && !mismo(&r1, &r) {
+        ctx.cache.tombstone(runner, crudo);
+    }
+    let (mut r, mut a) = (r1, a1);
+    if mismo(&r, &a) {
+        return Crudo::Igual;
+    }
+    pasos.push("el crudo y A repetidos dos veces en fresco: cada uno igual a si mismo".into());
+    match (r.status == Status::Timeout, a.status == Status::Timeout) {
+        (true, true) => return Crudo::Timeout,
+        (true, false) => {
+            let longer = (runner.timeout() * 4).max(a.elapsed * 20);
+            r = runner.run_with_timeout(crudo, longer);
+            pasos.push(format!("el crudo en Timeout: repetido con {longer:?} -> {:?}", r.status));
+        }
+        (false, true) => {
+            let longer = (runner.timeout() * 4).max(r.elapsed * 20);
+            a = runner.run_with_timeout(original, longer);
+            pasos.push(format!("A en Timeout: repetido con {longer:?} -> {:?}", a.status));
+        }
+        (false, false) => {}
+    }
+    if mismo(&r, &a) {
+        return Crudo::Igual;
+    }
+    let sin_sensor;
+    let mut runner = runner;
+    if runner.con_sensor() && (r.sensor_degradado().is_some() || a.sensor_degradado().is_some()) {
+        sin_sensor = runner.sin_sensor();
+        runner = &sin_sensor;
+        (r, a) = (runner.run(crudo), runner.run(original));
+        pasos.push("alguno corrio sin el sensor entero: los dos repetidos sin el sensor".into());
+        if mismo(&r, &a) {
+            return Crudo::Igual;
+        }
+    }
+    let contenido = |e: &runner::Exec| e.flags.iter().any(|f| f == "fn_tostring" || f == "stack");
+    if contenido(&r) || contenido(&a) {
+        let env = [("DIFUZZ_SALT", "fijo")];
+        let (rf, af) = (runner.run_with_env(crudo, &env), runner.run_with_env(original, &env));
+        if mismo(&rf, &af) {
+            return Crudo::Contenido;
+        }
+        pasos.push("con el contenido fijo de toString y .stack (DIFUZZ_SALT=fijo) siguen distintos".into());
+    }
+    if let Status::Failed(e) = &r.status {
+        return Crudo::Runner(e.clone());
+    }
+    if let Status::Failed(e) = &a.status {
+        return Crudo::Runner(e.clone());
+    }
+    Crudo::Codegen(Box::new((r, a, pasos.join("; "))))
 }
 
 /// La comparacion del caso base (pasada cruda y, si es mudo, la observada).
@@ -2494,6 +2726,9 @@ fn hint_lines(out: &Path, stats: &Stats) -> Vec<String> {
     if stats.solo_asserts_sin_div > 0 {
         v.push(format!("panics solo de debug assertions, sin divergencia, en {o}/asserts"));
     }
+    if stats.crudo.codegen > 0 {
+        v.push(format!("el crudo y el original impreso difieren (parser o codegen, --crudo) en {o}/codegen"));
+    }
     v
 }
 
@@ -3103,8 +3338,8 @@ mod tests {
             assert_eq!(es_opcion_de_difuzz(o), conocida, "{o}");
             de_difuzz += usize::from(conocida);
         }
-        // 22 opciones de Cli::parse mas --help (recontar si se agrega una).
-        assert_eq!(de_difuzz, 23);
+        // 23 opciones de Cli::parse mas --help (recontar si se agrega una; 10.1: --crudo).
+        assert_eq!(de_difuzz, 24);
         assert!(es_opcion_de_difuzz("-h") && !es_opcion_de_difuzz("-x") && !es_opcion_de_difuzz("--"));
     }
 

@@ -11,7 +11,10 @@ difieren, el minifier cambió el comportamiento del programa: es un candidato a 
    profundidad (no sigue symlinks a directorios), en orden fijo.
 2. **Minificar.** El backend parsea el caso una sola vez e imprime dos programas con el mismo
    printer: el original sin optimizar y el minificado. Así, una diferencia solo puede venir del
-   optimizador, nunca del parser ni del printer. Por defecto minifica en un proceso hijo
+   optimizador, nunca del parser ni del printer. El reverso es un punto ciego: el original que
+   corre (A) no es el texto del caso sino ese programa impreso, y un parser o un printer que
+   cambian la semántica le pegan igual a A y al minificado. `--crudo` lo cubre donde se usa (ver
+   [El texto crudo](#el-texto-crudo---crudo)). Por defecto minifica en un proceso hijo
    persistente por worker: un abort, un desborde de pila o un cuelgue del minifier no tiran
    abajo la corrida.
 3. **Ejecutar.** Los dos programas corren con `node --require preload.cjs`, en un entorno mínimo
@@ -145,6 +148,7 @@ Opciones principales (la lista completa, con defaults, está en `difuzz --help`)
 | `--mem-hijo MiB` | presupuesto de memoria de los hijos de cada worker | MemTotal/2 / workers |
 | `--sandbox` | node con su modelo de permisos (ver [Sandbox](#sandbox)) | apagado |
 | `--sandbox-red` | `--sandbox` más namespaces de Linux: sin red (ver [Sandbox](#sandbox)) | apagado |
+| `--crudo` | además corre el texto crudo de cada caso y lo compara con el original impreso; lo que difiere va a `codegen/` (ver [El texto crudo](#el-texto-crudo---crudo)) | apagado |
 
 ## Sandbox
 
@@ -324,6 +328,69 @@ atrapado por node).
   ejecución de node (medido en la muestra, con otros procesos cargando la máquina: ~1,4 ms de
   sistema más en el proceso de difuzz por cada node lanzado).
 
+## El texto crudo (`--crudo`)
+
+El backend parsea el caso e imprime el original (A) y el minificado (B) desde el mismo programa
+parseado: oxc con `oxc_codegen`, swc con `paren_remover`, `resolver`, `fixer` y su `emit` (ver
+`src/backend/oxc.rs` y `src/backend/swc.rs`). Un bug del parser o del printer que cambia la
+semántica queda en A y en B: el oráculo, que compara A con B, no lo ve. Pasa: el parser de oxc
+0.153.0 tira los paréntesis de `(h) = function(){}` y la función se llama `"h"` en vez de `""`
+(en node), aun con compress y mangle apagados.
+
+Con `--crudo`, por cada caso difuzz corre además el **texto crudo** (el `input.js` con la forma
+aplicada, lo que lee el backend) con el mismo runner que A (mismo archivo, preload, sensor y
+sandbox), antes de cualquier descarte de A, y lo compara con A: el estado de salida y el stdout,
+con las posiciones de los marcos de stack borradas (al reimprimir cambian líneas y columnas) y los
+nombres de `util.inspect` sin borrar (parsear e imprimir no tiene por qué tocarlos). Si difieren,
+no se da por diferente sin repetirlo: el crudo y A corren otra vez, dos veces cada uno y en fresco
+(si alguno no se repite a sí mismo, `no_determinista`; si ahora coinciden, iguales); un lado en
+timeout se repite con un timeout mayor, como B en la confirmación; si alguno no corrió entero con
+el sensor de violaciones, los dos sin él; y si el programa leyó `Function.prototype.toString` o
+`.stack`, los dos con el contenido fijo del preload: si así coinciden, la diferencia es de ese
+contenido (la asunción de `toString` de oxc), `contenido`, no un hallazgo.
+
+Lo confirmado va a `codegen/<caso>/`: `crudo.cjs` y `original.cjs` (`.mjs` en el carril B), lo que
+imprimió cada uno (`crudo.stdout`, `a.stdout`, ...) y un `meta.txt` con el `kind` (el crudo hace de
+original y A de minificado: `ThrowNew` es que A lanza y el crudo no), los pasos de la confirmación
+y dos comandos para reproducir cada lado. **No va a `div/`**: no es un bug del minificador (B lo
+hereda de A) sino del parser, del printer o de la cadena del backend antes del minificador, y se
+reporta a otro componente. Es **ortogonal**, como `lint/`: el caso sigue a la comparación de A con
+B como siempre (y termina en `div/`, `known/`, iguales o descartes), así que un bug del minificador
+en el mismo caso nunca se pierde por el chequeo, y la identidad de `total=` no cambia. Con la
+opción, una línea más en las stats (y en `CORRIDA.txt`):
+
+```
+crudo (10.1): comparados=N identicos=N iguales=N CODEGEN=N contenido=N no_determinista=N timeout=N runner=N | cache_hits=N
+```
+
+`comparados = identicos + iguales + CODEGEN + contenido + no_determinista + timeout + runner`
+(`identicos`: el texto crudo ya es el impreso; `timeout`: los dos sin terminar; `runner`: error de
+difuzz con el crudo). El crudo se guarda en la caché de A (no depende del preset: lo comparten las
+celdas del mismo carril); `cache_hits` cuenta esos aciertos. Con `--indice`, cada `codegen/` es una
+fila con destino `codegen`, y `--cruce` agrega `codegen=N` a los totales por celda (solo si alguna
+celda dejó uno). La celda no cambia de nombre.
+
+**Costo y ruido** (MEDIDO, 12-oct, fixtures de SWC, 3119 casos, oxc carril_a, `--no-cache`,
+`--jobs 8`): una ejecución de node más por caso (y cuatro más, solo en los que difieren). La
+corrida pasa de 43,0 s a 68,3 s en el carril A (+59 %) y de 51,8 s a 79,3 s en el B (+53 %); con la
+caché, el crudo se ahorra en las celdas siguientes del mismo carril. La línea `total=` y los
+destinos son los mismos con y sin la opción. De 2754 casos comparados en el A (3032 en el B):
+`CODEGEN=0`, `contenido=2` (`terser/compress/evaluate/issue_2919` y `prop_function`, que imprimen
+`Function.prototype.toString`), `timeout=6` (los mismos 6 que A no termina) y `no_determinista=0`.
+El stack impreso en stdout de `issue_2208_8` da iguales (las posiciones se borran) y el
+`Math.random` de `fixture/issues/8119` también (el preload lo fija). Los casos `contenido` y
+`no_determinista` no tienen directorio: salen por stderr (`crudo: ...`). En `tests/codegen/` (142
+casos) el costo es despreciable.
+
+**Qué cubre y qué no.** El punto ciego queda cubierto solo donde se usa la opción y solo para lo
+que el corpus ejercita: en los fixtures de SWC y en el corpus real el chequeo no encontró ningún bug
+(ver arriba), y el de los paréntesis salió de formas escritas a propósito, que están en
+`tests/codegen/` (ver [Tests y verificaciones](#tests-y-verificaciones)). No mira la pasada
+observada (el epílogo de un programa mudo), el envoltorio de módulos del carril B, `--invocar` ni
+las variantes de `--mutaciones`: un mudo se compara solo por su estado de salida y sus globals. El
+stderr no se compara. Un bug del parser que hace que el texto no parsee (`descarte:parse_*`) no
+llega al chequeo.
+
 ## Celdas
 
 Una **celda** es una combinación de opciones que cambia lo que se mide. Su nombre es
@@ -356,7 +423,8 @@ suyo.
     ├── panic/<caso>/          el minifier hizo panic (también sin debug assertions)
     ├── asserts/<caso>/        panic solo con debug assertions y sin divergencia
     ├── recursos/<caso>/       el minifier no terminó en 60 s o pasó el presupuesto de memoria
-    └── lint/<caso>/           sospechosos del lint: el minificado escribe sobre literales nuevos
+    ├── lint/<caso>/           sospechosos del lint: el minificado escribe sobre literales nuevos
+    └── codegen/<caso>/        con --crudo: el texto crudo y el original impreso dan otra salida
 ```
 
 Los directorios de destino se crean solo si algún caso termina ahí. `<caso>` es la ruta del caso
@@ -374,7 +442,7 @@ relativa al corpus, sin `input.js` y con `/` cambiado por `__` (`terser/compress
   total = iguales + DIVERGENCIAS + conocidas + PANICS + RECURSOS + filas de descartes.tsv
   ```
 
-  `lint/` y `asserts/` son ortogonales: el caso cuenta también donde terminó.
+  `lint/`, `asserts/` y `codegen/` son ortogonales: el caso cuenta también donde terminó.
 - **`--indice DIR` y `--cruce DIR`.** Con `--indice`, cada celda deja `DIR/index-<celda>.tsv`
   al terminar (una corrida interrumpida deja intacto el índice anterior). `difuzz --cruce DIR` lee esos índices y, sin correr
   nada, imprime una tabla caso × celda con el `kind` de cada hallazgo (`S`=Stdout,
@@ -786,11 +854,18 @@ Sin `node` en el `PATH`, los tests que lo necesitan fallan con un mensaje claro.
 - **Aceptación de los re-chequeos** (`tests/aceptacion/rechequeos/`): 170 casos que combinan un
   bug real de oxc con un flag de asunción (o con la forma en que se imprime), en las 4 celdas de oxc
   (680 comparaciones).
+- **Corpus de codegen** (`tests/codegen/`, 10.1): 142 formas propias cuya semántica depende de la
+  sintaxis exacta (paréntesis, comas, directivas, ASI, claves computadas, escapes), con `--crudo`
+  en 8 celdas (1136 comparaciones). Las 9 del bug de los paréntesis de oxc van a `codegen/`; los
+  bugs del minificador que también tocan (keepNames con `(0, function(){})`, la clase con
+  `static ["prototype"]`), a `div/`. Destinos justificados en
+  [`tests/codegen/README.md`](tests/codegen/README.md).
 
 ```sh
 tests/golden/verificar.sh --jobs 4                    # sale con 0 y "comparaciones=N fallas=0"
 tests/aceptacion/rechequeos/verificar.sh --jobs 4
-cargo test --release --test verificaciones -- --ignored --test-threads=1   # los dos, como tests de cargo
+tests/codegen/verificar.sh --jobs 4
+cargo test --release --test verificaciones -- --ignored --test-threads=1   # los tres, como tests de cargo
 ```
 
 - **Muestra fija** (`tests/muestra/`): 100 casos del corpus de tests de SWC para auditar el

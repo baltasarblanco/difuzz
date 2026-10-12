@@ -65,6 +65,18 @@ pub fn compare(a: &Exec, b: &Exec) -> Verdict {
     }
 }
 
+/// 10.1 (`--crudo`): `x` e `y`, dos programas que tienen que ser el mismo (el texto crudo y el
+/// original que imprime el backend, A), dicen lo mismo: el status y el stdout iguales, con las
+/// posiciones de los marcos de stack borradas como en `compare` (al reimprimir cambian lineas y
+/// columnas: issue_2208_8 imprime un stack en stdout). A diferencia de `main::same_exec` y de
+/// `compare`, los nombres que imprime `util.inspect` quedan crudos: parsear e imprimir no
+/// tiene por que tocarlos (el bug de los parentesis de `(h) = function(){}` cambia uno).
+pub fn mismo_programa(x: &Exec, y: &Exec) -> bool {
+    let archivos = archivos_de_marco(x, y);
+    let n = |s: &str| normalize_stack_positions(s, &archivos);
+    x.status == y.status && n(&x.stdout) == n(&y.stdout)
+}
+
 /// 8.3: los stdout de A y B normalizados igual que en `compare` (para
 /// `recheck::mensaje_con_nombre_localizado`).
 pub fn normalizadas(a: &Exec, b: &Exec) -> (String, String) {
@@ -352,12 +364,12 @@ impl Reporter {
     /// (`cd <caso> && env -i PATH="$PATH" TZ=UTC HOME=/tmp node --no-warnings
     /// --require <raiz>/preload.cjs original.cjs`; M21, en `divergence`).
     ///
-    /// Borra `div/`, `known/`, `panic/`, `lint/`, `asserts/` y `recursos/` de una
+    /// Borra `div/`, `known/`, `panic/`, `lint/`, `asserts/`, `recursos/` y `codegen/` (10.1) de una
     /// corrida anterior: si no, los
     /// hallazgos viejos se mezclan con los nuevos y el `ls` miente (paso en la
     /// corrida del 21-sep, con 8 directorios de sobra).
     pub fn new(root: &Path, config_name: String, preload: &str) -> Reporter {
-        for sub in ["div", "known", "panic", "lint", "asserts", "recursos"] {
+        for sub in ["div", "known", "panic", "lint", "asserts", "recursos", "codegen"] {
             let _ = std::fs::remove_dir_all(root.join(sub));
         }
         write_all(root, &[("preload.cjs", preload)]);
@@ -624,6 +636,56 @@ analisis_de_difuzz_fallo:
         }
     }
 
+    /// 10.1 (`--crudo`): el texto crudo (`crudo`, lo que lee el backend) y el original que el
+    /// backend imprime (A, `original`) no dan lo mismo en node, y es determinista (`main::comparar_crudo`).
+    /// No es un hallazgo del minificador (A y B salen del mismo programa parseado: cargan el
+    /// cambio igual): va a `codegen/`, ortogonal como `lint/` (el caso cuenta tambien donde
+    /// termino la comparacion de A con B). `kind` lee al crudo como el original y a A como el
+    /// minificado (ThrowNew: A lanza y el crudo no). `pasos`: como se confirmo.
+    #[allow(clippy::too_many_arguments)]
+    pub fn codegen(&self, case: &Path, crudo: &str, original: &str, r: &Exec, a: &Exec, kind: Kind, pasos: &str) {
+        let dir = self.case_dir("codegen", case);
+        self.index(&dir, "codegen", &format!("{kind:?}"), symptom(kind, r, a));
+        let (crudo_file, orig_file) = (format!("crudo.{}", self.ext), format!("original.{}", self.ext));
+        let abs = |p: &Path| std::path::absolute(p).unwrap_or_else(|_| p.to_path_buf());
+        let cmd = |f: &str| {
+            format!(
+                "cd {} && env -i PATH=\"$PATH\" TZ=UTC HOME=/tmp node --no-warnings --require {}/preload.cjs {f}",
+                abs(&dir).display(),
+                abs(&self.root).display()
+            )
+        };
+        let meta = format!(
+            "case: {}\nkind: {kind:?}\nconfig: {}\nnota: el texto crudo y el original que imprime el backend (A) dan otra salida en node, y se repite: el parser o el codegen del backend (o su cadena antes del minificador) cambiaron la semantica. No es una divergencia del minificador: A y B salen del mismo programa parseado y cargan el cambio igual (10.1, --crudo)\npasos: {pasos}\n\ncrudo: {:?} en {:?}\noriginal: {:?} en {:?}\n{}\nrepro_crudo: {}\nrepro_original: {}\n",
+            case.display(),
+            self.config_name,
+            r.status,
+            r.elapsed,
+            a.status,
+            a.elapsed,
+            self.versions,
+            cmd(&crudo_file),
+            cmd(&orig_file),
+        );
+        write_all(
+            &dir,
+            &[
+                ("meta.txt", meta.as_str()),
+                (crudo_file.as_str(), crudo),
+                (orig_file.as_str(), original),
+                ("crudo.stdout", r.stdout.as_str()),
+                ("crudo.stderr", r.stderr.as_str()),
+                ("a.stdout", a.stdout.as_str()),
+                ("a.stderr", a.stderr.as_str()),
+            ],
+        );
+        for (name, e) in [("crudo.exc", r), ("a.exc", a)] {
+            if let Some(text) = e.exc() {
+                write_all(&dir, &[(name, text.as_str())]);
+            }
+        }
+    }
+
     /// Agrega archivos a los directorios que ya existen para el caso (div, known,
     /// panic, lint). Lo usan las mutaciones: la variante va tal cual junto al hallazgo.
     pub fn attach(&self, case: &Path, files: &[(&str, &str)]) {
@@ -721,6 +783,29 @@ fn write_all(dir: &Path, files: &[(&str, &str)]) {
 #[cfg(test)]
 mod tests {
     use super::normalize_names as n;
+
+    /// 10.1: el crudo y A son el mismo programa si el status y el stdout coinciden, salvo las
+    /// posiciones de los marcos de un archivo de difuzz; los nombres de `util.inspect` no se borran.
+    #[test]
+    fn mismo_programa_sin_posiciones_y_con_nombres() {
+        use super::mismo_programa;
+        use crate::runner::{Exec, Status};
+        let e = |status: Status, out: &str| Exec {
+            status,
+            stdout: out.into(),
+            stderr: String::new(),
+            flags: vec![],
+            elapsed: std::time::Duration::ZERO,
+            ctl: String::new(),
+        };
+        let marco = |p: &str| format!("Error: x\n    at f (/tmp/difuzz-7-w0.cjs:{p})\n");
+        assert!(mismo_programa(&e(Status::Exited(0), &marco("1:20")), &e(Status::Exited(0), &marco("1:9"))));
+        assert!(!mismo_programa(&e(Status::Exited(0), "\"\"\n"), &e(Status::Exited(0), "\"h\"\n")));
+        assert!(!mismo_programa(&e(Status::Exited(0), "[Function (anonymous)]\n"), &e(Status::Exited(0), "[Function: h]\n")));
+        assert!(!mismo_programa(&e(Status::Exited(0), "1\n"), &e(Status::Exited(1), "1\n")));
+        // Un `archivo:L:C` impreso que no es de un marco real conserva la posicion.
+        assert!(!mismo_programa(&e(Status::Exited(0), "    at f (x.js:1:2)\n"), &e(Status::Exited(0), "    at f (x.js:1:3)\n")));
+    }
 
     #[test]
     fn borra_nombres_de_funciones_y_clases() {

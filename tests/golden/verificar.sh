@@ -11,6 +11,7 @@
 #   --esperado TSV    default: esperado.tsv junto a este script
 #   --celdas "C..."   celdas <minifier>-<carril>-<preset> separadas por espacios (default: las 8)
 #   --sin-modos       no correr la comparacion de modos opt-in (--invocar, --stubs)
+#   --difuzz "ARGS"   argumentos extra para difuzz en cada celda (p. ej. "--crudo", 10.1)
 #   --jobs N          workers de difuzz (default ${VERIFICAR_JOBS:-4})
 # Sale con 0 si todas las comparaciones coinciden (y con --help/-h), 1 si hay alguna diferencia,
 # 2 por argumentos.
@@ -24,6 +25,7 @@ corpus=$here/corpus
 esperado=$here/esperado.tsv
 jobs=${VERIFICAR_JOBS:-4}
 modos=1
+extra=()
 celdas=()
 for m in swc oxc; do for k in a b; do for p in core_defaults carril_a; do celdas+=("$m-$k-$p"); done; done; done
 pos=()
@@ -33,6 +35,7 @@ while (($#)); do
     --esperado) esperado=${2:?--esperado necesita valor}; shift 2;;
     --celdas) read -r -a celdas <<< "${2:?--celdas necesita valor}"; shift 2;;
     --sin-modos) modos=0; shift;;
+    --difuzz) read -r -a extra <<< "${2:?--difuzz necesita valor}"; shift 2;;
     --jobs) jobs=${2:?--jobs necesita valor}; shift 2;;
     -h|--help) rg '^#( |$)' -N "$0" | rg -v '^#!'; exit 0;;
     --*) echo "opcion desconocida: $1" >&2; exit 2;;
@@ -66,7 +69,18 @@ celdir() { # $1 = --out de la celda
   if [ ${#x[@]} -eq 1 ]; then echo "${x[0]%/}"; else echo "$1/__no_hay_un_solo_subdirectorio__"; fi
 }
 
+# 10.1 (--crudo): codegen/ es ortogonal (como lint/, el caso cuenta tambien donde termino): va
+# delante de la clase del caso, codegen:<kind>+<clase>. Sin --crudo no hay codegen/ y no cambia nada.
 clase_de() { # $1 = --out de la celda, $2 = caso
+  local o g=
+  o=$(celdir "$1")
+  if [ -d "$o/codegen/$2" ]; then
+    g="codegen:$(rg -o -r '$1' '^kind: (.*)$' "$o/codegen/$2/meta.txt" | rg -v '^$')+"
+  fi
+  echo "$g$(clase_caso "$1" "$2")"
+}
+
+clase_caso() { # $1 = --out de la celda, $2 = caso
   local o c=$2 k
   o=$(celdir "$1")
   if [ -d "$o/div/$c" ]; then
@@ -105,7 +119,7 @@ sin_oraculo=0
 for cel in "${celdas[@]}"; do
   IFS=- read -r m k p <<< "$cel"
   "$bin" "$corpus" --out "$out/$cel" --minifier "$m" --carril "$k" --config "$p" --no-cache --jobs "$jobs" \
-    > "$out/$cel.log" 2>&1
+    "${extra[@]}" > "$out/$cel.log" 2>&1
   rc=$?
   if [ $rc -ne 0 ]; then echo "celda $cel: difuzz salio con $rc (ver $out/$cel.log)"; fallas=$((fallas+1)); fi
   # b2-a (R2-H05): la marca de corrida tiene que decir completa.

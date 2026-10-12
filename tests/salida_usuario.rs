@@ -63,7 +63,7 @@ fn codigo_0_ayuda_y_corrida_entera() {
         for opt in [
             "--out", "--minifier", "--config", "--forma", "--carril", "--timeout-ms", "--limit", "--jobs", "--no-observe",
             "--invocar", "--mutaciones N", "--mutaciones-extra", "--stubs", "--cache", "--no-cache", "--indice",
-            "--en-proceso", "--mem-hijo", "--cruce", "--emitir", "--help",
+            "--en-proceso", "--mem-hijo", "--cruce", "--emitir", "--crudo", "--help",
         ] {
             assert!(uso.contains(opt), "falta {opt} en la linea uso:\n{uso}");
         }
@@ -268,6 +268,47 @@ fn descartes_reconstruye_el_total() {
     let suma = campo(stats, "iguales") + campo(stats, "DIVERGENCIAS") + campo(stats, "conocidas") + campo(stats, "PANICS") + campo(stats, "RECURSOS") + filas.len();
     assert_eq!(total, suma, "{stats}\n{descartes}");
     assert_eq!(campo(stats, "iguales"), total - casos.len(), "{stats}");
+    std::fs::remove_dir_all(&b).unwrap();
+}
+
+/// 10.1: con `--crudo`, el crudo que da otra salida que el original impreso (los parentesis de
+/// `(h) = function(){}`) va a codegen/, ortogonal: el caso cuenta igual donde termino, la linea
+/// `total=` es la misma que sin la opcion y la diferencia solo de `toString` es `contenido`. Sin la
+/// opcion no hay codegen/ ni linea `crudo`. El indice y `--cruce` cuentan el codegen/.
+#[test]
+fn crudo_va_a_codegen_y_sin_la_opcion_nada_cambia() {
+    if !test_util::requiere_node() {
+        return;
+    }
+    let b = base("crudo");
+    let corpus = b.join("corpus");
+    caso(&corpus, "paren", b"let h; (h) = function(){}; console.log(JSON.stringify(h.name));\n");
+    caso(&corpus, "igual", b"console.log(1 + 1);\n");
+    caso(&corpus, "fts", b"function f( a ) { return a }\nconsole.log(f.toString());\n");
+    let correr = |out: &str, extra: &[&str]| {
+        let (out, ix) = (b.join(out), b.join(format!("{out}-ix")));
+        let mut args = vec![corpus.to_str().unwrap(), "--out", out.to_str().unwrap(), "--indice", ix.to_str().unwrap(), "--no-cache", "--jobs", "1"];
+        args.extend_from_slice(extra);
+        let o = difuzz(&b, &args);
+        assert_eq!(rc(&o), Some(0), "{}", err(&o));
+        (String::from_utf8_lossy(&o.stdout).into_owned(), out.join("oxc+carril_a+tal_cual"), ix)
+    };
+    let (sin, celda_sin, _) = correr("sin", &[]);
+    let (con, celda, ix) = correr("con", &["--crudo"]);
+    let total = |s: &str| s.lines().find(|l| l.starts_with("total=")).unwrap().to_string();
+    assert_eq!(total(&sin), total(&con));
+    assert!(!sin.contains("crudo") && !celda_sin.join("codegen").exists(), "{sin}");
+    let linea = con.lines().find(|l| l.starts_with("crudo (10.1): ")).unwrap_or_else(|| panic!("{con}"));
+    for (c, n) in [("comparados", 3), ("identicos", 0), ("iguales", 1), ("CODEGEN", 1), ("contenido", 1), ("no_determinista", 0), ("timeout", 0), ("runner", 0)] {
+        assert_eq!(campo(linea, c), n, "{c}: {linea}");
+    }
+    let meta = std::fs::read_to_string(celda.join("codegen/paren/meta.txt")).unwrap();
+    assert!(meta.contains("kind: Stdout") && meta.contains("repro_crudo: "), "{meta}");
+    assert_eq!(std::fs::read_to_string(celda.join("codegen/paren/crudo.stdout")).unwrap(), "\"\"\n");
+    assert_eq!(std::fs::read_to_string(celda.join("codegen/paren/a.stdout")).unwrap(), "\"h\"\n");
+    assert!(std::fs::read_to_string(celda.join("CORRIDA.txt")).unwrap().contains(linea));
+    let cruce = difuzz(&b, &["--cruce", ix.to_str().unwrap()]);
+    assert!(String::from_utf8_lossy(&cruce.stdout).contains("oxc+carril_a+tal_cual: div=0 known=1 panic=0 lint=0 recursos=0 codegen=1"), "{}", String::from_utf8_lossy(&cruce.stdout));
     std::fs::remove_dir_all(&b).unwrap();
 }
 
