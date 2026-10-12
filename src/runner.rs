@@ -1573,6 +1573,10 @@ mod tests {
     /// medido antes y despues de cada intento, con margen READ_GRACE / 2. Hasta 3
     /// intentos (un pico de carga es aleatorio; esperar READ_GRACE es sistematico
     /// y falla en los 3). Que el `sleep` no sobreviva se exige en cada intento.
+    /// 10.6: con carga alta (load 42-48) node no llegaba a lanzar el `sleep` ni a
+    /// imprimir su pid antes del timeout de 500 ms ("sin pid del sleep: \"\""). Ese
+    /// intento no mide nada: se repite con el doble de timeout, hasta 4 veces (8 s);
+    /// no cuenta entre los 3.
     #[test]
     fn timeout_mata_el_grupo_y_no_espera_al_hijo() {
         use super::{Preload, Runner, Status, READ_GRACE};
@@ -1584,8 +1588,7 @@ mod tests {
         let path = std::env::temp_dir().join(format!("difuzz-test-{}-preload-m2.cjs", std::process::id()));
         std::fs::write(&path, super::PRELOAD).unwrap();
         let preload = Preload { path };
-        let runner = Runner::new(&preload, crate::test_util::id_runner(), Duration::from_millis(500));
-        let medir = |js: &str| {
+        let medir = |runner: &Runner, js: &str| {
             let t0 = Instant::now();
             let e = runner.run(js);
             assert_eq!(e.status, Status::Timeout, "{js}");
@@ -1595,11 +1598,18 @@ mod tests {
         let sin_hijo = "while(true){}\n";
         let con_hijo = "const c = require('child_process').spawn('sleep',['5'],{stdio:'inherit'});\nconsole.log(c.pid);\nwhile(true){}\n";
         let mut tiempos = Vec::new();
-        for _ in 0..3 {
-            let (_, antes) = medir(sin_hijo);
-            let (e, t) = medir(con_hijo);
-            let (_, despues) = medir(sin_hijo);
-            let pid: i32 = e.stdout.trim().parse().unwrap_or_else(|_| panic!("sin pid del sleep: {:?}", e.stdout));
+        let (mut timeout, mut sin_pid) = (Duration::from_millis(500), Vec::new());
+        while tiempos.len() < 3 {
+            let runner = Runner::new(&preload, crate::test_util::id_runner(), timeout);
+            let (_, antes) = medir(&runner, sin_hijo);
+            let (e, t) = medir(&runner, con_hijo);
+            let (_, despues) = medir(&runner, sin_hijo);
+            let Ok(pid) = e.stdout.trim().parse::<i32>() else {
+                sin_pid.push((timeout, e.stdout));
+                assert!(sin_pid.len() <= 4, "node no llego a imprimir el pid del sleep antes del timeout: {sin_pid:?}");
+                timeout *= 2;
+                continue;
+            };
             assert!(!vivo(pid), "el sleep {pid} sigue vivo: el grupo no se mato");
             let base = (antes + despues) / 2;
             tiempos.push((t, base));
@@ -1608,7 +1618,7 @@ mod tests {
             }
         }
         let (t, base) = *tiempos.last().unwrap();
-        assert!(t < base + READ_GRACE / 2, "espero al hijo en los 3 intentos (tiempo, base): {tiempos:?}");
+        assert!(t < base + READ_GRACE / 2, "espero al hijo en los 3 intentos (tiempo, base): {tiempos:?} (sin pid: {sin_pid:?})");
     }
 
     /// Paso 7 (revision-tint I1): ante Timeout con el sensor, la repeticion sin el usa
