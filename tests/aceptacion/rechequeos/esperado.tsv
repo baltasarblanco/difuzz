@@ -818,3 +818,25 @@
 25-b92-p01-ternario	oxc-a-carril_a	known
 25-b92-p01-ternario	oxc-b-core_defaults	known
 25-b92-p01-ternario	oxc-b-carril_a	known
+# 10.2 (R1 de rev-b9-A): profundidad con una etiqueta salable en la MISMA linea que el valor que coincide con A con
+# mas pila. n01 (s01 de la revision): la etiqueta antes (`"valor:", [0, bug.length][i]`); n02 (s02): despues
+# (`[true, Number.isInteger(5e-324)][i], "es entero"`); n03: pegada (`"n=".concat(...)`, `n=dz0`). La sal llegaba a la
+# linea por la etiqueta y sal_alcanza la daba por alcanzada: known/ en las 4 celdas con c9eab79 (MEDIDO). Ahora la
+# insercion de `dz` tiene que caer dentro o al final de un token que difiere de A (recheck::sal_alcanza): div/. p01:
+# 25-b92-p01 con la etiqueta en la misma linea; la sal llega tambien a `cupo` (el token que difiere): sigue en known/.
+26-b102-n01-etiqueta-antes	oxc-a-core_defaults	div:Stdout
+26-b102-n01-etiqueta-antes	oxc-a-carril_a	div:Stdout
+26-b102-n01-etiqueta-antes	oxc-b-core_defaults	div:Stdout
+26-b102-n01-etiqueta-antes	oxc-b-carril_a	div:Stdout
+26-b102-n02-etiqueta-despues	oxc-a-core_defaults	div:Stdout
+26-b102-n02-etiqueta-despues	oxc-a-carril_a	div:Stdout
+26-b102-n02-etiqueta-despues	oxc-b-core_defaults	div:Stdout
+26-b102-n02-etiqueta-despues	oxc-b-carril_a	div:Stdout
+26-b102-n03-concatenada	oxc-a-core_defaults	div:Stdout
+26-b102-n03-concatenada	oxc-a-carril_a	div:Stdout
+26-b102-n03-concatenada	oxc-b-core_defaults	div:Stdout
+26-b102-n03-concatenada	oxc-b-carril_a	div:Stdout
+26-b102-p01-etiqueta-y-valor	oxc-a-core_defaults	known
+26-b102-p01-etiqueta-y-valor	oxc-a-carril_a	known
+26-b102-p01-etiqueta-y-valor	oxc-b-core_defaults	known
+26-b102-p01-etiqueta-y-valor	oxc-b-carril_a	known

@@ -647,7 +647,10 @@ Principios:
     derecho de `||`, `&&` y `??`, el de `return`, el cuerpo expresión de una flecha y los valores
     por defecto; sin literales que salar es inconcluso; y la sal tiene que **llegar** a lo que B
     imprime distinto de A: cada línea de B que difiere de la de A tiene que traer, en B salado,
-    más `dz` que en B (sin distinguir mayúsculas), con las mismas líneas. "Difiere" es con la
+    más `dz` que en B (sin distinguir mayúsculas), con las mismas líneas; y (10.2) B salado tiene
+    que ser esa línea de B con `dz` insertados, y al menos uno tiene que caer dentro o al final de
+    un token de B que difiere de A (tokens: corridas de letras, corridas de dígitos y cada signo
+    suelto), no después de una etiqueta que A también imprime. "Difiere" es con la
     comparación de la celda: con keep_names (carril_a, 9.1) una línea que difiere solo en un
     nombre que imprime `util.inspect` también cuenta, y como la sal no llega a un nombre, es
     inconclusa (un positivo que imprime una función elegida por el desborde va a `div/` en
@@ -703,14 +706,17 @@ Principios:
     en posición de dato (`["", bug][i]`) van a `div/`.
   - la profundidad, cuando la salida depende como dato de un desborde de pila **nativo** (por
     ejemplo, si `JSON.stringify` de un arreglo anidado 7000 veces lanzó o no) y el bug deja en B
-    el valor de A con más pila en la misma línea que un literal salado que el programa imprime
-    tal cual, antes o después del valor (`console.log("valor:", [0, bug.length][i])` o
-    `console.log([true, bug][i], "es entero")`): la sal llega a la línea por la etiqueta, no por
-    la coincidencia, `sal_alcanza` la da por alcanzada y la traza dice igual `confirmado con los
-    literales salados`. MEDIDO en la revisión del bloque 9 (rev-b9-A, `corpus-sal` s01 y s02,
-    oxc 0.153.0, B ejecutando el bug): `known/` en las 4 celdas de oxc; sin la etiqueta (s01c),
-    `div/`. Cerrarlo pide localizar dentro de la línea, y localizar por tokens se engaña
-    (decisión del 10-oct, `18-profundidad-cuenta`). El re-chequeo de profundidad no tiene sensor de uso, y con una recursión
+    el valor de A con más pila pegado a un literal salado que el programa imprime en el **mismo
+    token** (letras con letras: `"es" + bool` imprime `estrue`; la sal cae adentro del token que
+    difiere). Hasta 10.2 bastaba con la misma línea, antes o después del valor
+    (`console.log("valor:", [0, bug.length][i])`, `console.log([true, bug][i], "es entero")`,
+    `"n=".concat(...)`): la sal llegaba a la línea por la etiqueta, `sal_alcanza` la daba por
+    alcanzada y el caso iba a `known/` (MEDIDO en la revisión del bloque 9, rev-b9-A s01 y s02, y
+    con `c9eab79` en los `26-b102-n`); desde 10.2 la sal tiene que caer en un token que difiere de
+    A y van a `div/`. El costo, del lado seguro: un positivo cuyo valor elegido es una cadena vacía
+    (`''` contra `'bc'`: la sal cae después de la comilla, que A también imprime) o cuya línea la
+    sal cambia en algo más que agregar `dz` (una cuenta, un largo) es inconcluso y va a `div/`. Una
+    línea que no se alinea dentro del tope (4 millones de celdas) también. El re-chequeo de profundidad no tiene sensor de uso, y con una recursión
     nativa B recorre los mismos bloques con y sin más pila, así que su camino no cambia; desde 8.1
     su `Explica` se confirma salado y desde 9.2 la sal tiene que llegar a la línea (ver arriba).
     Medido con oxc 0.153.0 en las 4 celdas de oxc: con `9e52cef` iban a `known/` la tabla con los
@@ -718,7 +724,7 @@ Principios:
     salar), la misma con un literal salable que no es el de la coincidencia, un booleano
     (`[true, Number.isInteger(5e-324)]`), un número (`[0, bug.length]`, el residuo de 8.1), la
     etiqueta en otra línea y la tabla en las ramas de un `?:`; con 9.2 van a `div/`. Las formas de
-    la etiqueta en la misma línea (antes o después del valor) siguen en `known/`. El costo: un positivo de verdad (el original
+    la etiqueta en la misma línea (antes, después o pegada al valor), con 10.2. El costo: un positivo de verdad (el original
     desborda y el minificado no) que imprime un número o un booleano (`console.log(rec(4800))`)
     no tiene nada que salar y va a `div/` como `profundidad_inconcluso`; con la tabla en un
     arreglo, en las ramas de un `?:`, en un `return`, en un argumento, en una plantilla o pasada
@@ -890,9 +896,9 @@ Sin `node` en el `PATH`, los tests que lo necesitan fallan con un mensaje claro.
 
 - **Golden de detección** (`tests/golden/`): 16 casos con bugs conocidos de oxc y swc, en 8
   celdas, más `--invocar` y `--stubs`; la clase esperada de cada caso está en `esperado.tsv`.
-- **Aceptación de los re-chequeos** (`tests/aceptacion/rechequeos/`): 170 casos que combinan un
+- **Aceptación de los re-chequeos** (`tests/aceptacion/rechequeos/`): 174 casos que combinan un
   bug real de oxc con un flag de asunción (o con la forma en que se imprime), en las 4 celdas de oxc
-  (680 comparaciones).
+  (696 comparaciones).
 - **Corpus de codegen** (`tests/codegen/`, 10.1): 142 formas propias cuya semántica depende de la
   sintaxis exacta (paréntesis, comas, directivas, ASI, claves computadas, escapes), con `--crudo`
   en 8 celdas (1136 comparaciones). Las 9 del bug de los paréntesis de oxc van a `codegen/`; los

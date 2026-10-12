@@ -2274,6 +2274,14 @@ impl Salado {
 /// `util.inspect` tambien difiere, y la sal no llega a un nombre: Inconcluso, como un numero (lado
 /// seguro; MEDIDO: el positivo b9-int/sonda-sal k2, la funcion impresa elegida por el desborde, pasa
 /// de known/ a div/ en carril_a). Sin keep_names los nombres se borran, como antes.
+/// 10.2 (R1 de rev-b9-A): ademas, en cada una de esas lineas, B salado tiene que ser B con `dz`
+/// insertados (`inserciones_de_sal`) y al menos una insercion tiene que caer dentro o al final de
+/// un token de B que difiere de A (`tokens_cambiados`; tokens: corridas de letras, corridas de
+/// digitos y cada signo suelto). Antes alcanzaba con mas `dz` en la linea, y una etiqueta salable
+/// en la MISMA linea que el valor que coincide (`console.log("valor:", [0, bug.length][i])`, o
+/// despues: `[true, bug][i], "es entero"`) daba una confirmacion falsa (s01, s02: `known/`). Solo
+/// agrega condiciones: lo que antes no alcanzaba sigue sin alcanzar. Residuo: un literal pegado al
+/// valor en el mismo token (letras con letras: `"es" + bool` imprime `estrue`).
 /// `Err(nota)`: no llega.
 pub fn sal_alcanza(a: &runner::Exec, b: &runner::Exec, bs: &runner::Exec) -> Result<(), String> {
     let lines = |e: &runner::Exec| oracle::nombres_de_celda(&e.stdout).lines().map(String::from).collect::<Vec<_>>();
@@ -2286,13 +2294,155 @@ pub fn sal_alcanza(a: &runner::Exec, b: &runner::Exec, bs: &runner::Exec) -> Res
         return Err("B no imprime ninguna linea distinta de A (difieren en el estado o en lo que A imprime de mas): la sal no puede llegar a la coincidencia".into());
     }
     let sales = |l: &str| l.to_lowercase().matches(SAL_LITERAL).count();
-    match distintas.iter().find(|&&i| sales(&ls[i]) <= sales(&lb[i])) {
-        Some(i) => Err(format!(
+    if let Some(i) = distintas.iter().find(|&&i| sales(&ls[i]) <= sales(&lb[i])) {
+        return Err(format!(
             "la sal no llega a la linea {} de B, que difiere de A: la coincidencia de B con el original modificado no sale de un literal salado",
             i + 1
-        )),
-        None => Ok(()),
+        ));
     }
+    let chars = |l: &str| l.to_lowercase().chars().collect::<Vec<char>>();
+    for &i in &distintas {
+        let (b_l, s_l) = (chars(&lb[i]), chars(&ls[i]));
+        let Some(ins) = inserciones_de_sal(&b_l, &s_l) else {
+            return Err(format!(
+                "en la linea {} de B la sal cambia algo mas que agregar `dz` (o la linea es demasiado larga para alinear): no se puede ubicar donde llega",
+                i + 1
+            ));
+        };
+        let tb = tokens(&b_l);
+        let cambiados = match la.get(i) {
+            None => vec![true; tb.len()],
+            Some(a_l) => match tokens_cambiados(&chars(a_l), &b_l) {
+                Some(c) => c,
+                None => return Err(format!("la linea {} de B es demasiado larga para ubicar la sal por tokens", i + 1)),
+            },
+        };
+        // El token de B que termina en `p - 1` o lo contiene (la sal va al final del literal).
+        let llega = ins.iter().any(|&p| p > 0 && tb.iter().position(|&(d, h)| d < p && p <= h).is_some_and(|k| cambiados[k]));
+        if !llega {
+            return Err(format!(
+                "la sal llega a la linea {} de B pero no a lo que difiere de A (cae despues de algo que A tambien imprime, como una etiqueta): la coincidencia de B con el original modificado no sale de un literal salado",
+                i + 1
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// 10.2: tokens de una linea (`[desde, hasta)` en caracteres): corridas de letras, corridas de
+/// digitos ASCII y cada otro caracter suelto.
+fn tokens(s: &[char]) -> Vec<(usize, usize)> {
+    let clase = |c: char| {
+        if c.is_alphabetic() {
+            1
+        } else if c.is_ascii_digit() {
+            2
+        } else {
+            0
+        }
+    };
+    let mut v = Vec::new();
+    let mut i = 0;
+    while i < s.len() {
+        let k = clase(s[i]);
+        let mut j = i + 1;
+        if k != 0 {
+            while j < s.len() && clase(s[j]) == k {
+                j += 1;
+            }
+        }
+        v.push((i, j));
+        i = j;
+    }
+    v
+}
+
+/// 10.2: tope de celdas de las tablas de alineacion (`inserciones_de_sal`, `tokens_cambiados`).
+/// Una linea mas grande no se alinea: `None`, que `sal_alcanza` toma como que no llega (inconcluso,
+/// el lado seguro).
+const TOPE_ALINEAR: usize = 4_000_000;
+
+/// 10.2: que tokens de `b` no estan en una subsecuencia comun mas larga de los tokens de `a` y de
+/// `b` (sin el prefijo y el sufijo comunes). `None` si la tabla pasa `TOPE_ALINEAR`.
+fn tokens_cambiados(a: &[char], b: &[char]) -> Option<Vec<bool>> {
+    let (ta, tb) = (tokens(a), tokens(b));
+    let ta: Vec<&[char]> = ta.iter().map(|&(d, h)| &a[d..h]).collect();
+    let tb: Vec<&[char]> = tb.iter().map(|&(d, h)| &b[d..h]).collect();
+    let mut cambiado = vec![true; tb.len()];
+    let pre = ta.iter().zip(&tb).take_while(|(x, y)| x == y).count();
+    let suf = ta[pre..].iter().rev().zip(tb[pre..].iter().rev()).take_while(|(x, y)| x == y).count();
+    for c in cambiado.iter_mut().take(pre) {
+        *c = false;
+    }
+    for c in cambiado.iter_mut().rev().take(suf) {
+        *c = false;
+    }
+    let (ma, mb) = (&ta[pre..ta.len() - suf], &tb[pre..tb.len() - suf]);
+    if (ma.len() + 1).saturating_mul(mb.len() + 1) > TOPE_ALINEAR {
+        return None;
+    }
+    // l[i * w + j]: largo de la subsecuencia comun mas larga de ma[i..] y mb[j..].
+    let w = mb.len() + 1;
+    let mut l = vec![0u32; (ma.len() + 1) * w];
+    for i in (0..ma.len()).rev() {
+        for j in (0..mb.len()).rev() {
+            l[i * w + j] = if ma[i] == mb[j] { l[(i + 1) * w + j + 1] + 1 } else { l[(i + 1) * w + j].max(l[i * w + j + 1]) };
+        }
+    }
+    let (mut i, mut j) = (0, 0);
+    while i < ma.len() && j < mb.len() {
+        if ma[i] == mb[j] {
+            cambiado[pre + j] = false;
+            i += 1;
+            j += 1;
+        } else if l[(i + 1) * w + j] >= l[i * w + j + 1] {
+            i += 1;
+        } else {
+            j += 1;
+        }
+    }
+    Some(cambiado)
+}
+
+/// 10.2: donde inserta `bs` la sal respecto de `b` (las dos lineas en minusculas, en caracteres):
+/// las posiciones `p` de `b` antes de las que `bs` trae un `dz` de mas. `bs` tiene que ser `b` con
+/// cero o mas `dz` insertados; si no (la sal cambio otra cosa: una cuenta, un largo), `None`.
+/// Entre las alineaciones posibles (`dz` junto a otros `d`/`z`) se toma la de las inserciones mas
+/// a la derecha: la sal va al final del literal. `None` tambien si la tabla pasa `TOPE_ALINEAR`.
+fn inserciones_de_sal(b: &[char], bs: &[char]) -> Option<Vec<usize>> {
+    let sal: Vec<char> = SAL_LITERAL.chars().collect();
+    let ls = sal.len();
+    if bs.len() < b.len() || !(bs.len() - b.len()).is_multiple_of(ls) {
+        return None;
+    }
+    let (n, k) = (b.len(), (bs.len() - b.len()) / ls);
+    if (n + 1).saturating_mul(k + 1) > TOPE_ALINEAR {
+        return None;
+    }
+    // r[i * w + t]: `b[..i]` con `t` sales insertadas es `bs[..i + ls * t]`.
+    let w = k + 1;
+    let mut r = vec![false; (n + 1) * w];
+    let es_sal = |j: usize| bs[j - ls..j] == sal[..];
+    for i in 0..=n {
+        for t in 0..=k {
+            let j = i + ls * t;
+            r[i * w + t] = (i == 0 && t == 0) || (i > 0 && r[(i - 1) * w + t] && b[i - 1] == bs[j - 1]) || (t > 0 && r[i * w + t - 1] && es_sal(j));
+        }
+    }
+    if !r[n * w + k] {
+        return None;
+    }
+    let (mut i, mut t, mut ins) = (n, k, Vec::new());
+    while i > 0 || t > 0 {
+        if t > 0 && r[i * w + t - 1] && es_sal(i + ls * t) {
+            ins.push(i);
+            t -= 1;
+        } else {
+            i -= 1;
+        }
+    }
+    ins.reverse();
+    Some(ins)
 }
 
 /// b7-1b (revision 7.1, H2, opcion (c)): para las familias sin sensor de uso completo (contenido:
@@ -2863,6 +3013,25 @@ mod tests {
         // Una linea que A no tiene tambien tiene que traer la sal.
         assert_eq!(sal_alcanza(&ok("a\n"), &ok("a\ncupo\n"), &ok("adz\ncupodz\n")), Ok(()));
         assert!(sal_alcanza(&ok("a\n"), &ok("a\n7\n"), &ok("adz\n7\n")).is_err());
+        // 10.2 (R1 de rev-b9-A): la sal tiene que caer en lo que difiere, no en una etiqueta de la
+        // misma linea (s01: antes, despues; concatenada). Las salidas son las de node con oxc 0.153.0.
+        let r1 = |a: &str, b: &str, bs: &str| sal_alcanza(&ok(a), &ok(b), &ok(bs));
+        for (a, b, bs) in [("valor: 2\n", "valor: 0\n", "valor:dz 0\n"), ("false es entero\n", "true es entero\n", "true es enterodz\n"), ("n=2\n", "n=0\n", "n=dz0\n")] {
+            let n = r1(a, b, bs);
+            assert!(n.as_ref().is_err_and(|n| n.contains("linea 1") && n.contains("etiqueta")), "{b:?}: {n:?}");
+        }
+        // Con la etiqueta salada y tambien el valor (la tabla de cadenas), si llega; en mayusculas tambien.
+        assert_eq!(r1("r: desbordo\n", "r: cupo\n", "r:dz cupodz\n"), Ok(()));
+        assert_eq!(r1("R: DESBORDO 1\n", "R: CUPO 1\n", "R:DZ CUPODZ 1\n"), Ok(()));
+        // Una cadena vacia elegida: la sal cae despues de la comilla, que A tambien imprime (lado seguro).
+        assert!(r1("'bc'\n", "''\n", "'dz'\n").is_err());
+        // La sal cambio algo mas que agregar `dz` (un largo) en la linea que difiere.
+        assert!(r1("x 2\n", "cupo 0\n", "cupodz 2\n").is_err_and(|n| n.contains("algo mas")));
+        // `dz` al lado de otros `d`/`z`: se ubica igual (al final del token que difiere).
+        assert_eq!(r1("zz\n", "dd\n", "dddz\n"), Ok(()));
+        assert_eq!(super::inserciones_de_sal(&['d'], &['d', 'z', 'd']), Some(vec![0]));
+        assert_eq!(super::inserciones_de_sal(&['d', 'z'], &['d', 'z', 'd', 'z']), Some(vec![2]));
+        assert_eq!(super::inserciones_de_sal(&['a'], &['a', 'b']), None);
     }
 
     /// b7-1b (revision 7.1, H2 d07): el sensor del `this` de sloppy, en cada funcion sloppy que
