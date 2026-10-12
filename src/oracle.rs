@@ -650,7 +650,14 @@ analisis_de_difuzz_fallo:
     #[allow(clippy::too_many_arguments)]
     pub fn codegen(&self, case: &Path, crudo: &str, original: &str, r: &Exec, a: &Exec, kind: Kind, pasos: &str) {
         let dir = self.case_dir("codegen", case);
-        self.index(&dir, "codegen", &format!("{kind:?}"), symptom(kind, r, a));
+        // 10.10 (A-H6 de la revision A de 10.1): el sintoma con los nombres crudos, como compara
+        // `mismo_programa` y como lee el kind `main::chequeo_crudo`; antes, segun la celda (en
+        // core_defaults dos hallazgos que solo difieren en un nombre daban el mismo hash).
+        let hash = {
+            let _crudos = con_nombres_crudos(true);
+            symptom(kind, r, a)
+        };
+        self.index(&dir, "codegen", &format!("{kind:?}"), hash);
         let (crudo_file, orig_file) = (format!("crudo.{}", self.ext), format!("original.{}", self.ext));
         let abs = |p: &Path| std::path::absolute(p).unwrap_or_else(|_| p.to_path_buf());
         let cmd = |f: &str| {
@@ -1126,6 +1133,31 @@ mod tests {
             r.discard(std::path::Path::new("c/input.js"), "timeout", std::time::Duration::ZERO);
             assert!(write_errors() > antes, "la linea perdida de descartes.tsv no conto");
         }
+        std::fs::remove_dir_all(&d).unwrap();
+    }
+
+    /// 10.10 (A-H6 de la revision A de 10.1): el hash de un `codegen/` en el indice es el del
+    /// sintoma con los nombres crudos, tambien en un hilo que los borra (core_defaults).
+    #[test]
+    fn sintoma_de_codegen_con_nombres_crudos() {
+        use super::{con_nombres_crudos, symptom, Kind, Reporter};
+        use crate::runner::{Exec, Status};
+        let d = std::env::temp_dir().join(format!("difuzz-test-codegen-hash-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        let ex = |out: &str| Exec { status: Status::Exited(0), stdout: out.into(), stderr: String::new(), flags: Vec::new(), elapsed: std::time::Duration::ZERO, ctl: String::new() };
+        let (r, a) = (ex("[Function: h]\n"), ex("[Function (anonymous)]\n"));
+        let ix = crate::indice::Index::create(&d.join("indice"), "celda").unwrap();
+        let rep = Reporter::new(&d, "celda".into(), "//preload").with_index(ix);
+        let _borrados = con_nombres_crudos(false);
+        rep.codegen(std::path::Path::new("c/input.js"), "crudo", "orig", &r, &a, Kind::Stdout, "-");
+        rep.finish(true);
+        let crudo = {
+            let _c = con_nombres_crudos(true);
+            symptom(Kind::Stdout, &r, &a)
+        };
+        assert_ne!(crudo, symptom(Kind::Stdout, &r, &a), "con los nombres borrados el sintoma tendria que ser otro");
+        let tsv = std::fs::read_to_string(d.join("indice/index-celda.tsv")).unwrap();
+        assert!(tsv.contains(&format!("\tcodegen\tStdout\t{crudo:016x}\n")), "{tsv}");
         std::fs::remove_dir_all(&d).unwrap();
     }
 
