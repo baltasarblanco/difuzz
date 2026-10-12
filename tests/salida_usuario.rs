@@ -312,6 +312,49 @@ fn crudo_va_a_codegen_y_sin_la_opcion_nada_cambia() {
     std::fs::remove_dir_all(&b).unwrap();
 }
 
+/// 10.1b (H1 de las revisiones de 10.1): `contenido` solo si el paso `contenido` de A contra B
+/// (`clasificar::paso_contenido`) atribuye la diferencia al texto de toString o de .stack. Los
+/// bugs de los parentesis (O8 en oxc 0.153.0) en una rama que depende de ese texto (revision A) o
+/// que solo se ven en un marco del stack (revision B), y uno ajeno a un toString que si importa,
+/// van a codegen/ (antes, los tres primeros eran `contenido`). Siguen en `contenido` un toString
+/// impreso entero y una diferencia que solo es la columna de un marco.
+#[test]
+fn crudo_contenido_solo_si_el_contenido_explica() {
+    if !test_util::requiere_node() {
+        return;
+    }
+    let b = base("crudo-contenido");
+    let corpus = b.join("corpus");
+    let bugs: [(&str, &[u8]); 4] = [
+        ("rama-tostring", b"function g() { return 1; }\nlet h;\nif (String(g).includes(\"return\")) { (h) = function () {}; }\nconsole.log(JSON.stringify(h ? h.name : null));\n"),
+        ("rama-stack", b"let h;\nif (new Error(\"x\").stack.includes(\"(\")) { (h) = function () {}; }\nconsole.log(JSON.stringify(h ? h.name : null));\n"),
+        ("marco", b"let h; (h) = function(){ return new Error(\"x\").stack.split(\"\\n\")[1].includes(\" h \") }; console.log(h());\n"),
+        ("ajeno", b"function g() { return 1; }\nlet h; (h) = function () {};\nconsole.log(String(g).length, JSON.stringify(h.name));\n"),
+    ];
+    for (n, src) in bugs {
+        caso(&corpus, n, src);
+    }
+    caso(&corpus, "fts", b"function f( a ) { return a }\nconsole.log(f.toString());\n");
+    caso(&corpus, "columna", b"var               s = new Error(\"x\").stack;\nconsole.log(/:1:\\d\\d\\)/.test(s), s.split(\"\\n\").length);\n");
+    let (out, ix) = (b.join("out"), b.join("ix"));
+    let o = difuzz(&b, &[corpus.to_str().unwrap(), "--out", out.to_str().unwrap(), "--indice", ix.to_str().unwrap(), "--no-cache", "--jobs", "2", "--crudo"]);
+    assert_eq!(rc(&o), Some(0), "{}", err(&o));
+    let stdout = String::from_utf8_lossy(&o.stdout).into_owned();
+    let linea = stdout.lines().find(|l| l.starts_with("crudo (10.1): ")).unwrap_or_else(|| panic!("{stdout}"));
+    for (c, n) in [("comparados", 6), ("CODEGEN", 4), ("contenido", 2), ("no_determinista", 0), ("timeout", 0), ("runner", 0)] {
+        assert_eq!(campo(linea, c), n, "{c}: {linea}\n{}", err(&o));
+    }
+    let codegen = out.join("oxc+carril_a+tal_cual/codegen");
+    for (n, _) in bugs {
+        assert!(codegen.join(n).join("meta.txt").is_file(), "falta codegen/{n}: {}", err(&o));
+    }
+    let meta = std::fs::read_to_string(codegen.join("ajeno/meta.txt")).unwrap();
+    assert!(meta.contains("contenido: con el contenido fijo"), "{meta}");
+    let meta = std::fs::read_to_string(codegen.join("rama-tostring/meta.txt")).unwrap();
+    assert!(meta.contains("(salado) da lo mismo"), "{meta}");
+    std::fs::remove_dir_all(&b).unwrap();
+}
+
 /// 9.4: `difuzz` con stdout y/o stderr en un pipe cerrado (el que lee ya se fue: EPIPE). Antes,
 /// rc 101 (panic de `println!`/`eprintln!`) y, con stderr cerrado a mitad de corrida, la
 /// divergencia se perdia: el panic del `DIVERGENCIA ...` llegaba antes que el reporter.

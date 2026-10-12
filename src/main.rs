@@ -632,8 +632,8 @@ struct CrudoStats {
     iguales: usize,
     /// Distintos y confirmados: van a codegen/.
     codegen: usize,
-    /// Distintos solo por el contenido de toString o de .stack (con el contenido fijo del
-    /// preload dan lo mismo): la asuncion de toString de oxc, no un bug.
+    /// Distintos solo por el contenido de toString o de .stack (el paso `contenido` de A contra
+    /// B, `clasificar::paso_contenido`, dio Explica): la asuncion de toString de oxc, no un bug.
     contenido: usize,
     /// El crudo o A no se repiten a si mismos.
     no_determinista: usize,
@@ -1434,7 +1434,8 @@ enum Crudo {
     Timeout,
     Runner(String),
     NoDeterminista,
-    /// Difieren solo por el contenido de `Function.prototype.toString` o de `.stack`.
+    /// Difieren solo por el contenido de `Function.prototype.toString` o de `.stack`
+    /// (`clasificar::paso_contenido` dio Explica).
     Contenido,
     /// Confirmado: el crudo, A (los de la confirmacion) y los pasos, para `codegen/`.
     Codegen(Box<(runner::Exec, runner::Exec, String)>),
@@ -1448,8 +1449,12 @@ enum Crudo {
 ///    si los frescos coinciden, `Igual`;
 /// 3. un lado en Timeout y el otro no: se repite con `max(4 x timeout, 20 x elapsed del otro)`;
 /// 4. alguno corrio sin el sensor entero (`sensor_degradado`): los dos sin el sensor;
-/// 5. con `fn_tostring` o `stack` en los flags: los dos con el contenido fijo del preload
-///    (DIFUZZ_SALT=fijo, el de `recheck::contenido_matters`); si asi coinciden, `Contenido`.
+/// 5. con `fn_tostring` o `stack` en los flags del crudo: el paso `contenido` de A contra B
+///    (`clasificar::paso_contenido`, el crudo como original y A como minificado): `Contenido`
+///    solo si el crudo salado da otra salida, con el contenido fijo (DIFUZZ_SALT=fijo) el crudo
+///    y A coinciden, A se comporta como el crudo fijo (o difiere solo en lineas que muestran
+///    contenido), la cobertura de A no cambia con el contenido fijo y la sal de literales lo
+///    confirma. Si no (o no se puede saber), sigue a `Codegen`.
 fn comparar_crudo(
     ctx: &Ctx,
     runner: &runner::Runner,
@@ -1519,14 +1524,25 @@ fn comparar_crudo(
             return Crudo::Igual;
         }
     }
-    let contenido = |e: &runner::Exec| e.flags.iter().any(|f| f == "fn_tostring" || f == "stack");
-    if contenido(&r) || contenido(&a) {
-        let env = [("DIFUZZ_SALT", "fijo")];
-        let (rf, af) = (runner.run_with_env(crudo, &env), runner.run_with_env(original, &env));
-        if mismo(&rf, &af) {
-            return Crudo::Contenido;
+    // 10.1b (H1 de las revisiones de 10.1): el mismo paso `contenido` que A contra B
+    // (`clasificar::paso_contenido`), con el crudo como original y A como minificado. Antes bastaba
+    // que con el contenido fijo coincidieran, y eso excusaba un bug de codegen en una rama que
+    // depende del texto de toString o de .stack (con el texto fijo, ninguno de los dos la toma) o
+    // que solo se ve en el stack (el nombre de un marco). Los flags son los del crudo, como en
+    // `clasificar` los de A: la asuncion habla del programa de entrada. Con los nombres crudos,
+    // como `mismo_programa`.
+    if r.flags.iter().any(|f| clasificar::CONTENT_FLAGS.contains(&f.as_str())) {
+        let _crudos = oracle::con_nombres_crudos(true);
+        match clasificar::paso_contenido(runner, ctx.medido, recheck::Lados::Crudo, crudo, original, &r, &a) {
+            clasificar::PasoContenido::Irrelevante => {
+                pasos.push("contenido: el crudo con otro contenido de toString y .stack (salado) da lo mismo: la diferencia no viene del contenido".into())
+            }
+            clasificar::PasoContenido::Rechequeo(recheck::Recheck::Explica, _) => return Crudo::Contenido,
+            clasificar::PasoContenido::Rechequeo(recheck::Recheck::NoExplica, _) => {
+                pasos.push("contenido: con el contenido fijo de toString y .stack (DIFUZZ_SALT=fijo) siguen distintos".into())
+            }
+            clasificar::PasoContenido::Rechequeo(recheck::Recheck::Inconcluso(n), _) => pasos.push(format!("contenido: inconcluso: {n}")),
         }
-        pasos.push("con el contenido fijo de toString y .stack (DIFUZZ_SALT=fijo) siguen distintos".into());
     }
     if let Status::Failed(e) = &r.status {
         return Crudo::Runner(e.clone());

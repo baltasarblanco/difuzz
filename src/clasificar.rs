@@ -30,7 +30,7 @@ use crate::runner::Status;
 use crate::{analisis, backend, minify, oracle, recheck, runner, same_exec, Ctx};
 
 /// Flags cuya asuncion es sobre el contenido, no sobre la llamada.
-const CONTENT_FLAGS: [&str; 2] = ["fn_tostring", "stack"];
+pub const CONTENT_FLAGS: [&str; 2] = ["fn_tostring", "stack"];
 
 /// 7a: el backend medido y su celda. Los re-chequeos propios del backend
 /// (`backend::Politica`: `rechequeos`, `solo_sloppy`) re-minifican con esto.
@@ -116,6 +116,55 @@ pub struct Clasificacion<'a> {
     pub traza: Traza,
 }
 
+/// 10.1b: lo que dio el paso `contenido` (`paso_contenido`).
+#[derive(Debug)]
+pub enum PasoContenido {
+    /// El original con otro contenido de toString/.stack (salado) da lo mismo: su salida no
+    /// depende de ese contenido y la diferencia no se puede atribuir a el.
+    Irrelevante,
+    /// El original depende del contenido: lo que dio `recheck::contenido_matters` y, si fue
+    /// `Explica` con la celda medida, como lo confirmo la sal de literales (si la sal no lo
+    /// confirma, queda `Inconcluso` con su nota).
+    Rechequeo(recheck::Recheck, Option<recheck::Salado>),
+}
+
+/// El paso `contenido` (`fn_tostring` y `stack`), el mismo para `clasificar` (A contra B,
+/// `lados` = `Minificado`) y para `main::comparar_crudo` (10.1b, `--crudo`: el crudo hace de
+/// original y A de minificado, `lados` = `Crudo`). Solo `Rechequeo(Explica, _)` atribuye la
+/// diferencia al contenido.
+/// - El original salado (`run_salted`): si da lo mismo, `Irrelevante`.
+/// - t-principio: que el original dependa del contenido no dice que la divergencia venga de
+///   ahi (a03/a04: un bug ajeno al lado iba a known/). A' y B' con el contenido fijo, y
+///   `veredicto_neutralizado` con la cobertura (`recheck::contenido_matters`).
+/// - b7-1b (revision 7.1, H2, opcion (c)): sin sensor de uso para el texto de una funcion del
+///   programa (17-tostring-positivo lo usa), un Explica se confirma salado.
+/// - 9.2 (M1): el `Salado` dice si la sal confirmo o si no habia literales que salar.
+pub fn paso_contenido(
+    runner: &runner::Runner,
+    medido: Option<Medido>,
+    lados: recheck::Lados,
+    original: &str,
+    minified: &str,
+    a: &runner::Exec,
+    b: &runner::Exec,
+) -> PasoContenido {
+    let salted = runner.run_salted(original);
+    if salted.status == a.status && salted.stdout == a.stdout {
+        return PasoContenido::Irrelevante;
+    }
+    match (recheck::contenido_matters(runner, original, minified, a, b, &salted), medido) {
+        (recheck::Recheck::Explica, Some(m)) => {
+            match recheck::con_literales_salados_de(runner, (m.minifier, m.preset, m.kind), original, recheck::Sal::Dato, lados, |o2, m2, a2, b2| {
+                recheck::contenido_matters(runner, o2, m2, a2, b2, &runner.run_salted(o2))
+            }) {
+                Ok(s) => PasoContenido::Rechequeo(recheck::Recheck::Explica, Some(s)),
+                Err(n) => PasoContenido::Rechequeo(recheck::Recheck::Inconcluso(n), None),
+            }
+        }
+        (r, _) => PasoContenido::Rechequeo(r, None),
+    }
+}
+
 /// Clasifica la divergencia `kind` entre `a` (original) y `b` (minificado).
 /// Una asuncion habla del programa de entrada: clasifican los flags de A y los
 /// estaticos del original. Un flag solo en B es algo que el minificado hace y
@@ -147,30 +196,13 @@ pub fn clasificar<'a>(
     // b1-b: notas de los re-chequeos inconclusos (van a meta.txt).
     let mut notes: Vec<String> = Vec::new();
     if flags.iter().any(|f| CONTENT_FLAGS.contains(f)) {
-        let salted = runner.run_salted(original);
-        if salted.status == a.status && salted.stdout == a.stdout {
-            flags.retain(|f| !CONTENT_FLAGS.contains(f));
-            flags.push("contenido_irrelevante");
-            traza.paso("contenido", "NoExplica -> contenido_irrelevante (A con toString/.stack cambiados da lo mismo)");
-        } else {
-            // t-principio: que A dependa del contenido no dice que la divergencia venga
-            // de ahi (a03/a04: un bug ajeno al lado iba a known/). A' y B' con el
-            // contenido fijo, y `veredicto`.
-            // b7-1b (revision 7.1, H2, opcion (c)): sin sensor de uso para el texto de una funcion
-            // del programa (17-tostring-positivo lo usa), un Explica se confirma salado.
-            // 9.2 (M1): la traza dice si la sal confirmo o si no habia literales que salar.
-            let (r, salado) = match (recheck::contenido_matters(runner, original, minified, a, b, &salted), ctx.medido) {
-                (recheck::Recheck::Explica, Some(m)) => {
-                    match recheck::con_literales_salados(runner, (m.minifier, m.preset, m.kind), original, recheck::Sal::Dato, |o2, m2, a2, b2| {
-                        recheck::contenido_matters(runner, o2, m2, a2, b2, &runner.run_salted(o2))
-                    }) {
-                        Ok(s) => (recheck::Recheck::Explica, Some(s)),
-                        Err(n) => (recheck::Recheck::Inconcluso(n), None),
-                    }
-                }
-                (r, _) => (r, None),
-            };
-            match r {
+        match paso_contenido(runner, ctx.medido, recheck::Lados::Minificado, original, minified, a, b) {
+            PasoContenido::Irrelevante => {
+                flags.retain(|f| !CONTENT_FLAGS.contains(f));
+                flags.push("contenido_irrelevante");
+                traza.paso("contenido", "NoExplica -> contenido_irrelevante (A con toString/.stack cambiados da lo mismo)");
+            }
+            PasoContenido::Rechequeo(r, salado) => match r {
                 recheck::Recheck::Explica => traza.paso(
                     "contenido",
                     format!("Explica (A depende del contenido y con el contenido fijo la divergencia desaparece{})", con_sal(salado)),

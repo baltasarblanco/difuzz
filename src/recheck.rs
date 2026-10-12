@@ -2309,9 +2309,33 @@ pub fn sal_alcanza(a: &runner::Exec, b: &runner::Exec, bs: &runner::Exec) -> Res
 /// (el NoExplica del salado tambien es Inconcluso). `sal`: que literales se salan.
 pub fn con_literales_salados(
     r: &runner::Runner,
+    medido: (backend::Minifier, minify::Preset, SourceKind),
+    original: &str,
+    sal: Sal,
+    recheck: impl FnOnce(&str, &str, &runner::Exec, &runner::Exec) -> Recheck,
+) -> Result<Salado, String> {
+    con_literales_salados_de(r, medido, original, sal, Lados::Minificado, recheck)
+}
+
+/// 10.1b: que dos textos del original salado compara `con_literales_salados_de`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Lados {
+    /// El original que imprime el backend y el minificado (A contra B: `clasificar`).
+    Minificado,
+    /// `--crudo` (`main::comparar_crudo`): el texto salado hace de crudo y el original que el
+    /// backend imprime de el, de A. El salado lo reimprime SWC (`analisis::salar`), asi que puede
+    /// no conservar la forma del crudo que dispara el bug del parser o del codegen; si la pierde,
+    /// el salado ya no diverge y da `Err` (inconcluso: el crudo va a codegen/, el lado seguro).
+    Crudo,
+}
+
+/// `con_literales_salados` con los dos textos que se comparan (`lados`).
+pub fn con_literales_salados_de(
+    r: &runner::Runner,
     (minifier, preset, kind): (backend::Minifier, minify::Preset, SourceKind),
     original: &str,
     sal: Sal,
+    lados: Lados,
     recheck: impl FnOnce(&str, &str, &runner::Exec, &runner::Exec) -> Recheck,
 ) -> Result<Salado, String> {
     let salado = match crate::analisis::salar(original, kind, sal) {
@@ -2326,6 +2350,10 @@ pub fn con_literales_salados(
     let cfg = preset.build(minifier, kind);
     let minify::Outcome::Ok { original: o2, minified: m2, .. } = minify::prepare(&salado, &cfg) else {
         return Err("no pude minificar el original con los literales salados".into());
+    };
+    let (o2, m2) = match lados {
+        Lados::Minificado => (o2, m2),
+        Lados::Crudo => (salado, o2),
     };
     let (a2, b2) = (r.run(&o2), r.run(&m2));
     // b7-1c (revision 7.1b, S1): esto se llama solo con un Explica del original, asi que el
