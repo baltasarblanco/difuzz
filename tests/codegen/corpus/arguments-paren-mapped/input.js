@@ -1,0 +1,1 @@
+function f(a){ (arguments)[0] = 9; return a } console.log(f(1));

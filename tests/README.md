@@ -13,11 +13,11 @@ cargo build --release && cargo build --profile oraculo   # los dos binarios
 `cargo test`: los unitarios de `src/` y tres binarios de integración:
 
 - `tests/salida_celdas.rs`: dos celdas en el mismo `--out` no se pisan; una corrida cortada queda marcada.
-- `tests/salida_usuario.rs`: códigos de salida 0, 1 y 2 de difuzz, que `descartes.tsv` reconstruya el total y que un pipe cerrado en stdout o stderr no cambie el código ni pierda una divergencia (9.4).
-- `tests/verificaciones.rs`: sus dos tests (golden y aceptación) quedan ignorados; ver "Como tests de cargo".
+- `tests/salida_usuario.rs`: códigos de salida 0, 1 y 2 de difuzz, que `descartes.tsv` reconstruya el total, que un pipe cerrado en stdout o stderr no cambie el código ni pierda una divergencia (9.4) y que `--crudo` mande a `codegen/` sin cambiar la línea `total=` (10.1).
+- `tests/verificaciones.rs`: sus tres tests (golden, aceptación y codegen) quedan ignorados; ver "Como tests de cargo".
 
 Cada binario de integración incluye `src/test_util.rs` (con `#[path]`) y corre también sus 4 tests. Ignorados en
-total: 3, los dos de `tests/verificaciones.rs` y C1 de la muestra (`c1_igual_a_oxc_minify_de_npm`, en `src/`).
+total: 4, los tres de `tests/verificaciones.rs` y C1 de la muestra (`c1_igual_a_oxc_minify_de_npm`, en `src/`).
 
 Sin `node` en `PATH`, los tests que lo necesitan **fallan** con un mensaje claro (R1-H17). Con
 `DIFUZZ_SIN_NODE=1` se saltean y cada uno deja una línea `DIFUZZ_SALTEADO_SIN_NODE` en stderr (contarlas con
@@ -93,17 +93,32 @@ conocidos" en el README principal).
 tests/aceptacion/rechequeos/verificar.sh [--jobs N] [BINARIO] [DIR_SALIDA]
 ```
 
+## Corpus de codegen — `tests/codegen/`
+
+10.1: 142 formas propias (escritas para difuzz, no de SWC) cuya semántica depende de la sintaxis
+exacta, corridas con `--crudo` (el texto crudo contra el original que imprime el backend) en 8
+celdas (oxc|swc × carril a|b × core_defaults|carril_a): 1136 comparaciones. La clase de un caso con
+`codegen/` es `codegen:<kind>+<clase>` (ortogonal). Las 9 formas del bug de los paréntesis de oxc
+(O8) van a `codegen/` en las 8 celdas; O9 y O10 a `div/` por el oráculo de siempre. Origen,
+adaptaciones y la justificación de cada destino en `tests/codegen/README.md`. Reutiliza
+`tests/golden/verificar.sh`, que para esto acepta `--difuzz "ARGS"` (argumentos extra para cada
+celda).
+
+```sh
+tests/codegen/verificar.sh [--jobs N] [BINARIO] [DIR_SALIDA]
+```
+
 ## Como tests de cargo
 
 ```sh
-cargo test --release --test verificaciones -- --ignored --test-threads=1   # los dos
+cargo test --release --test verificaciones -- --ignored --test-threads=1   # los tres
 cargo test --release --test verificaciones -- --ignored golden             # solo el golden
 ```
 
 Usan `CARGO_BIN_EXE_difuzz` (con `--release`, `target/release/difuzz`; sin `--release`, `target/debug/difuzz`,
 que también encuentra `target/oraculo/difuzz`). Fallan con un mensaje claro si no hay node o no hay oráculo
 (sin node, `DIFUZZ_SIN_NODE=1` los saltea y los cuenta, como al resto: ver "Suite normal").
-`VERIFICAR_JOBS=N` fija los workers de difuzz (default 4); `--test-threads=1` evita correr los dos a la vez.
+`VERIFICAR_JOBS=N` fija los workers de difuzz (default 4); `--test-threads=1` evita correr más de uno a la vez.
 
 ## Muestra fija — `tests/muestra/`
 

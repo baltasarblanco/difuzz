@@ -3,6 +3,7 @@
 //!
 //! - `golden`: `tests/golden/verificar.sh` (bugs conocidos en 8 celdas y modos opt-in).
 //! - `aceptacion_rechequeos`: `tests/aceptacion/rechequeos/verificar.sh` (re-chequeos, 4 celdas de oxc).
+//! - `codegen`: `tests/codegen/verificar.sh` (10.1: 142 formas con `--crudo`, 8 celdas).
 //!
 //! Se corren con `cargo test --release --test verificaciones -- --ignored` (o filtrando por
 //! nombre: `-- --ignored golden`). Usan el binario de `CARGO_BIN_EXE_difuzz` y exigen el
@@ -69,4 +70,10 @@ fn golden() {
 #[ignore = "necesita node y el oraculo; correr con -- --ignored"]
 fn aceptacion_rechequeos() {
     verificar("tests/aceptacion/rechequeos/verificar.sh");
+}
+
+#[test]
+#[ignore = "necesita node y el oraculo; correr con -- --ignored"]
+fn codegen() {
+    verificar("tests/codegen/verificar.sh");
 }
