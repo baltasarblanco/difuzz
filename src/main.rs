@@ -1436,11 +1436,14 @@ fn chequeo_crudo(ctx: &Ctx, runner: &runner::Runner, st: &mut CrudoStats, rel: &
             // tiene que ver la diferencia que vio `mismo_programa`).
             // 10.1b (H2 de la revision A de 10.1): si uno de los dos se colgo (confirmado con el
             // timeout largo) y el otro no, el kind es Timeout, de cualquier lado: `compare` solo lo
-            // ve en A (el que hace de minificado) y con el crudo colgado daba Stdout.
+            // ve en A (el que hace de minificado) y con el crudo colgado daba Stdout. 10.1c (M3 de la
+            // revision B de 10.1b): si se colgaron los dos, la diferencia es lo que imprimieron antes.
             let kind = {
                 let _crudos = oracle::con_nombres_crudos(true);
+                let colgado = (r.status == Status::Timeout, a.status == Status::Timeout);
                 match oracle::compare(&r, &a) {
-                    _ if r.status == Status::Timeout || a.status == Status::Timeout => oracle::Kind::Timeout,
+                    _ if colgado == (true, true) => oracle::Kind::Stdout,
+                    _ if colgado.0 || colgado.1 => oracle::Kind::Timeout,
                     oracle::Verdict::Divergence(k) => k,
                     oracle::Verdict::Same if r.status != a.status => oracle::Kind::ExitStatus,
                     oracle::Verdict::Same => oracle::Kind::Stdout,
@@ -1455,9 +1458,11 @@ fn chequeo_crudo(ctx: &Ctx, runner: &runner::Runner, st: &mut CrudoStats, rel: &
 /// 10.1: como termino la comparacion del crudo con A (`comparar_crudo`).
 enum Crudo {
     Igual,
-    /// El crudo y A no terminaron a tiempo (con el timeout de la celda, confirmado en fresco):
-    /// nada que comparar, como un original que no termina en A contra B. Si se cuelga uno solo
-    /// (tambien con el timeout largo), es `Codegen` con kind Timeout.
+    /// El crudo y A no terminaron a tiempo con el timeout de la celda e imprimieron lo mismo antes
+    /// de colgarse (en la primera comparacion, o en fresco), o lo que imprimen cambia entre
+    /// corridas: nada estable que comparar, como un original que no termina en A contra B. Si se
+    /// cuelga uno solo (tambien con el timeout largo), es `Codegen` con kind Timeout; si se cuelgan
+    /// los dos y cada uno imprime siempre lo mismo y no es lo mismo, `Codegen` con kind Stdout.
     Timeout,
     Runner(String),
     NoDeterminista,
@@ -1470,14 +1475,18 @@ enum Crudo {
 
 /// 10.1: compara el crudo con A como `confirm` compara A con B, sin dar nada por diferente
 /// sin repetirlo:
-/// 1. el crudo (de la cache de A, si esta: no depende del preset) contra el A del caso;
+/// 1. el crudo (de la cache de A, si esta: no depende del preset) contra el A del caso; si dan lo
+///    mismo, `Igual` (o `Timeout`, si los dos se colgaron);
 /// 2. si difieren: el crudo y A otra vez cada uno, dos veces y en fresco. Si alguno no se
-///    repite a si mismo, `NoDeterminista` (la cache del crudo se lapida si fue ella); dos
-///    Timeout se repiten aunque hayan impreso distinto (10.1b); si los frescos coinciden,
-///    `Igual`; si los dos se cuelgan, `Timeout`;
+///    repite a si mismo, o el A fresco no repite al del caso (10.1c; si el del caso termino y los
+///    frescos se colgaron, antes se repiten con el timeout largo), `NoDeterminista` (la cache del
+///    crudo se lapida si fue ella); dos Timeout se repiten aunque hayan impreso distinto (10.1b).
+///    Si los dos frescos se cuelgan: `Timeout`, salvo que cada uno imprima siempre lo mismo antes
+///    de colgarse y no sea lo mismo (10.1c), que sigue. Si los frescos coinciden, `Igual`;
 /// 3. un lado en Timeout y el otro no: se repite con `max(4 x timeout, 20 x elapsed del otro)`
 ///    (como B en `confirm`); si sigue colgado, termina en `Codegen` con kind Timeout;
-/// 4. alguno corrio sin el sensor entero (`sensor_degradado`): los dos sin el sensor;
+/// 4. alguno corrio sin el sensor entero (`sensor_degradado`): los dos sin el sensor (cada uno con
+///    el timeout con el que termino);
 /// 5. con `fn_tostring` o `stack` en los flags del crudo: el paso `contenido` de A contra B
 ///    (`clasificar::paso_contenido`, el crudo como original y A como minificado): `Contenido`
 ///    solo si el crudo salado da otra salida, con el contenido fijo (DIFUZZ_SALT=fijo) el crudo
@@ -1493,19 +1502,19 @@ fn comparar_crudo(
     a: &runner::Exec,
 ) -> Crudo {
     let mismo = oracle::mismo_programa;
+    let colgados = |x: &runner::Exec, y: &runner::Exec| x.status == Status::Timeout && y.status == Status::Timeout;
     let (r, r_cached) = ctx.cache.run(runner, crudo, hits);
     if let Status::Failed(e) = r.status {
         return Crudo::Runner(e);
     }
-    if r.status == Status::Timeout && a.status == Status::Timeout {
-        return Crudo::Timeout;
-    }
+    // 10.1c (M3 de la revision B de 10.1b): dos colgados son `Timeout` sin repetir solo si
+    // imprimieron lo mismo; si no, lo impreso antes de colgarse se confirma como cualquier diferencia.
     if mismo(&r, a) {
-        return Crudo::Igual;
+        return if colgados(&r, a) { Crudo::Timeout } else { Crudo::Igual };
     }
     let mut pasos = vec![format!("1ra comparacion distinta (crudo {}, A del caso)", if r_cached { "de la cache" } else { "fresco" })];
     let (r1, r2) = (runner.run(crudo), runner.run(crudo));
-    let (a1, a2) = (runner.run(original), runner.run(original));
+    let (mut a1, mut a2) = (runner.run(original), runner.run(original));
     for e in [&r1, &r2, &a1, &a2] {
         if let Status::Failed(e) = &e.status {
             return Crudo::Runner(e.clone());
@@ -1514,8 +1523,24 @@ fn comparar_crudo(
     // 10.1b (H2 de la revision A de 10.1): dos Timeout se repiten (solo el status, como
     // `oracle::compare`, que da Timeout sin mirar el stdout). Antes, un crudo que se colgaba
     // imprimiendo cortaba en otro lugar cada vez y quedaba como `no_determinista`.
-    let repite = |x: &runner::Exec, y: &runner::Exec| mismo(x, y) || (x.status == Status::Timeout && y.status == Status::Timeout);
-    if !repite(&r1, &r2) || !repite(&a1, &a2) {
+    let repite = |x: &runner::Exec, y: &runner::Exec| mismo(x, y) || colgados(x, y);
+    // 10.1c (N1 de la revision A de 10.1b): el A del caso tambien se tiene que repetir en fresco
+    // (antes solo se comparaba a1 con a2, y un A que termino en el caso y se cuelga despues pasaba).
+    // Si termino en el caso y las dos frescas se colgaron, puede ser la carga: las dos otra vez con
+    // el timeout largo, como B en `confirm` (si asi tampoco terminan, `NoDeterminista`).
+    let mut t_a = None;
+    if a.status != Status::Timeout && colgados(&a1, &a2) {
+        let longer = (runner.timeout() * 4).max(a.elapsed * 20);
+        (a1, a2) = (runner.run_with_timeout(original, longer), runner.run_with_timeout(original, longer));
+        t_a = Some(longer);
+        pasos.push(format!("A termino en el caso y se colgo en las dos frescas: las dos repetidas con {longer:?} -> {:?}, {:?}", a1.status, a2.status));
+        for e in [&a1, &a2] {
+            if let Status::Failed(e) = &e.status {
+                return Crudo::Runner(e.clone());
+            }
+        }
+    }
+    if !repite(&r1, &r2) || !repite(&a1, &a2) || !repite(a, &a1) {
         if r_cached && !repite(&r1, &r) {
             ctx.cache.tombstone(runner, crudo);
         }
@@ -1524,37 +1549,49 @@ fn comparar_crudo(
     if r_cached && !repite(&r1, &r) {
         ctx.cache.tombstone(runner, crudo);
     }
+    // 10.1c (N1): dos colgados que imprimieron lo mismo son `Timeout` (antes `Igual`: esto venia
+    // antes del match de abajo). M3: si cada uno imprime siempre lo mismo antes de colgarse y no es
+    // lo mismo, se sigue con lo impreso (kind Stdout); si lo impreso cambia entre corridas (un bucle
+    // que imprime), no hay nada estable que comparar: `Timeout`.
+    if colgados(&r1, &a1) && (mismo(&r1, &a1) || !mismo(&r1, &r2) || !mismo(&a1, &a2)) {
+        return Crudo::Timeout;
+    }
     let (mut r, mut a) = (r1, a1);
     if mismo(&r, &a) {
         return Crudo::Igual;
     }
     pasos.push("el crudo y A repetidos dos veces en fresco: cada uno igual a si mismo".into());
+    let mut t_r = None;
     match (r.status == Status::Timeout, a.status == Status::Timeout) {
-        (true, true) => return Crudo::Timeout,
+        (true, true) => pasos.push("los dos se cuelgan, cada uno imprime siempre lo mismo antes y no es lo mismo".into()),
         (true, false) => {
             let longer = (runner.timeout() * 4).max(a.elapsed * 20);
             r = runner.run_with_timeout(crudo, longer);
+            t_r = Some(longer);
             pasos.push(format!("el crudo en Timeout: repetido con {longer:?} -> {:?}", r.status));
         }
         (false, true) => {
             let longer = (runner.timeout() * 4).max(r.elapsed * 20);
             a = runner.run_with_timeout(original, longer);
+            t_a = Some(longer);
             pasos.push(format!("A en Timeout: repetido con {longer:?} -> {:?}", a.status));
         }
         (false, false) => {}
     }
     if mismo(&r, &a) {
-        return Crudo::Igual;
+        return if colgados(&r, &a) { Crudo::Timeout } else { Crudo::Igual };
     }
     let sin_sensor;
     let mut runner = runner;
     if runner.con_sensor() && (r.sensor_degradado().is_some() || a.sensor_degradado().is_some()) {
         sin_sensor = runner.sin_sensor();
         runner = &sin_sensor;
-        (r, a) = (runner.run(crudo), runner.run(original));
+        // 10.1c: cada lado con el timeout con el que termino (el largo, si hizo falta).
+        let correr = |texto: &str, t: Option<Duration>| t.map_or_else(|| runner.run(texto), |t| runner.run_with_timeout(texto, t));
+        (r, a) = (correr(crudo, t_r), correr(original, t_a));
         pasos.push("alguno corrio sin el sensor entero: los dos repetidos sin el sensor".into());
         if mismo(&r, &a) {
-            return Crudo::Igual;
+            return if colgados(&r, &a) { Crudo::Timeout } else { Crudo::Igual };
         }
     }
     // 10.1b (H1 de las revisiones de 10.1): el mismo paso `contenido` que A contra B

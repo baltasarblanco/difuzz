@@ -357,9 +357,15 @@ fn crudo_contenido_solo_si_el_contenido_explica() {
 
 /// 10.1b (H2 de la revision A de 10.1): un timeout del crudo es un timeout. Si se cuelga uno solo
 /// (el crudo imprimiendo o mudo, o A), confirmado con el timeout largo, va a codegen/ con kind
-/// Timeout (antes: `no_determinista` si imprimia, kind Stdout si no); si se cuelgan los dos,
-/// `timeout=`. Un crudo que no se repite a si mismo (el pid) es `no_determinista` (la doble
-/// repeticion; revision A, H7).
+/// Timeout (antes: `no_determinista` si imprimia, kind Stdout si no); si se cuelgan los dos sin
+/// imprimir, `timeout=`. Un crudo que no se repite a si mismo (el pid) es `no_determinista` (la
+/// doble repeticion; revision A, H7).
+/// 10.1c: si se cuelgan los dos despues de imprimir otra cosa (`""` contra `"h"`), codegen/ con kind
+/// Stdout (M3 de la revision B de 10.1b; antes `timeout=` sin directorio). Un A fresco que no
+/// repite al A del caso (un archivo marca) es `no_determinista` (N1 de la revision A de 10.1b;
+/// antes `iguales`). Timeout de 1500 ms: el arranque de node con el preload
+/// entra con margen aun con la maquina cargada (revision A de 10.1b, N5), y un A que termino en el
+/// caso y se cuelga en las frescas por la carga se repite con el timeout largo.
 #[test]
 fn crudo_timeout_es_timeout() {
     if !test_util::requiere_node() {
@@ -367,29 +373,45 @@ fn crudo_timeout_es_timeout() {
     }
     let b = base("crudo-timeout");
     let corpus = b.join("corpus");
-    let colgados: [(&str, &[u8]); 3] = [
-        ("imprime", b"let h;\n(h) = function () {};\nlet i = 0;\nwhile (h.name === \"\") { if (++i % 100000 === 0) console.log(i); }\nconsole.log(\"fin\");\n"),
-        ("mudo", b"let h;\n(h) = function () {};\nwhile (h.name === \"\") {}\nconsole.log(\"fin\");\n"),
-        ("a-colgado", b"let h;\n(h) = function () {};\nwhile (h.name === \"h\") {}\nconsole.log(\"fin\");\n"),
+    let colgados: [(&str, &[u8], &str); 4] = [
+        ("imprime", b"let h;\n(h) = function () {};\nlet i = 0;\nwhile (h.name === \"\") { if (++i % 100000 === 0) console.log(i); }\nconsole.log(\"fin\");\n", "kind: Timeout"),
+        ("mudo", b"let h;\n(h) = function () {};\nwhile (h.name === \"\") {}\nconsole.log(\"fin\");\n", "kind: Timeout"),
+        ("a-colgado", b"let h;\n(h) = function () {};\nwhile (h.name === \"h\") {}\nconsole.log(\"fin\");\n", "kind: Timeout"),
+        ("los-dos-distinto", b"let h; (h) = function(){}; console.log(JSON.stringify(h.name)); while (true) {}\n", "kind: Stdout"),
     ];
-    for (n, src) in colgados {
+    for (n, src, _) in colgados {
         caso(&corpus, n, src);
     }
-    caso(&corpus, "los-dos", b"let i = 0;\nwhile (true) { if (++i % 100000 === 0) console.log(i); }\n");
+    caso(&corpus, "los-dos", b"while (true) {}\n");
     caso(&corpus, "pid", b"console.log(require(\"fs\").readFileSync(\"/proc/self/stat\", \"utf8\").split(\" \")[0]);\n");
+    // La primera corrida (el A del caso) crea la marca e imprime `"h"`; las siguientes (el crudo
+    // y todas las frescas) imprimen `otra`. Antes, los frescos coincidian entre si y daba `iguales`.
+    // El repro de la revision (las siguientes se cuelgan) se midio aparte: con las corridas de A
+    // contra B colgadas, cuesta mas de un minuto.
+    let marca = b.join("marca.txt");
+    let src = format!(
+        "const fs = require(\"fs\");\nconst p = {:?};\nlet h;\n(h) = function () {{}};\nif (fs.existsSync(p)) {{ console.log(\"otra\"); }} else {{ fs.writeFileSync(p, \"x\"); console.log(JSON.stringify(h.name)); }}\n",
+        marca.to_str().unwrap()
+    );
+    caso(&corpus, "marca", src.as_bytes());
     let out = b.join("out");
-    let o = difuzz(&b, &[corpus.to_str().unwrap(), "--out", out.to_str().unwrap(), "--no-cache", "--jobs", "5", "--timeout-ms", "1000", "--crudo"]);
+    let o = difuzz(&b, &[corpus.to_str().unwrap(), "--out", out.to_str().unwrap(), "--no-cache", "--jobs", "7", "--timeout-ms", "1500", "--crudo"]);
     assert_eq!(rc(&o), Some(0), "{}", err(&o));
     let stdout = String::from_utf8_lossy(&o.stdout).into_owned();
     let linea = stdout.lines().find(|l| l.starts_with("crudo (10.1): ")).unwrap_or_else(|| panic!("{stdout}"));
-    for (c, n) in [("comparados", 5), ("iguales", 0), ("CODEGEN", 3), ("contenido", 0), ("no_determinista", 1), ("timeout", 1), ("runner", 0)] {
+    for (c, n) in [("comparados", 7), ("iguales", 0), ("CODEGEN", 4), ("contenido", 0), ("no_determinista", 2), ("timeout", 1), ("runner", 0)] {
         assert_eq!(campo(linea, c), n, "{c}: {linea}\n{}", err(&o));
     }
-    for (n, _) in colgados {
+    for (n, _, kind) in colgados {
         let meta = std::fs::read_to_string(out.join("oxc+carril_a+tal_cual/codegen").join(n).join("meta.txt")).unwrap_or_else(|e| panic!("{n}: {e}\n{}", err(&o)));
-        assert!(meta.contains("kind: Timeout") && meta.contains("en Timeout: repetido con"), "{n}: {meta}");
+        assert!(meta.contains(kind), "{n}: {meta}");
+        if kind == "kind: Timeout" {
+            assert!(meta.contains("en Timeout: repetido con"), "{n}: {meta}");
+        }
     }
-    assert!(err(&o).contains("crudo: no determinista (el crudo o A no se repiten): pid"), "{}", err(&o));
+    for n in ["pid", "marca"] {
+        assert!(err(&o).contains(&format!("crudo: no determinista (el crudo o A no se repiten): {n}/")), "{n}: {}", err(&o));
+    }
     std::fs::remove_dir_all(&b).unwrap();
 }
 
