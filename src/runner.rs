@@ -114,9 +114,11 @@ pub enum Status {
 pub const TOPE_RSS_SIN_CONFIGURAR: u64 = 4 << 30;
 
 /// 11.5 (I3): cada cuanto se mira el RSS de node mientras corre (el bucle de espera de
-/// `run_file` ya despierta cada 5 ms; el RSS se lee cada 2 vueltas). Lo que un programa reserva y
-/// toca entre dos lecturas pasa el tope antes de que lo maten (MEDIDO, ver el INFORME de 11b); el
-/// pico (`ru_maxrss`) igual lo ve al cosecharlo.
+/// `run_file` ya despierta cada 5 ms; se lee cada 2 vueltas). 11.2b (rev-b11b-A H3): se lee el pico
+/// de node solo (`VmHWM`, `pico_rss`): ve tambien lo que subio y bajo entre dos lecturas, mientras
+/// node siga vivo en la siguiente; lo que pasa despues de la ultima lectura, justo antes de
+/// terminar, no se ve. Antes se usaba ademas `ru_maxrss` de `wait4`, que cuenta a los hijos del
+/// programa que node ya espero (un `execFileSync` de 450 MiB pasaba un tope de 300 de node).
 const SONDEO_RSS: u32 = 2;
 
 /// 11.5 (I3): causa de `recursos/` (meta.txt) y comienzo del mensaje de una ejecucion de node que
@@ -1121,9 +1123,9 @@ fn run_file(r: &Runner, script: &Path, start: Instant, timeout: Duration, opts: 
     let out_buf = drain(child.stdout.take().expect("stdout fue pedido como piped"), tx.clone(), Arc::clone(&salida));
     let err_buf = drain(child.stderr.take().expect("stderr fue pedido como piped"), tx, Arc::clone(&salida));
 
-    // 11.5 (I3): node se espera con `wait4` (no `Child::try_wait`) para tener su pico de RSS
-    // (`ru_maxrss`) al cosecharlo; desde aca `child` no se espera ni se mata por std. Mientras
-    // corre, su RSS se lee cada `SONDEO_RSS` vueltas: si pasa `tope_rss`, se mata el grupo.
+    // 11.5 (I3): node se espera con `waitpid` propio (`Cosecha`; desde aca `child` no se espera ni
+    // se mata por std). Mientras corre, su pico de RSS (`pico_rss`, solo node) se lee cada
+    // `SONDEO_RSS` vueltas: si pasa `tope_rss`, se mata el grupo.
     let mut cos = Cosecha::new(pid);
     // 11.6 (I4): mientras corre, su grupo lo puede matar la segunda senal (`matar_vivos`).
     let vivo = Vivo::registrar(pid);
@@ -1141,7 +1143,7 @@ fn run_file(r: &Runner, script: &Path, start: Instant, timeout: Duration, opts: 
                 }
                 vuelta = vuelta.wrapping_add(1);
                 if r.tope_rss > 0 && vuelta.is_multiple_of(SONDEO_RSS) {
-                    rss_visto = rss_visto.max(crate::subproceso::rss(pid));
+                    rss_visto = rss_visto.max(pico_rss(pid));
                     if rss_visto > r.tope_rss {
                         matado_por_rss = true;
                         cos.matar();
@@ -1161,8 +1163,7 @@ fn run_file(r: &Runner, script: &Path, start: Instant, timeout: Duration, opts: 
         }
     };
     drop(vivo);
-    let pico = cos.pico_rss().max(rss_visto);
-    let por_memoria = r.tope_rss > 0 && (matado_por_rss || pico > r.tope_rss);
+    let (pico, por_memoria) = (rss_visto, matado_por_rss);
     drop(en_curso);
     // Tambien al terminar normalmente: lo que el programa dejo corriendo muere.
     // Riesgo aceptado: node ya fue cosechado y su pid podria reusarse, pero un
@@ -1218,8 +1219,7 @@ fn run_file(r: &Runner, script: &Path, start: Instant, timeout: Duration, opts: 
             format!("escribio por stdout y stderr {} MiB o mas: paso el tope de salida de {} MiB (lo de mas no se junto; matada al verlo)", n >> 20, r.tope_salida >> 20),
         ))
     } else if por_memoria {
-        let como = if matado_por_rss { "matada al pasarlo" } else { "el pico cayo entre dos lecturas; termino sola" };
-        Some((NODE_MEMORIA, format!("paso el tope de RSS de node: {} MiB > {} MiB ({como})", pico >> 20, r.tope_rss >> 20)))
+        Some((NODE_MEMORIA, format!("paso el tope de RSS de node: {} MiB > {} MiB (pico de node solo, VmHWM; matada al pasarlo)", pico >> 20, r.tope_rss >> 20)))
     } else {
         None
     };
@@ -1839,32 +1839,34 @@ pub fn matar_vivos() {
     }
 }
 
-/// 11.5 (I3): node se espera con `wait4` para tener su pico de RSS. Desde que se cosecha no se
-/// toca su pid (podria reusarse).
+/// 11.2b (rev-b11b-A H3): el pico de RSS de node solo (`VmHWM` de `/proc/<pid>/status`), en bytes;
+/// 0 si ya no esta. No cuenta a los procesos que lance el programa.
+fn pico_rss(pid: u32) -> u64 {
+    std::fs::read_to_string(format!("/proc/{pid}/status"))
+        .ok()
+        .and_then(|s| s.lines().find_map(|l| l.strip_prefix("VmHWM:"))?.trim().trim_end_matches("kB").trim().parse::<u64>().ok())
+        .map_or(0, |kb| kb.saturating_mul(1024))
+}
+
+/// 11.5 (I3): node se espera con `waitpid` propio (11.2b: sin `wait4`, su `ru_maxrss` contaba a los
+/// hijos del programa). Desde que se cosecha no se toca su pid (podria reusarse).
 struct Cosecha {
     pid: libc::pid_t,
     wst: libc::c_int,
-    uso: libc::rusage,
     cosechado: bool,
 }
 
 impl Cosecha {
     fn new(pid: u32) -> Cosecha {
-        Cosecha {
-            pid: libc::pid_t::try_from(pid).unwrap_or(libc::pid_t::MAX),
-            wst: 0,
-            // SAFETY: `rusage` es una estructura de enteros: todo en cero es valido.
-            uso: unsafe { std::mem::zeroed() },
-            cosechado: false,
-        }
+        Cosecha { pid: libc::pid_t::try_from(pid).unwrap_or(libc::pid_t::MAX), wst: 0, cosechado: false }
     }
 
-    /// `wait4` del hijo, sin bloquear (`bloquear` false) o hasta que termine. `Ok(true)`: ya esta
+    /// `waitpid` del hijo, sin bloquear (`bloquear` false) o hasta que termine. `Ok(true)`: ya esta
     /// cosechado (ahora o antes).
     fn esperar(&mut self, bloquear: bool) -> std::io::Result<bool> {
         while !self.cosechado {
-            // SAFETY: punteros a campos propios, vivos durante la llamada.
-            let w = unsafe { libc::wait4(self.pid, &mut self.wst, if bloquear { 0 } else { libc::WNOHANG }, &mut self.uso) };
+            // SAFETY: puntero a un campo propio, vivo durante la llamada.
+            let w = unsafe { libc::waitpid(self.pid, &mut self.wst, if bloquear { 0 } else { libc::WNOHANG }) };
             if w == self.pid {
                 self.cosechado = true;
             } else if w == 0 {
@@ -1899,14 +1901,6 @@ impl Cosecha {
         } else {
             Status::Signal
         }
-    }
-
-    /// El pico de RSS de node (`ru_maxrss`, en KiB en Linux), en bytes; 0 si no se cosecho.
-    fn pico_rss(&self) -> u64 {
-        if !self.cosechado {
-            return 0;
-        }
-        u64::try_from(self.uso.ru_maxrss).unwrap_or(0).saturating_mul(1024)
     }
 }
 
@@ -2630,7 +2624,7 @@ mod tests {
             };
             let x = p.downcast::<Excedido>().expect("el payload es Excedido");
             assert_eq!((x.causa, x.programa.as_str(), x.ext), (NODE_MEMORIA, js, "cjs"));
-            assert!(x.mensaje.starts_with("node_memoria: ") && x.mensaje.contains("> 256 MiB (matada al pasarlo)"), "{}", x.mensaje);
+            assert!(x.mensaje.starts_with("node_memoria: ") && x.mensaje.contains("> 256 MiB (pico de node solo, VmHWM; matada al pasarlo)"), "{}", x.mensaje);
             // El pico que vio difuzz: lejos de los 3 GiB pedidos (la mato a tiempo).
             let pico: u64 = x.mensaje.split("RSS de node: ").nth(1).and_then(|s| s.split(' ').next()).and_then(|n| n.parse().ok()).unwrap();
             assert!(pico < 1024, "pico {pico} MiB: {}", x.mensaje);
@@ -2804,26 +2798,33 @@ mod tests {
         assert!(!registrados().contains(&pid), "sigue registrado despues de cosecharlo");
     }
 
-    /// 11.5 (I3): `Cosecha` da el pico de RSS de node (`ru_maxrss` de `wait4`), tambien el que no
-    /// alcanzo a verse mientras corria.
+    /// 11.2b (rev-b11b-A H3): el tope de RSS mide a node solo (`VmHWM`). Un hijo del programa que
+    /// reserva 400 MiB (`execFileSync` de otro node) no pasa un tope de 256 MiB de node; node que
+    /// reserva lo mismo, si. `Cosecha` sigue cosechando con `waitpid` (status y una vez sola).
     #[test]
-    // Lo cosecha `Cosecha` con wait4, no `Child::wait` (como en `run_file`).
+    // El de `Cosecha` lo cosecha `waitpid` (como en `run_file`), no `Child::wait`.
     #[allow(clippy::zombie_processes)]
-    fn cosecha_da_el_pico_de_rss() {
+    fn pico_de_rss_es_de_node_solo() {
+        use super::{Excedido, Preload, Runner, Status, NODE_MEMORIA};
+        use std::time::Duration;
         if !crate::test_util::requiere_node() {
             return;
         }
-        let hijo = std::process::Command::new(super::node_path())
-            .args(["-e", "Buffer.alloc(200 << 20, 1);"])
-            .stdin(std::process::Stdio::null())
-            .spawn()
-            .unwrap();
-        let mut c = super::Cosecha::new(hijo.id());
+        let preload = Preload::write_tagged("pico-node").unwrap();
+        let r = Runner::new(&preload, crate::test_util::id_runner(), Duration::from_secs(60)).sin_sensor().con_tope_rss(256 << 20);
+        let hijo = "const out = require(\"child_process\").execFileSync(process.execPath, [\"-e\", \"const b = Buffer.alloc(400 << 20, 1); console.log(b.length > 0)\"]);\nconsole.log(String(out).trim());\n";
+        let e = r.run(hijo);
+        assert_eq!((e.status, e.stdout.as_str()), (Status::Exited(0), "true\n"), "{}", e.stderr);
+        let propio = "const b = []; for (let i = 0; i < 16; i++) b.push(Buffer.alloc(25 << 20, 1));\nconsole.log(b.length);\n";
+        let Err(p) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| r.run(propio))) else {
+            panic!("node reservando 400 MiB tenia que pasar el tope");
+        };
+        assert_eq!(p.downcast::<Excedido>().unwrap().causa, NODE_MEMORIA);
+        // `Cosecha`: status, y ya cosechado ni espera ni mata otra vez.
+        let h = std::process::Command::new(super::node_path()).args(["-e", "process.exitCode = 3;"]).stdin(std::process::Stdio::null()).spawn().unwrap();
+        let mut c = super::Cosecha::new(h.id());
         assert!(c.esperar(true).unwrap());
-        assert_eq!(c.status(), super::Status::Exited(0));
-        let pico = c.pico_rss() >> 20;
-        assert!((200..1024).contains(&pico), "pico {pico} MiB");
-        // Ya cosechado: ni espera ni mata otra vez.
+        assert_eq!(c.status(), super::Status::Exited(3));
         assert!(c.esperar(false).unwrap());
         c.matar();
     }

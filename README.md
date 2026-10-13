@@ -984,16 +984,21 @@ primeras son del minificador; las variantes de `--mutaciones` suman en el `RECUR
 Si lo pasa una ejecución del chequeo de `--crudo`, el chequeo cuenta como `runner=` en su línea y el
 caso sigue. Al arrancar, difuzz imprime los dos topes (`topes de node: ...`).
 
-- **Memoria (`--mem-node MiB`, causa `node_memoria`).** difuzz lee el RSS de node cada ~10 ms
-  mientras corre y, al cosecharlo, su pico (`ru_maxrss`): si pasa el tope, lo mata (a él y a su
-  grupo). El default es la misma cuenta que el presupuesto de los hijos minificadores (MemTotal/2
+- **Memoria (`--mem-node MiB`, causa `node_memoria`).** difuzz lee el pico de RSS de node (`VmHWM`
+  de `/proc/<pid>/status`) cada ~10 ms mientras corre: si pasa el tope, lo mata (a él y a su grupo).
+  El pico ve también lo que subió y bajó entre dos lecturas; lo que pasa entre la última lectura y
+  el final, no (11.2b: antes se sumaba el `ru_maxrss` de `wait4`, que cuenta a los hijos del
+  programa que node ya esperó). El default es la misma cuenta que el presupuesto de los hijos minificadores (MemTotal/2
   repartido entre los workers, entre 256 MiB y 4 GiB; `--mem-hijo` no lo cambia): cada worker
   hace una cosa a la vez, así que `--jobs` × tope acota lo que corre junto y la otra mitad queda
   para difuzz y el resto de la máquina. Con 32 workers y 31 GiB son 496 MiB; con un solo caso,
   un solo worker y 4 GiB. Un caso legítimo que necesita más va a `recursos/`: se repite con
   `--mem-node` más alto o menos `--jobs`. Lo que un programa reserva y toca entre dos lecturas
   pasa el tope antes de que lo maten (medido: 267 MiB con un tope de 256, reservando de a
-  32 MiB). Mide solo a node, no a los procesos que el programa lance (sin `--sandbox`). No se usa
+  32 MiB). Mide solo a node, no a los procesos que el programa lance (sin `--sandbox`): un
+  `execFileSync` de otro node que reserva 400 MiB no pasa un tope de 256. Tampoco es
+  reproducible suelto: el default depende de los workers, que son `min(--jobs, casos)` (con un
+  caso solo, 4 GiB); el mensaje trae el tope con que se pasó, para repetirlo con `--mem-node`. No se usa
   `RLIMIT_AS`: V8 reserva 1,4 GB de espacio virtual para arrancar y WebAssembly ~10 GB, y con
   el límite una reserva grande es un `RangeError` que el programa ve (y A y B darían iguales con
   otro programa); `--max-old-space-size` solo cubre el heap de V8 (no los `Buffer`).
