@@ -59,17 +59,30 @@ impl Index {
     /// R2-H05: queda como `index-<celda>.tsv.incompleta`, la marca que lee
     /// `--cruce` (un SIGKILL deja el `.tmp`, que tambien avisa).
     pub fn abandon(&self) {
-        if std::fs::rename(&self.tmp, incompleta_of(&self.dest)).is_err() {
-            let _ = std::fs::remove_file(&self.tmp);
-        }
+        self.dejar_marca(&incompleta_of(&self.dest), &parcial_of(&self.dest));
     }
 
     /// 10.2b (B-H2 / A-H7 de las revisiones del bloque 10): la corrida termino, pero con escrituras
     /// perdidas o casos sin contar: el indice (al que le pueden faltar filas) no reemplaza al
     /// anterior; queda como `index-<celda>.tsv.parcial`, que `--cruce` avisa como incompleta.
     pub fn abandon_parcial(&self) {
-        if std::fs::rename(&self.tmp, parcial_of(&self.dest)).is_err() {
-            let _ = std::fs::remove_file(&self.tmp);
+        self.dejar_marca(&parcial_of(&self.dest), &incompleta_of(&self.dest));
+    }
+
+    /// El `.tmp` pasa a ser la marca `marca` de esta corrida. 10.2c (N1 de la revision B del bloque
+    /// 10, vuelta 2): y se borra la `otra` de una corrida anterior, para que `--cruce` muestre un
+    /// solo estado, el de la ultima corrida (antes podia listar `incompleta` e `interrumpida` para la
+    /// misma celda). Si el rename falla (A, vuelta 2: antes en silencio), se avisa por stderr y la
+    /// marca anterior queda: dice igual que la tabla no es de la ultima corrida.
+    fn dejar_marca(&self, marca: &Path, otra: &Path) {
+        match std::fs::rename(&self.tmp, marca) {
+            Ok(()) => {
+                let _ = std::fs::remove_file(otra);
+            }
+            Err(e) => {
+                eprintln!("indice: no pude dejar la marca {} ({e}): --cruce puede no avisar que la ultima corrida de {} no termino", marca.display(), self.cell);
+                let _ = std::fs::remove_file(&self.tmp);
+            }
         }
     }
 
@@ -118,7 +131,11 @@ pub enum Cierre {
 /// corrida de la celda no lo dejo (la tabla sigue con el indice de la anterior, si hay). Si
 /// tampoco se puede escribir la marca (el directorio no se puede escribir), `Err`.
 pub fn marcar_parcial(dir: &Path, cell: &str) -> std::io::Result<()> {
-    std::fs::write(parcial_of(&file_of(dir, cell)), format!("{HEADER}\n# sin indice: no se pudo crear\n"))
+    let dest = file_of(dir, cell);
+    std::fs::write(parcial_of(&dest), format!("{HEADER}\n# sin indice: no se pudo crear\n"))?;
+    // 10.2c (N1): una sola marca, la de la ultima corrida.
+    let _ = std::fs::remove_file(incompleta_of(&dest));
+    Ok(())
 }
 
 fn file_of(dir: &Path, cell: &str) -> PathBuf {
@@ -616,6 +633,39 @@ mod tests {
         e.cerrar(Cierre::Completa).unwrap();
         drop(e);
         assert!(!cruce(&d).unwrap().contains("incompleta"));
+        std::fs::remove_dir_all(&d).unwrap();
+    }
+
+    /// 10.2c (N1 de la revision B del bloque 10, vuelta 2): despues de una corrida parcial y otra
+    /// interrumpida (o al reves, o sin indice), `--cruce` muestra un solo estado para la celda, el
+    /// de la ultima corrida. Antes listaba los dos.
+    #[test]
+    fn una_sola_marca_la_de_la_ultima_corrida() {
+        let d = std::env::temp_dir().join(format!("difuzz-test-indice-marcas-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        let c = "oxc+core_defaults+tal_cual+carril_b";
+        let correr = |cierre: Cierre| {
+            let ix = Index::create(&d, c).unwrap();
+            ix.cerrar(cierre).unwrap();
+        };
+        let estados = || -> Vec<String> {
+            let t = cruce(&d).unwrap();
+            t.lines().filter(|l| l.starts_with(&format!("{c}: ")) && !l.contains("div=")).map(String::from).collect()
+        };
+        let parcial = format!("{c}: incompleta (escrituras perdidas, casos sin contar o sin indice)");
+        let interrumpida = format!("{c}: interrumpida");
+        correr(Cierre::Completa);
+        correr(Cierre::Parcial);
+        assert_eq!(estados(), std::slice::from_ref(&parcial));
+        correr(Cierre::Interrumpida);
+        assert_eq!(estados(), [interrumpida]);
+        correr(Cierre::Parcial);
+        assert_eq!(estados(), std::slice::from_ref(&parcial));
+        correr(Cierre::Interrumpida);
+        marcar_parcial(&d, c).unwrap();
+        assert_eq!(estados(), [parcial]);
+        correr(Cierre::Completa);
+        assert!(estados().is_empty());
         std::fs::remove_dir_all(&d).unwrap();
     }
 }
