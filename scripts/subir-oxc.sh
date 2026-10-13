@@ -381,7 +381,9 @@ indice() {
   [[ -f $r/descartes.tsv ]] && rg -N -v '^#' "$r/descartes.tsv" | cut -f1,2 | while IFS=$'\t' read -r caso kind; do
     printf '%s\tdescarte:%s\t-\n' "$caso" "$kind"; done
 }
-hallazgo() { [[ $1 == *div:* || $1 == *panic* ]]; }
+# 10.2b (B-H7 de la revision B del bloque 10): codegen/ (--crudo) tambien es un hallazgo (de oxc: el parser o el codegen).
+# El estado entero `codegen`, no `descarte:codegen` (un original que no se pudo imprimir).
+hallazgo() { [[ $1 == *div:* || $1 == *panic* || +$1+ == *+codegen+* ]]; }
 stats_diff() { # stdout_base stdout_nuevo -> "  stats: clave base -> nuevo, ..." de la linea total=
   local -a tb tn; local i k s=""
   read -r -a tb < <(rg -N -m1 '^total=' "$1" | tr -d '()|'); read -r -a tn < <(rg -N -m1 '^total=' "$2" | tr -d '()|')
