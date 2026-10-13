@@ -578,9 +578,9 @@ mod tests {
         }
         let full = std::fs::OpenOptions::new().write(true).open("/dev/full").unwrap();
         let ix = Index { cell: "oxc+carril_a+tal_cual".into(), file: Mutex::new(full), tmp: "/no/existe.tmp".into(), dest: "/no/existe".into() };
-        let antes = crate::oracle::write_errors();
+        let antes = crate::oracle::write_errors_hilo();
         ix.record("caso", "div", "Stdout", 1);
-        assert!(crate::oracle::write_errors() > antes);
+        assert_eq!(crate::oracle::write_errors_hilo(), antes + 1);
     }
 
     /// 10.2b (B-H2 de la revision B del bloque 10): un cierre `Parcial` no reemplaza al indice

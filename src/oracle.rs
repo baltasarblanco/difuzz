@@ -773,6 +773,21 @@ pub fn write_errors() -> usize {
 
 pub(crate) fn write_failed() {
     WRITE_ERRORS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    #[cfg(test)]
+    WRITE_ERRORS_HILO.with(|c| c.set(c.get() + 1));
+}
+
+// 10.2b (B-H8 de la revision B del bloque 10): la misma cuenta por hilo, para los tests: el
+// contador global lo suben tambien otros tests que corren en paralelo, y un `>` sobre el global
+// podia pasar aunque la llamada que se prueba no contara.
+#[cfg(test)]
+thread_local! {
+    static WRITE_ERRORS_HILO: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+pub fn write_errors_hilo() -> usize {
+    WRITE_ERRORS_HILO.with(std::cell::Cell::get)
 }
 
 fn write_all(dir: &Path, files: &[(&str, &str)]) {
@@ -1113,22 +1128,22 @@ mod tests {
     /// no se pudo cerrar cuentan como escrituras perdidas (antes: solo stderr, `completa` y 0).
     #[test]
     fn descartes_e_indice_perdidos_cuentan() {
-        use super::{write_errors, Reporter};
+        use super::{write_errors_hilo, Reporter};
         let d = std::env::temp_dir().join(format!("difuzz-test-perdidas-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
         let ix = crate::indice::Index::create(&d.join("indice"), "celda").unwrap();
         let r = Reporter::new(&d, "celda".into(), "//preload").with_index(ix);
         // El .tmp del indice ya no esta: el rename del cierre falla.
         std::fs::remove_file(d.join("indice/index-celda.tsv.tmp")).unwrap();
-        let antes = write_errors();
+        let antes = write_errors_hilo();
         r.finish(crate::indice::Cierre::Completa);
-        assert!(write_errors() > antes, "el cierre fallido del indice no conto");
+        assert_eq!(write_errors_hilo(), antes + 1, "el cierre fallido del indice no conto");
         if std::path::Path::new("/dev/full").exists() {
             let full = std::fs::OpenOptions::new().write(true).open("/dev/full").unwrap();
             *r.descartes.lock().unwrap() = Some(full);
-            let antes = write_errors();
+            let antes = write_errors_hilo();
             r.discard(std::path::Path::new("c/input.js"), "timeout", std::time::Duration::ZERO);
-            assert!(write_errors() > antes, "la linea perdida de descartes.tsv no conto");
+            assert_eq!(write_errors_hilo(), antes + 1, "la linea perdida de descartes.tsv no conto");
         }
         std::fs::remove_dir_all(&d).unwrap();
     }
