@@ -152,7 +152,8 @@ uso: difuzz <corpus_dir> [--out DIR] [--minifier M] [--config C] [--forma F] [--
          cambio corta); --cruce sin indices; --emitir que no puede leer o minificar; stdout que
          no se puede escribir (disco lleno; no un pipe cerrado)
     2    error de uso: opcion desconocida, valor o combinacion invalida (con este texto en stderr)
-    130  interrumpida por SIGINT o SIGTERM (CORRIDA.txt: interrumpida)
+    130  interrumpida por SIGINT o SIGTERM (CORRIDA.txt: interrumpida); una segunda senal sale en el
+         acto, mata los node en curso y deja CORRIDA.txt en incompleta
     ni un pipe cerrado en stdout (`| head -1`) ni un error al escribir en stderr cambian el codigo
     (9.4): lo que no se pudo imprimir se pierde y la corrida sigue (sus resultados estan en --out)";
 
@@ -1287,11 +1288,14 @@ fn main() {
 /// runner mata el grupo de cada ejecucion, M2) y no toman otro; despues se
 /// guardan known-sintomas.tsv y lint-triage.tsv y se descarta el indice a
 /// medias. Una segunda senal sale en el acto (los restos los borra la proxima
-/// corrida, runner::clean_stale).
+/// corrida, runner::clean_stale; CORRIDA.txt queda en `incompleta`). 11.6 (I4): antes
+/// de salir mata los grupos de los node en curso (`runner::matar_vivos`); node muere
+/// igual con difuzz (`PR_SET_PDEATHSIG`), pero lo que el programa lanzo en su grupo no.
 static CANCEL: AtomicBool = AtomicBool::new(false);
 
 extern "C" fn on_signal(_: libc::c_int) {
     if CANCEL.swap(true, Ordering::SeqCst) {
+        runner::matar_vivos();
         // SAFETY: _exit es async-signal-safe.
         unsafe { libc::_exit(SALIDA_INTERRUMPIDA) };
     }

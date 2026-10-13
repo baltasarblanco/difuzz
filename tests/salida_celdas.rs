@@ -210,3 +210,66 @@ fn corrida_cortada_queda_marcada() {
 
     std::fs::remove_dir_all(&b).unwrap();
 }
+
+/// 11.6 (I4): si difuzz muere de golpe (SIGKILL; o la segunda SIGTERM, que sale en el acto con
+/// 130), el node que estaba corriendo un `while (true) {}` muere con el. Antes quedaba huerfano
+/// (PPID 1) al 100 % de una CPU, sin timeout. Si el test falla, mata a los que encontro.
+#[test]
+fn segunda_senal_y_sigkill_no_dejan_node() {
+    if !test_util::requiere_node() {
+        return;
+    }
+    let b = base("huerfanos-node");
+    let corpus = b.join("corpus");
+    caso(&corpus, "gira", "while (true) {}\n");
+    // Los node de la corrida `pid`: su preload esta en <tmp>/difuzz-<pid>-tmp/ (en su argv).
+    let marca_tmp = |pid: u32| format!("{}/difuzz-{pid}-tmp/", b.join("tmp").display());
+    let nodes_de = |pid: u32| -> Vec<i32> {
+        let m = marca_tmp(pid);
+        std::fs::read_dir("/proc")
+            .into_iter()
+            .flatten()
+            .flatten()
+            .filter_map(|e| e.file_name().to_str()?.parse::<i32>().ok())
+            .filter(|p| std::fs::read(format!("/proc/{p}/cmdline")).is_ok_and(|c| String::from_utf8_lossy(&c).contains(&m)))
+            .collect()
+    };
+    for modo in ["sigkill", "dos-sigterm"] {
+        let out = b.join(format!("out-{modo}"));
+        let args = [corpus.to_str().unwrap(), "--out", out.to_str().unwrap(), "--no-cache", "--jobs", "1", "--timeout-ms", "120000"];
+        let mut hijo = difuzz(&b, &args).spawn().unwrap();
+        let pid = hijo.id();
+        let t0 = Instant::now();
+        while nodes_de(pid).is_empty() {
+            assert!(t0.elapsed() < Duration::from_secs(60), "{modo}: el node de la corrida no arranco");
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        // SAFETY: senales a un hijo propio vivo (sin cosechar).
+        unsafe {
+            if modo == "sigkill" {
+                libc::kill(pid as libc::pid_t, libc::SIGKILL);
+            } else {
+                libc::kill(pid as libc::pid_t, libc::SIGTERM);
+                std::thread::sleep(Duration::from_millis(300));
+                libc::kill(pid as libc::pid_t, libc::SIGTERM);
+            }
+        }
+        let st = hijo.wait().unwrap();
+        if modo == "dos-sigterm" {
+            assert_eq!(st.code(), Some(130), "{modo}");
+        }
+        let t0 = Instant::now();
+        while !nodes_de(pid).is_empty() {
+            if t0.elapsed() > Duration::from_secs(10) {
+                let vivos = nodes_de(pid);
+                for p in &vivos {
+                    // SAFETY: kill a los node de esta corrida (cmdline con su directorio temporal).
+                    unsafe { libc::kill(*p, libc::SIGKILL) };
+                }
+                panic!("{modo}: node {vivos:?} sobrevivio a difuzz (los mate)");
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
+    std::fs::remove_dir_all(&b).unwrap();
+}

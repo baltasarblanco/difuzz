@@ -965,7 +965,9 @@ fn run_file(r: &Runner, script: &Path, start: Instant, timeout: Duration, opts: 
     if let Err(e) = std::fs::create_dir_all(&tmpdir) {
         return Exec::failed(format!("crear {}: {e}", tmpdir.display()), start);
     }
-    let mut cmd = Command::new(node_path());
+    // 11.6 (I4): node no sobrevive a difuzz (`comando_node`). Con el sandbox ya hay pre_exec (fork):
+    // el prctl va ahi, despues del encierro.
+    let (mut cmd, prctl_en_pre_exec) = comando_node(if r.sandbox.activo() { None } else { setpriv() });
     cmd.current_dir(&r.cwd).env_clear();
     if let Some(path) = std::env::var_os("PATH") {
         cmd.env("PATH", path);
@@ -986,6 +988,10 @@ fn run_file(r: &Runner, script: &Path, start: Instant, timeout: Duration, opts: 
         unsafe {
             cmd.pre_exec(move || encerrar(aislar.as_ref()));
         }
+    }
+    if prctl_en_pre_exec {
+        // 11.6 (I4): despues del sandbox (que cambia credenciales), el ultimo paso antes del exec.
+        prctl_en_el_hijo(&mut cmd);
     }
     cmd.arg("--require").arg(preload).arg(script).env("TZ", "UTC");
     if salted {
@@ -1039,6 +1045,8 @@ fn run_file(r: &Runner, script: &Path, start: Instant, timeout: Duration, opts: 
     // (`ru_maxrss`) al cosecharlo; desde aca `child` no se espera ni se mata por std. Mientras
     // corre, su RSS se lee cada `SONDEO_RSS` vueltas: si pasa `tope_rss`, se mata el grupo.
     let mut cos = Cosecha::new(pid);
+    // 11.6 (I4): mientras corre, su grupo lo puede matar la segunda senal (`matar_vivos`).
+    let vivo = Vivo::registrar(pid);
     let mut rss_visto = 0u64;
     let mut matado_por_rss = false;
     let mut vuelta = 0u32;
@@ -1067,6 +1075,7 @@ fn run_file(r: &Runner, script: &Path, start: Instant, timeout: Duration, opts: 
             }
         }
     };
+    drop(vivo);
     let pico = cos.pico_rss().max(rss_visto);
     let por_memoria = r.tope_rss > 0 && (matado_por_rss || pico > r.tope_rss);
     drop(en_curso);
@@ -1547,6 +1556,118 @@ fn exceder(r: &Runner, script: &Path, causa: &'static str, que: String) -> ! {
         programa: std::fs::read_to_string(&r.script).unwrap_or_default(),
         ext: r.kind.ext(),
     }))
+}
+
+/// 11.6 (I4): el `Command` de node, que muere con SIGKILL cuando muere el hilo de difuzz que lo
+/// lanzo (`PR_SET_PDEATHSIG`; es por hilo, no por proceso: MEDIDO en `pdeathsig_sigue_al_hilo`). En
+/// difuzz node lo lanza el worker y `run_file` no vuelve hasta cosecharlo, asi que el hilo vive mas
+/// que node salvo que muera el proceso entero: SIGKILL, el OOM killer o `_exit` tras la segunda
+/// senal. Antes, ese node quedaba huerfano (PPID 1) y un `while (true) {}` giraba para siempre. No
+/// cubre a los procesos que lance el programa (sin `--sandbox`): no heredan la senal.
+///
+/// Con `setpriv` (util-linux, `setpriv()`), node se lanza como `setpriv --pdeathsig KILL -- node
+/// ...`: setpriv pone la senal y hace exec de node en el mismo proceso (mismo pid, mismo grupo;
+/// node ve el mismo argv y el mismo ppid). Si no, el prctl va en `pre_exec` (`prctl_en_el_hijo`,
+/// lo pide el segundo valor: `true`). La diferencia es el costo: sin pre_exec propio std lanza con
+/// posix_spawn (vfork); con pre_exec, con fork, y mientras el hijo no hizo exec el padre paga
+/// copy-on-write en todos sus hilos (MEDIDO en 300 casos del corpus SWC, `--jobs 8`, mediana de 6
+/// pares intercalados: fork +23 % de tiempo de sistema y +8 % de pared; setpriv +3 % y +2 %).
+fn comando_node(setpriv: Option<&Path>) -> (Command, bool) {
+    match setpriv {
+        Some(s) => {
+            let mut c = Command::new(s);
+            c.args(["--pdeathsig", "KILL", "--"]).arg(node_path());
+            (c, false)
+        }
+        None => (Command::new(node_path()), true),
+    }
+}
+
+/// 11.6 (I4): `setpriv` del PATH de difuzz si acepta `--pdeathsig` (util-linux >= 2.33; se prueba
+/// una vez, lanzando `node --version` a traves de el). `None`: el prctl va en pre_exec.
+fn setpriv() -> Option<&'static Path> {
+    static SETPRIV: std::sync::OnceLock<Option<PathBuf>> = std::sync::OnceLock::new();
+    SETPRIV
+        .get_or_init(|| {
+            let p = std::env::split_paths(&std::env::var_os("PATH")?).map(|d| d.join("setpriv")).find(|p| p.is_file())?;
+            let (mut c, _) = comando_node(Some(&p));
+            c.arg("--version").stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
+            c.status().is_ok_and(|s| s.success()).then_some(p)
+        })
+        .as_deref()
+}
+
+/// 11.6 (I4): el prctl de `comando_node` en el hijo, entre fork y exec (sin `setpriv`, o con el
+/// sandbox, que ya lanza con fork).
+fn prctl_en_el_hijo(cmd: &mut Command) {
+    let padre = libc::pid_t::try_from(std::process::id()).unwrap_or(0);
+    // SAFETY: `morir_con_el_padre` corre entre fork y exec y solo hace llamadas al sistema (prctl,
+    // getppid) sin reservar memoria ni tomar locks.
+    unsafe {
+        cmd.pre_exec(move || morir_con_el_padre(padre));
+    }
+}
+
+/// 11.6 (I4): `PR_SET_PDEATHSIG` en SIGKILL. Si difuzz ya habia muerto entre el fork y el prctl (la
+/// senal no llegaria nunca), no se lanza (con `setpriv` esa ventana no se cierra: son microsegundos).
+fn morir_con_el_padre(padre: libc::pid_t) -> std::io::Result<()> {
+    #[cfg(target_os = "linux")]
+    // SAFETY: prctl y getppid con enteros; no tocan memoria de este proceso.
+    unsafe {
+        if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL) != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        if libc::getppid() != padre {
+            return Err(std::io::Error::from_raw_os_error(libc::ESRCH));
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    let _ = padre;
+    Ok(())
+}
+
+/// 11.6 (I4): los grupos de los node que estan corriendo (pgid = pid de node, `process_group(0)`),
+/// para `matar_vivos`. Un arreglo fijo de atomicos: el manejador de senales no puede reservar ni
+/// tomar locks. Si se llenara (mas de `MAX_VIVOS` ejecuciones a la vez), la que no entra queda solo
+/// con `PR_SET_PDEATHSIG`.
+const MAX_VIVOS: usize = 1024;
+static VIVOS: [std::sync::atomic::AtomicI32; MAX_VIVOS] = [const { std::sync::atomic::AtomicI32::new(0) }; MAX_VIVOS];
+
+/// 11.6 (I4): el lugar de un node en `VIVOS`; se libera al soltarse (despues de cosecharlo).
+struct Vivo(Option<usize>);
+
+impl Vivo {
+    fn registrar(pid: u32) -> Vivo {
+        use std::sync::atomic::Ordering;
+        let Ok(pid) = i32::try_from(pid) else {
+            return Vivo(None);
+        };
+        Vivo(VIVOS.iter().position(|v| v.compare_exchange(0, pid, Ordering::SeqCst, Ordering::SeqCst).is_ok()))
+    }
+}
+
+impl Drop for Vivo {
+    fn drop(&mut self) {
+        if let Some(i) = self.0 {
+            VIVOS[i].store(0, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+}
+
+/// 11.6 (I4): SIGKILL al grupo de cada node en curso. Lo llama el manejador de la segunda senal
+/// (`main::on_signal`) antes del `_exit`: solo lee atomicos y llama a kill(2), que es
+/// async-signal-safe. Mata tambien a lo que el programa lanzo en su grupo (eso `PR_SET_PDEATHSIG` no
+/// lo cubre); lo que hizo `setsid` (el subreaper lo cosecha despues de cada ejecucion) queda.
+pub fn matar_vivos() {
+    for v in &VIVOS {
+        let pid = v.load(std::sync::atomic::Ordering::SeqCst);
+        if pid > 0 {
+            // SAFETY: kill(2) con enteros.
+            unsafe {
+                libc::kill(-pid, libc::SIGKILL);
+            }
+        }
+    }
 }
 
 /// 11.5 (I3): node se espera con `wait4` para tener su pico de RSS. Desde que se cosecha no se
@@ -2345,6 +2466,109 @@ mod tests {
             let pico: u64 = x.mensaje.split("RSS de node: ").nth(1).and_then(|s| s.split(' ').next()).and_then(|n| n.parse().ok()).unwrap();
             assert!(pico < 1024, "pico {pico} MiB: {}", x.mensaje);
         }
+    }
+
+    /// 11.6 (I4): node lanzado como en `run_file` (con `setpriv` y con el prctl en pre_exec) muere
+    /// con SIGKILL cuando termina el HILO que lo lanzo, aunque el proceso siga: `PR_SET_PDEATHSIG` es
+    /// por hilo (MEDIDO aca). Lanzado desde un hilo que sigue vivo, sigue vivo. En difuzz el hilo es
+    /// el worker, que espera a node: solo lo pierde si muere el proceso entero.
+    #[test]
+    fn pdeathsig_sigue_al_hilo() {
+        use std::time::{Duration, Instant};
+        if !crate::test_util::requiere_node() {
+            return;
+        }
+        let lanzar = |setpriv: Option<&std::path::Path>| {
+            let (mut c, pre) = super::comando_node(setpriv);
+            if pre {
+                super::prctl_en_el_hijo(&mut c);
+            }
+            c.args(["-e", "setInterval(() => {}, 1000);"]).stdin(std::process::Stdio::null());
+            // Lo cosecha este test con waitpid (abajo).
+            #[allow(clippy::zombie_processes)]
+            let h = c.spawn().unwrap();
+            // Hasta que el exec de node ya paso (con setpriv: despues de su prctl). Antes, si el
+            // hilo termina, la senal todavia no estaba puesta: la ventana de `morir_con_el_padre`.
+            let node = std::fs::canonicalize(super::node_path()).unwrap();
+            let t0 = Instant::now();
+            while std::fs::read_link(format!("/proc/{}/exe", h.id())).ok() != Some(node.clone()) {
+                assert!(t0.elapsed() < Duration::from_secs(10), "node no arranco");
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            h.id() as libc::pid_t
+        };
+        // (cosechado, termino por SIGKILL)
+        let esperar = |pid: libc::pid_t, hasta: Duration| {
+            let t0 = Instant::now();
+            loop {
+                let mut st = 0;
+                // SAFETY: waitpid de un hijo propio, puntero a la pila.
+                if unsafe { libc::waitpid(pid, &mut st, libc::WNOHANG) } == pid {
+                    return (true, libc::WIFSIGNALED(st) && libc::WTERMSIG(st) == libc::SIGKILL);
+                }
+                if t0.elapsed() > hasta {
+                    return (false, false);
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            }
+        };
+        let modos: Vec<Option<&std::path::Path>> = super::setpriv().into_iter().map(Some).chain([None]).collect();
+        eprintln!("11.6: setpriv = {:?}", super::setpriv());
+        for setpriv in modos {
+            // Desde un hilo que termina enseguida: muere con el.
+            let pid = std::thread::scope(|s| s.spawn(|| lanzar(setpriv)).join().unwrap());
+            assert_eq!(esperar(pid, Duration::from_secs(10)), (true, true), "setpriv {setpriv:?}: node {pid} sobrevivio a su hilo");
+            // Desde este hilo (vivo): sigue vivo hasta que se lo mata.
+            let pid = lanzar(setpriv);
+            assert_eq!(esperar(pid, Duration::from_millis(500)), (false, false), "setpriv {setpriv:?}: murio sin que muriera su hilo");
+            // SAFETY: kill a un hijo propio sin cosechar.
+            unsafe { libc::kill(pid, libc::SIGKILL) };
+            assert_eq!(esperar(pid, Duration::from_secs(10)), (true, true));
+        }
+    }
+
+    /// 11.6 (I4): un node en curso esta en `VIVOS` (lo que recorre `matar_vivos`, la segunda senal)
+    /// con el pid de su grupo, y al terminar ya no. Matar ese grupo corta la ejecucion por senal, no
+    /// por el timeout. No llama a `matar_vivos`: mataria los node de los otros tests del proceso (eso
+    /// lo prueba `salida_celdas::segunda_senal_y_sigkill_no_dejan_node`, con el binario).
+    #[test]
+    fn node_en_curso_esta_en_vivos() {
+        use super::{Preload, Runner, Status};
+        use std::time::{Duration, Instant};
+        if !crate::test_util::requiere_node() {
+            return;
+        }
+        let preload = Preload::write_tagged("vivos").unwrap();
+        // Sin el sensor: con el, una senal se repite sin el (`run_inner`) y la repeticion gira hasta
+        // el timeout. Tras la segunda senal difuzz sale y no repite nada.
+        let r = Runner::new(&preload, crate::test_util::id_runner(), Duration::from_secs(60)).with_sensor(false);
+        let cwd = r.cwd.clone();
+        let registrados = || super::VIVOS.iter().map(|v| v.load(std::sync::atomic::Ordering::SeqCst)).filter(|p| *p > 0).collect::<Vec<i32>>();
+        // El node de este runner: el registrado cuyo cwd es el del runner (los otros tests usan otros).
+        let mio = || registrados().into_iter().find(|p| std::fs::read_link(format!("/proc/{p}/cwd")).is_ok_and(|d| d == cwd));
+        let (e, t, pid) = std::thread::scope(|s| {
+            let h = s.spawn(|| {
+                let t0 = Instant::now();
+                let e = r.run("while (true) {}\n");
+                (e, t0.elapsed())
+            });
+            let t0 = Instant::now();
+            let pid = loop {
+                if let Some(p) = mio() {
+                    break p;
+                }
+                assert!(t0.elapsed() < Duration::from_secs(20), "el node del runner no aparecio en VIVOS");
+                std::thread::sleep(Duration::from_millis(20));
+            };
+            // Lo que hace `matar_vivos` con cada uno, solo con este.
+            // SAFETY: kill(2) al grupo de un node en curso de este test.
+            unsafe { libc::kill(-pid, libc::SIGKILL) };
+            let (e, t) = h.join().unwrap();
+            (e, t, pid)
+        });
+        assert_eq!(e.status, Status::Signal, "{}", e.stderr);
+        assert!(t < Duration::from_secs(30), "{t:?}");
+        assert!(!registrados().contains(&pid), "sigue registrado despues de cosecharlo");
     }
 
     /// 11.5 (I3): `Cosecha` da el pico de RSS de node (`ru_maxrss` de `wait4`), tambien el que no
