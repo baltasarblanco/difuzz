@@ -1,7 +1,8 @@
 //! CMP: que cuenta como divergencia (delta v1.2 §1 §3.4) y como se guarda.
 //!
-//! Precondicion que garantiza main: el original termino solo (exit 0, o lanzando
-//! con el tipo en stdout: runner::THROW_EXIT). Si ademas
+//! Precondicion que garantiza main: el original termino solo (exit 0, lanzando
+//! con el tipo en stdout: runner::THROW_EXIT, o, desde 11.2, con un codigo de salida
+//! propio: runner::Exec::codigo_propio). Si ademas
 //! su stdout es vacio, la comparacion cruda solo puede ver que el minificado
 //! lanzo, se colgo o imprimio algo; los valores se comparan en la pasada
 //! observada (epilogo). Sin epilogo, dos programas mudos "coinciden" siempre:
@@ -10,13 +11,15 @@
 use std::path::{Path, PathBuf};
 
 use crate::minify::SourceKind;
-use crate::runner::{Exec, Status, DZ, THROW_EXIT};
+use crate::runner::{Exec, Status, DZ};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Kind {
     /// El hallazgo clasico: mismo exit, distinto stdout.
     Stdout,
-    /// El minificado lanzo (o murio por senal) y el original no.
+    /// El minificado murio por senal, o sale con un codigo distinto de 0 que no es un throw y
+    /// que no es el del original (11.2; antes, cualquier codigo distinto de 0 que no fuera un
+    /// throw: el original con uno se descartaba).
     ExitStatus,
     /// El minificado se colgo y el original no. Posible loop introducido.
     Timeout,
@@ -38,12 +41,23 @@ pub enum Verdict {
 pub fn compare(a: &Exec, b: &Exec) -> Verdict {
     match b.status {
         Status::Timeout => return Verdict::Divergence(Kind::Timeout),
-        Status::Exited(0) => {}
-        // M10: 70 solo es "lanzo" si el preload lo dijo por su canal.
-        Status::Exited(THROW_EXIT) if b.threw() => {}
-        Status::Exited(_) | Status::Signal => return Verdict::Divergence(Kind::ExitStatus),
+        Status::Signal => return Verdict::Divergence(Kind::ExitStatus),
         // Error del fuzzer, no del programa: no es divergencia. main lo cuenta.
         Status::Failed(_) => return Verdict::Same,
+        Status::Exited(_) => {}
+    }
+    // 11.2 (I2 de rev-integral-1): el codigo de salida distinto de 0 que no es un throw (M10: 70
+    // solo es "lanzo" si el preload lo dijo por su canal) es parte de lo que se compara. Distinto,
+    // ExitStatus; igual, se comparan los stdout. Antes un B con uno era ExitStatus siempre,
+    // porque el original con uno se descartaba (`exit`): con A sin codigo da lo mismo que antes.
+    // El fallo de enlace (71 con `link` en el canal) cuenta como un codigo: un B que no enlaza
+    // sigue siendo ExitStatus (el A que no enlaza se descarta antes, `enlace`).
+    let codigo = |e: &Exec| match e.status {
+        Status::Exited(k) if k != 0 && !e.threw() => Some(k),
+        _ => None,
+    };
+    if codigo(a) != codigo(b) {
+        return Verdict::Divergence(Kind::ExitStatus);
     }
     // n-ruido: sin las posiciones de los marcos de stack (normalize_stack_positions).
     // Solo aca: los re-chequeos que miran lineas (recheck::localizada*) ven el marco
@@ -807,6 +821,53 @@ fn write_all(dir: &Path, files: &[(&str, &str)]) {
 #[cfg(test)]
 mod tests {
     use super::normalize_names as n;
+
+    /// Una corrida con `status`, `stdout` y el canal `ctl`, para `compare`.
+    fn corrida(status: crate::runner::Status, out: &str, ctl: &str) -> crate::runner::Exec {
+        crate::runner::Exec {
+            status,
+            stdout: out.into(),
+            stderr: String::new(),
+            flags: vec![],
+            elapsed: std::time::Duration::ZERO,
+            ctl: ctl.into(),
+        }
+    }
+
+    fn kind(v: super::Verdict) -> Option<super::Kind> {
+        match v {
+            super::Verdict::Same => None,
+            super::Verdict::Divergence(k) => Some(k),
+        }
+    }
+
+    /// 11.2 (I2 de rev-integral-1): un original que sale con un codigo propio se compara. El
+    /// mismo codigo y el mismo stdout: iguales; otro stdout: Stdout; otro codigo (o 0, o un
+    /// throw): ExitStatus. Sin codigo propio en A, un B con uno sigue siendo ExitStatus (como
+    /// antes), y el 70 y el 71 solo son throw y enlace con su linea del canal (M10).
+    #[test]
+    fn codigo_de_salida_propio() {
+        use super::{compare, Kind};
+        use crate::runner::Status::Exited;
+        let a1 = corrida(Exited(1), "cbrt -2\n", "");
+        assert_eq!(kind(compare(&a1, &corrida(Exited(1), "cbrt -2\n", ""))), None);
+        assert_eq!(kind(compare(&a1, &corrida(Exited(1), "cbrt NaN\n", ""))), Some(Kind::Stdout));
+        assert_eq!(kind(compare(&a1, &corrida(Exited(3), "cbrt -2\n", ""))), Some(Kind::ExitStatus));
+        assert_eq!(kind(compare(&a1, &corrida(Exited(0), "cbrt -2\n", ""))), Some(Kind::ExitStatus));
+        let lanzo = corrida(Exited(70), "cbrt -2\n!dz throw TypeError\n", "throw TypeError\n");
+        assert_eq!(kind(compare(&a1, &lanzo)), Some(Kind::ExitStatus));
+        let a0 = corrida(Exited(0), "cbrt -2\n", "");
+        assert_eq!(kind(compare(&a0, &a1)), Some(Kind::ExitStatus));
+        assert_eq!(kind(compare(&a0, &corrida(Exited(70), "cbrt -2\n", ""))), Some(Kind::ExitStatus));
+        assert_eq!(kind(compare(&a0, &corrida(Exited(71), "", "link ERR_MODULE_NOT_FOUND\n"))), Some(Kind::ExitStatus));
+        // Un 70 propio en los dos (sin la linea `throw`): codigo propio igual, se comparan stdout.
+        assert_eq!(kind(compare(&corrida(Exited(70), "x\n", ""), &corrida(Exited(70), "x\n", ""))), None);
+        // A lanzo y B sale con 0 o lanza otro tipo: lo de siempre.
+        let a_lanzo = corrida(Exited(70), "!dz throw TypeError\n", "throw TypeError\n");
+        assert_eq!(kind(compare(&a_lanzo, &a0)), Some(Kind::ThrowLost));
+        let otro = corrida(Exited(70), "!dz throw RangeError\n", "throw RangeError\n");
+        assert_eq!(kind(compare(&a_lanzo, &otro)), Some(Kind::ThrowType));
+    }
 
     /// 10.1: el crudo y A son el mismo programa si el status y el stdout coinciden, salvo las
     /// posiciones de los marcos de un archivo de difuzz; los nombres de `util.inspect` no se borran.

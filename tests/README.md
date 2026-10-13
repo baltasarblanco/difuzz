@@ -28,7 +28,7 @@ deja una línea `DIFUZZ_SALTEADO_SIN_USERNS` en stderr.
 
 ## Golden de detección — `tests/golden/`
 
-17 casos con bugs conocidos de oxc y swc, en 8 celdas (swc|oxc × carril a|b × core_defaults|carril_a), más
+18 casos con bugs conocidos de oxc y swc, en 8 celdas (swc|oxc × carril a|b × core_defaults|carril_a), más
 `--invocar`/`--stubs` en oxc core_defaults. Clase esperada por caso y celda en `esperado.tsv`, justificada
 en `tests/golden/README.md`.
 

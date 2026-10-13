@@ -69,8 +69,9 @@ fn dos_celdas_mismo_out_no_se_pisan() {
     // Depende de Function.prototype.toString: el minificado cambia el texto
     // (mangle de core_defaults). Va a known/ (flag fn_tostring) en los dos backends.
     caso(&corpus, "fts", "function f(primero) { var segundo = primero + 1; return segundo; }\nconsole.log(f.toString());\n");
-    // Descarte por exit del original.
-    caso(&corpus, "sale", "console.log(1);\nprocess.exit(3);\n");
+    // Un descarte del original (11.2: antes `process.exit(3)`, descarte `exit`; ahora ese
+    // original se compara): un require que no resuelve, descarte `enlace`.
+    caso(&corpus, "sale", "require(\"./no-existe-difuzz-celdas\");\n");
     let o = out.to_str().unwrap();
     let c = corpus.to_str().unwrap();
     let celda = |m: &'static str| -> Vec<&str> {
@@ -81,7 +82,7 @@ fn dos_celdas_mismo_out_no_se_pisan() {
     let (swc, oxc) = (out.join("swc+core_defaults+tal_cual"), out.join("oxc+core_defaults+tal_cual"));
     for d in [&swc, &oxc] {
         assert!(d.join("known/fts/meta.txt").is_file(), "falta known/fts en {}", d.display());
-        assert!(leer(&d.join("descartes.tsv")).contains("sale/input.js\texit\t"), "{}", d.display());
+        assert!(leer(&d.join("descartes.tsv")).contains("sale/input.js\tenlace\t"), "{}", d.display());
         assert!(leer(&d.join("known-sintomas.tsv")).contains("fts/input.js\t"), "{}", d.display());
         assert!(leer(&d.join("CORRIDA.txt")).starts_with("estado: completa\n"), "{}", d.display());
         // El repro del meta apunta al preload de la celda.

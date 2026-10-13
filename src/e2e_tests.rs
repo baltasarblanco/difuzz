@@ -354,7 +354,34 @@ fn tabla() -> Vec<Fila> {
             destino: Destino::Descarte("timeout"),
             meta: &[],
         },
-        Fila { caso: "exit", programa: "process.exit(3);\n", back: Back::Identidad, args: &[], destino: Destino::Descarte("exit"), meta: &[] },
+        // 11.2 (I2 de rev-integral-1): un original que sale con un codigo propio se compara (antes:
+        // descarte `exit`). Un mudo (`process.exit(3)`) sigue como cualquier mudo: aca, sin
+        // bindings que observar.
+        Fila {
+            caso: "exit",
+            programa: "process.exit(3);\n",
+            back: Back::Identidad,
+            args: &[],
+            destino: Destino::Descarte("mudo_sin_bindings"),
+            meta: &[],
+        },
+        Fila { caso: "exit-igual", programa: "console.log(41);\nprocess.exit(3);\n", back: Back::Identidad, args: &[], destino: Destino::Ninguno, meta: &[] },
+        Fila {
+            caso: "div-exit-stdout",
+            programa: "console.log(41);\nprocess.exit(1);\n",
+            back: Back::Rompe("41", "42"),
+            args: &[],
+            destino: Destino::Div,
+            meta: &["kind: Stdout\n", "\nobserved: false\n", "\nknown: no\n", TRAZA_DIV],
+        },
+        Fila {
+            caso: "div-exit-codigo",
+            programa: "console.log(1);\nprocess.exitCode = 3;\n",
+            back: Back::Rompe("=3", "=4"),
+            args: &[],
+            destino: Destino::Div,
+            meta: &["kind: ExitStatus\n", "\nobserved: false\n", "\nknown: no\n", TRAZA_DIV],
+        },
         Fila {
             caso: "enlace",
             programa: "require('./no-existe-difuzz-e2e');\n",

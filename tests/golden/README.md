@@ -1,6 +1,6 @@
 # Golden de detección de difuzz
 
-`verificar.sh [opciones] [BIN] [OUT]` corre `corpus/` (17 casos) en 8 celdas (swc|oxc × carril a|b ×
+`verificar.sh [opciones] [BIN] [OUT]` corre `corpus/` (18 casos) en 8 celdas (swc|oxc × carril a|b ×
 core_defaults|carril_a, `--no-cache --jobs 4`) y compara la clase de cada caso con `esperado.tsv`. Verifica
 también que cada `CORRIDA.txt` diga `completa`, la identidad de stats por celda y que `--invocar` y `--stubs`
 (oxc, core_defaults, A y B) no pierdan ningún div/panic de la celda base. Sale con 0 si todo coincide.
@@ -37,6 +37,9 @@ Por qué cada clase esperada:
 - `oxc-cbrt-stderr` (11.1, repro `s8` de la revisión integral 1): el bug E de oxc (`Math.cbrt(-8)` → `NaN`) escrito
   solo con `process.stderr.write`. El preload lo pasa a stdout (`[stderr] -2` contra `[stderr] NaN`): Stdout en las
   4 de oxc. swc no tiene el bug: igual.
+- `oxc-cbrt-exit1` (11.2, repro `s6` de la revisión integral 1): el mismo bug impreso por stdout en un programa que
+  sale con `process.exit(1)` a propósito. El original con un código propio se compara (antes: descarte `exit`):
+  Stdout en las 4 de oxc. swc: igual.
 - `control-limpio`: igual en todas.
 
 ## Historia

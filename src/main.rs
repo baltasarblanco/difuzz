@@ -499,6 +499,8 @@ struct Stats {
     unreadable: usize,
     /// Descartes por el original, por causa. `original=` en la linea de stats
     /// es la suma, igual que antes del desglose.
+    /// 11.2: `exit=` queda en la linea (el formato no cambia) pero ya no cuenta nada: el
+    /// original que sale con un codigo propio se compara (`runner::Exec::codigo_propio`).
     a_exit: usize,
     a_timeout: usize,
     /// Node no acepta el original como script (`node --check`).
@@ -733,6 +735,8 @@ impl Stats {
                 self.a_signal += 1;
                 "senal"
             }
+            // 11.2: no deberia llegar (Failed y el enlace se descartan antes; un codigo propio
+            // se compara). Se conserva la causa por si llega.
             _ => {
                 self.a_exit += 1;
                 "exit"
@@ -2047,7 +2051,9 @@ fn invoke_pass(
         Pasada::Descartada => return true,
         Pasada::Sigue(b) => b,
     };
-    if !a.ok_with_output() {
+    // 11.2: un codigo de salida propio sigue contando como "no termina bien" (M31 a): la
+    // invocacion es de difuzz, no del programa, y la pasada normal ya comparo.
+    if !a.ok_with_output() || a.codigo_propio().is_some() {
         stats.invocar_retry += 1;
         return false;
     }

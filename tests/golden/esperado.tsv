@@ -77,3 +77,10 @@ oxc-cbrt-stderr	oxc-a-core_defaults	div:Stdout
 oxc-cbrt-stderr	oxc-a-carril_a	div:Stdout
 oxc-cbrt-stderr	oxc-b-core_defaults	div:Stdout
 oxc-cbrt-stderr	oxc-b-carril_a	div:Stdout
+# 11.2 (I2 de rev-integral-1): el bug E de oxc impreso por stdout en un programa que sale con
+# `process.exit(1)` a proposito. El original con un codigo propio se compara (antes: descarte
+# `exit`): div:Stdout en las 4 de oxc. swc: igual.
+oxc-cbrt-exit1	oxc-a-core_defaults	div:Stdout
+oxc-cbrt-exit1	oxc-a-carril_a	div:Stdout
+oxc-cbrt-exit1	oxc-b-core_defaults	div:Stdout
+oxc-cbrt-exit1	oxc-b-carril_a	div:Stdout

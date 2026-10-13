@@ -47,6 +47,16 @@ difieren, el minifier cambió el comportamiento del programa: es un candidato a 
    | `ExitStatus` | el minificado sale con otro código o muere por señal |
    | `Timeout` | el minificado se cuelga y el original no |
 
+   El original tiene que terminar solo: con 0, lanzando o con un código que elige el programa
+   (`process.exit(1)`, `process.exitCode = 3`, como un runner de tests que reporta fallos). En el
+   último caso se comparan el código y el stdout igual que con 0 (antes de 11.2 se descartaba
+   como `exit`; `exit=` sigue en la línea de stats y queda en 0). Un original que se cuelga, muere
+   por señal o no enlaza un `require`/`import` se descarta (`timeout`, `senal`, `enlace`). Los
+   re-chequeos de la clasificación siguen pidiendo que sus variantes del original terminen con 0
+   o lanzando: con un código propio quedan inconclusos y el caso va a `div/` con la nota. La
+   pasada de `--invocar` tampoco compara un original que sale con un código propio (vale la
+   pasada normal, como cuando una función invocada se cuelga).
+
 5. **Clasificar.** Cada divergencia confirmada va a `div/` (hallazgo) o a `known/` (la explica
    una asunción documentada del minifier). Ver [Clasificación](#clasificación-div-o-known).
 
@@ -942,7 +952,7 @@ DIFUZZ_SIN_NODE=1 cargo test --no-fail-fast           # sin node: saltea y cuent
 Sin `node` en el `PATH`, los tests que lo necesitan fallan con un mensaje claro. Con
 `DIFUZZ_SIN_NODE=1` se saltean y cada uno deja una línea `DIFUZZ_SALTEADO_SIN_NODE` en stderr.
 
-- **Golden de detección** (`tests/golden/`): 17 casos con bugs conocidos de oxc y swc, en 8
+- **Golden de detección** (`tests/golden/`): 18 casos con bugs conocidos de oxc y swc, en 8
   celdas, más `--invocar` y `--stubs`; la clase esperada de cada caso está en `esperado.tsv`.
 - **Aceptación de los re-chequeos** (`tests/aceptacion/rechequeos/`): 176 casos que combinan un
   bug real de oxc con un flag de asunción (o con la forma en que se imprime), en las 4 celdas de oxc

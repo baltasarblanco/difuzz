@@ -222,13 +222,34 @@ impl Exec {
             .count()
     }
 
+    /// 11.2 (I2 de rev-integral-1): el codigo con el que el programa eligio terminar
+    /// (`process.exit(k)`, `process.exitCode = k`) si no es 0, sin lanzar y sin ser el fallo
+    /// de enlace del preload (`link_failed`). `None`: exit 0, un throw (THROW_EXIT con su
+    /// linea en el canal), timeout, senal o falla del runner.
+    pub fn codigo_propio(&self) -> Option<i32> {
+        match self.status {
+            Status::Exited(k) if k != 0 && !self.threw() && !self.link_failed() => Some(k),
+            _ => None,
+        }
+    }
+
+    /// 11.2: termino por si mismo y hay algo que comparar: `completed` o un codigo propio.
+    /// El original que sale con un codigo propio se compara (estado + stdout, `oracle::compare`)
+    /// en vez de descartarse como `exit`. `completed` sigue siendo exit 0 o throw: los
+    /// re-chequeos lo piden a sus variantes del original y una variante que sale con un codigo
+    /// propio los deja inconclusos (div/), como antes.
+    fn termino_solo(&self) -> bool {
+        self.completed() || self.codigo_propio().is_some()
+    }
+
     /// Algo que comparar: el programa imprimio, o lanzo (y el tipo esta en stdout).
+    /// 11.2: tambien con un codigo de salida propio (`codigo_propio`).
     pub fn ok_with_output(&self) -> bool {
-        self.completed() && (self.threw() || self.own_output())
+        self.termino_solo() && (self.threw() || self.own_output())
     }
 
     pub fn ok_silent(&self) -> bool {
-        self.completed() && !self.threw() && !self.own_output()
+        self.termino_solo() && !self.threw() && !self.own_output()
     }
 
     /// El preload vio globals creados por el programa (M10: contados en el
@@ -1560,6 +1581,8 @@ mod tests {
         let link = runner.run("import { z } from './no-existe-difuzz.mjs';\nconsole.log(z);\n");
         assert_eq!(link.status, Status::Exited(LINK_EXIT), "stdout: {}", link.stdout);
         assert!(!link.completed());
+        // 11.2: ni es un codigo propio comparable (main lo descarta como `enlace`).
+        assert!(link.codigo_propio().is_none() && !link.ok_with_output() && !link.ok_silent());
         // Un throw comun sigue siendo THROW_EXIT, con flags.
         let thr = runner.run("throw new TypeError('x');\n");
         assert!(thr.threw());
@@ -1689,10 +1712,14 @@ mod tests {
         let e = r.run("console.log(1);\nprocess.exit(70);\n");
         assert_eq!(e.status, Status::Exited(70));
         assert!(!e.threw() && !e.completed());
+        // 11.2: pero es un codigo propio, comparable (con salida).
+        assert!(e.codigo_propio() == Some(70) && e.ok_with_output() && !e.ok_silent());
         let e = r.run("process.exitCode = 70;\n");
         assert!(!e.threw() && !e.completed());
+        assert!(e.codigo_propio() == Some(70) && e.ok_silent());
         // exit 71 propio: no es enlace.
-        assert!(!r.run("process.exit(71);\n").link_failed());
+        let e = r.run("process.exit(71);\n");
+        assert!(!e.link_failed() && e.codigo_propio() == Some(71));
         // Una linea `!dz throw` impresa por el programa es salida propia.
         let e = r.run("console.log('!dz throw TypeError');\n");
         assert!(e.ok_with_output() && !e.threw(), "{:?} {}", e.status, e.ctl);

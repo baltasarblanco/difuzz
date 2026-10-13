@@ -227,7 +227,8 @@ fn descartes_reconstruye_el_total() {
     caso(&corpus, "mudo", b"// solo un comentario\n");
     caso(&corpus, "vacio", b"");
     caso(&corpus, "ilegible", &[0xff, 0xfe, 0x00, 0x41]);
-    caso(&corpus, "sale", b"console.log(1);\nprocess.exit(3);\n");
+    // 11.2: antes, `process.exit(3)` (descarte `exit`); ahora ese original se compara.
+    caso(&corpus, "enlace", b"require(\"./no-existe-difuzz-salida\");\n");
     // known/ (fn_tostring) con oxc core_defaults, como en salida_celdas.
     caso(&corpus, "fts", b"function f(primero) { var segundo = primero + 1; return segundo; }\nconsole.log(f.toString());\n");
     let out = b.join("out");
@@ -248,7 +249,7 @@ fn descartes_reconstruye_el_total() {
             (c.next().unwrap(), c.next().unwrap())
         })
         .collect();
-    for (c, causa) in [("mudo/input.js", "mudo_sin_bindings"), ("vacio/input.js", "mudo_sin_bindings"), ("ilegible/input.js", "ilegible"), ("sale/input.js", "exit")] {
+    for (c, causa) in [("mudo/input.js", "mudo_sin_bindings"), ("vacio/input.js", "mudo_sin_bindings"), ("ilegible/input.js", "ilegible"), ("enlace/input.js", "enlace")] {
         assert!(filas.contains(&(c, causa)), "falta {c} {causa} en\n{descartes}");
     }
     assert_eq!(campo(stats, "mudos_sin_bindings"), 2, "{stats}");
