@@ -998,7 +998,11 @@ caso sigue. Al arrancar, difuzz imprime los dos topes (`topes de node: ...`).
   entera en la memoria de difuzz, unas 5 veces (512 MiB de stdout: 2,6 GB de RSS). La salida más
   grande de las cachés de A de las corridas del 7 al 12 de octubre (254 442 ejecuciones, con el
   corpus real) pesa 1,4 MiB con el programa incluido. Un minificado que escribe de más donde el
-  original no es una divergencia (ver arriba).
+  original no es una divergencia (ver arriba). El canal de control del preload (11.2b) también tiene
+  tope: el mensaje y el stack de un throw sin atrapar (la línea `exc`, que no se compara y va a
+  `a.exc`/`b.exc`) se recortan a 64 Ki caracteres, y un canal que pesa más que `--max-salida` no se
+  lee y cuenta como pasarse de salida (antes, `throw new Error("x".repeat(256 << 20))` llevaba a
+  difuzz a 790 MB).
 - **node no sobrevive a difuzz.** Cada node muere con SIGKILL si muere difuzz, también de golpe
   (SIGKILL, el OOM killer): `PR_SET_PDEATHSIG`, puesto con `setpriv --pdeathsig KILL` de
   util-linux si está en el `PATH` (si no, entre fork y exec, que cuesta más: +8 % de pared medido

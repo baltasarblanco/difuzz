@@ -1186,10 +1186,21 @@ fn run_file(r: &Runner, script: &Path, start: Instant, timeout: Duration, opts: 
     let take = |b: &Arc<Mutex<Vec<u8>>>| std::mem::take(&mut *b.lock().unwrap_or_else(|e| e.into_inner()));
     let stdout = take(&out_buf);
     let stderr = take(&err_buf);
+    // 11.2b (rev-b11b-B H1): el canal de control tambien lo lee difuzz entero y el programa elige
+    // parte de lo que se escribe ahi (el mensaje de un throw, que el preload recorta a `EXC_MAX`; los
+    // nombres de archivo de los marcos). Si pesa mas que el tope de salida no se lee: cuenta como
+    // pasarse de salida.
+    let largo_ctl = std::fs::metadata(&r.ctl).map(|m| m.len()).unwrap_or(0);
+    let ctl_excedido = r.tope_salida > 0 && largo_ctl > r.tope_salida;
     // 11.5 (I3) / 11.7 (I5): una ejecucion que paso un tope no vuelve como un `Exec` comparable
     // (ver `Excedido`). La salida primero: lo juntado ya esta cortado (y node pudo terminar solo
     // antes de que el bucle lo viera: igual se cuenta, lo que se escribio paso el tope).
-    let excedida = if salida.excedida.load(std::sync::atomic::Ordering::SeqCst) {
+    let excedida = if ctl_excedido {
+        Some((
+            NODE_SALIDA,
+            format!("dejo {} MiB en el canal de control de difuzz: paso el tope de salida de {} MiB (no se leyo)", largo_ctl >> 20, r.tope_salida >> 20),
+        ))
+    } else if salida.excedida.load(std::sync::atomic::Ordering::SeqCst) {
         let n = salida.usado.load(std::sync::atomic::Ordering::SeqCst);
         Some((
             NODE_SALIDA,
@@ -1202,7 +1213,7 @@ fn run_file(r: &Runner, script: &Path, start: Instant, timeout: Duration, opts: 
         None
     };
 
-    let mut ctl = std::fs::read(&r.ctl).map(|b| decode_lossless(&b)).unwrap_or_default();
+    let mut ctl = if ctl_excedido { String::new() } else { std::fs::read(&r.ctl).map(|b| decode_lossless(&b)).unwrap_or_default() };
     let (stdout, stderr) = (decode_lossless(&stdout), decode_lossless(&stderr));
     // n-sandbox: lo que el preload no ve (un permiso denegado que el programa atrapo e
     // imprimio, el mensaje del throw en la linea `exc`) se reconoce en la salida.
@@ -2615,6 +2626,35 @@ mod tests {
             // Cortado al pasarlo, no al terminar (1 GiB, o el bucle, que solo corta el timeout).
             assert!(t0.elapsed() < Duration::from_secs(30), "{que}: {:?}", t0.elapsed());
         }
+    }
+
+    /// 11.2b (rev-b11b-B H1): el mensaje de un throw lo elige el programa y va al canal de control
+    /// (linea `exc`). El preload lo recorta a 64 Ki caracteres (el throw sigue siendo el mismo para
+    /// el oraculo: `throw Error` en stdout y en el canal); y un canal que pesa mas que el tope de
+    /// salida no se lee: cuenta como pasarse de salida.
+    #[test]
+    fn canal_de_control_con_tope() {
+        use super::{Excedido, Preload, Runner, NODE_SALIDA};
+        use std::time::Duration;
+        if !crate::test_util::requiere_node() {
+            return;
+        }
+        let preload = Preload::write_tagged("ctl-tope").unwrap();
+        let r = Runner::new(&preload, crate::test_util::id_runner(), Duration::from_secs(60)).sin_sensor();
+        let js = "console.log(\"antes\");\nthrow new Error(\"x\".repeat(8 << 20));\n";
+        let e = r.run(js);
+        assert!(e.threw(), "{:?} {}", e.status, e.ctl.len());
+        let exc = e.exc().unwrap();
+        assert!(exc.len() < 70 * 1024 && exc.contains("[... difuzz recorto "), "{}", exc.len());
+        assert!(e.ctl.len() < 80 * 1024, "{}", e.ctl.len());
+        // Con un tope de salida de 1 KiB, la linea `exc` (64 KiB) ya lo pasa.
+        let chico = Runner::new(&preload, crate::test_util::id_runner(), Duration::from_secs(60)).sin_sensor().con_tope_salida(1 << 10);
+        let Err(p) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| chico.run(js))) else {
+            panic!("el canal tenia que pasar el tope");
+        };
+        let x = p.downcast::<Excedido>().unwrap();
+        assert_eq!(x.causa, NODE_SALIDA);
+        assert!(x.mensaje.contains("canal de control de difuzz"), "{}", x.mensaje);
     }
 
     /// 11.6 (I4): node lanzado como en `run_file` (con `setpriv` y con el prctl en pre_exec) muere

@@ -787,6 +787,8 @@
       return false;
     }
   };
+  // 11.2b: largo maximo (en caracteres) del mensaje y el stack que van al canal (linea `exc`).
+  const EXC_MAX = 64 * 1024;
   const onThrow = (e) => {
     // Paso 7 (I2, revision-tint s04): con un objeto, lo que sigue puede correr codigo del
     // programa (@@toPrimitive, toString propio) adentro de un try del preload.
@@ -809,7 +811,10 @@
     // M21: mensaje y stack por el canal (no se comparan; van a a.exc/b.exc del hallazgo).
     try {
       quiet = true;
-      const text = e !== null && typeof e === 'object' ? String(e.stack || e.message || e) : String(e);
+      let text = e !== null && typeof e === 'object' ? String(e.stack || e.message || e) : String(e);
+      // 11.2b (rev-b11b-B H1): el texto lo elige el programa (`new Error("x".repeat(256 << 20))`) y
+      // difuzz lo lee entero; no se compara: alcanza con el principio.
+      if (text.length > EXC_MAX) text = `${text.slice(0, EXC_MAX)} [... difuzz recorto ${text.length - EXC_MAX} caracteres]`;
       ctl(`exc ${text.replace(/\\/g, '\\\\').replace(/\n/g, '\\n')}`);
     } catch {
     } finally {
