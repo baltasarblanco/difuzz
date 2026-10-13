@@ -616,7 +616,9 @@ analisis_de_difuzz_fallo:
     /// R1-H08 / R2-H04: el hijo minificador no termino a tiempo (`timeout`) o
     /// paso el presupuesto de memoria (`memoria`). No es un panic: va a
     /// `recursos/`, con la causa en el meta (el mensaje trae tiempo o RSS).
-    pub fn recurso(&self, case: &Path, src: &str, causa: &str, message: &str) {
+    /// 11.5 (I3): tambien una ejecucion de node que paso un tope de difuzz (`runner::Excedido`);
+    /// `extra`, archivos que se guardan junto a `input.js` (el programa que corrio node).
+    pub fn recurso(&self, case: &Path, src: &str, causa: &str, message: &str, extra: &[(&str, &str)]) {
         let dir = self.case_dir("recursos", case);
         self.index(&dir, "recursos", "Recursos", crate::known::fnv1a(&[causa]));
         let meta = format!(
@@ -626,6 +628,7 @@ analisis_de_difuzz_fallo:
             if self.versions.is_empty() { format!("debug_assertions: {}\n", debug_assertions()) } else { self.versions.clone() },
         );
         write_all(&dir, &[("meta.txt", meta.as_str()), ("input.js", src)]);
+        write_all(&dir, extra);
     }
 
     /// R1-H05: el binario con debug assertions hizo panic, el oraculo sin ellos

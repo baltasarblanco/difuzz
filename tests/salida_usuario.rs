@@ -602,3 +602,69 @@ fn indice_con_escrituras_perdidas_no_se_publica() {
     assert!(cruce(&b).contains("incompleta (escrituras perdidas"));
     std::fs::remove_dir_all(&b).unwrap();
 }
+
+/// 11.5 (I3): una ejecucion de node que pasa `--mem-node` manda el caso a recursos/ (causa
+/// `node_memoria`, con el programa que corrio), nunca a iguales ni a div/: el original que reserva
+/// de mas (`mem`) y el que solo reserva de mas minificado (`solo-b`: mide su propio texto; sin el
+/// tope da iguales). Una variante de `--mutaciones` que pasa el tope va a recursos/ ella sola (con
+/// su `variante.js`) y su base sigue en iguales. La identidad de `total=` cierra.
+#[test]
+fn tope_de_memoria_de_node_va_a_recursos() {
+    if !test_util::requiere_node() {
+        return;
+    }
+    let b = base("tope-node");
+    let corpus = b.join("corpus");
+    let reservar = "const b = [];\nfor (let i = 0; i < 64; i++) b.push(Buffer.alloc(32 << 20, 1));";
+    caso(&corpus, "igual", b"console.log(1);\n");
+    caso(&corpus, "mem", format!("{reservar}\nconsole.log(b.length);\n").as_bytes());
+    let relleno = "x".repeat(300);
+    caso(
+        &corpus,
+        "solo-b",
+        format!("(function () {{ const relleno = \"{relleno}\"; }})();\nif (require(\"fs\").readFileSync(__filename, \"utf8\").length < 300) {{\n{reservar}\n}}\nconsole.log(\"listo\");\n").as_bytes(),
+    );
+    let out = b.join("out");
+    let o = difuzz(&b, &[corpus.to_str().unwrap(), "--out", out.to_str().unwrap(), "--mem-node", "256", "--no-cache", "--jobs", "1"]);
+    assert_eq!(rc(&o), Some(0), "{}", err(&o));
+    let stdout = String::from_utf8_lossy(&o.stdout);
+    let stats = stdout.lines().find(|l| l.starts_with("total=")).unwrap();
+    for (c, n) in [("total", 3), ("iguales", 1), ("DIVERGENCIAS", 0), ("RECURSOS", 2), ("node_memoria", 2), ("panics_del_fuzzer", 0)] {
+        assert_eq!(campo(stats, c), n, "{c}: {stats}");
+    }
+    assert!(err(&o).contains("memoria de node: 256 MiB de RSS por ejecucion (--mem-node)"), "{}", err(&o));
+    let celda = out.join("oxc+carril_a+tal_cual");
+    for (c, dice) in [("mem", "Buffer.alloc"), ("solo-b", "readFileSync")] {
+        let meta = std::fs::read_to_string(celda.join("recursos").join(c).join("meta.txt")).unwrap();
+        assert!(meta.contains("causa: node_memoria\n") && meta.contains("paso el tope de RSS de node") && meta.contains("> 256 MiB"), "{meta}");
+        assert!(std::fs::read_to_string(celda.join("recursos").join(c).join("programa.cjs")).unwrap().contains(dice));
+    }
+    // El de `solo-b` es el minificado (sin el relleno).
+    assert!(!std::fs::read_to_string(celda.join("recursos/solo-b/programa.cjs")).unwrap().contains("relleno"));
+    let filas = std::fs::read_to_string(celda.join("descartes.tsv")).unwrap().lines().filter(|l| !l.starts_with('#')).count();
+    assert_eq!(campo(stats, "total"), campo(stats, "iguales") + campo(stats, "RECURSOS") + filas, "{stats}");
+
+    // Una variante: `n` perturbado reserva (el base no). Las variantes son deterministas (semilla
+    // del texto); con 30 + 10 alguna toca `n`.
+    let corpus_v = b.join("corpus-v");
+    caso(&corpus_v, "v1", format!("const n = 0;\nif (n) {{\n{reservar}\n}}\nconsole.log(\"listo\", n);\n").as_bytes());
+    let out_v = b.join("out-v");
+    let args = [corpus_v.to_str().unwrap(), "--out", out_v.to_str().unwrap(), "--mem-node", "256", "--mutaciones", "30", "--mutaciones-extra", "10", "--no-cache", "--jobs", "1"];
+    let o = difuzz(&b, &args);
+    assert_eq!(rc(&o), Some(0), "{}", err(&o));
+    let stdout = String::from_utf8_lossy(&o.stdout);
+    let stats = stdout.lines().find(|l| l.starts_with("total=")).unwrap();
+    assert_eq!((campo(stats, "iguales"), campo(stats, "RECURSOS")), (1, 0), "{stats}");
+    let mutaciones = stdout.lines().find(|l| l.starts_with("mutaciones:")).unwrap();
+    let rec = campo(mutaciones, "RECURSOS");
+    assert!(rec >= 1, "{mutaciones}");
+    let dirs: Vec<std::path::PathBuf> = std::fs::read_dir(out_v.join("oxc+carril_a+tal_cual+mut30+mutx10/recursos")).unwrap().flatten().map(|e| e.path()).collect();
+    assert_eq!(dirs.len(), rec, "{dirs:?}");
+    for d in dirs {
+        assert!(d.file_name().unwrap().to_string_lossy().starts_with("v1__mut"), "{d:?}");
+        let meta = std::fs::read_to_string(d.join("meta.txt")).unwrap();
+        assert!(meta.contains("causa: node_memoria\n"), "{meta}");
+        assert!(d.join("variante.js").is_file() && d.join("programa.cjs").is_file(), "{d:?}");
+    }
+    std::fs::remove_dir_all(&b).unwrap();
+}

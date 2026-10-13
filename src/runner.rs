@@ -108,6 +108,41 @@ pub enum Status {
     Failed(String),
 }
 
+/// 11.5 (I3): tope de RSS de una ejecucion de node con un runner sin configurar (`Runner::new`;
+/// los tests). La corrida lo fija con `Runner::con_tope_rss` (`subproceso::tope_node`, `--mem-node`).
+/// Es el techo de los hijos minificadores (`subproceso::LIMITE_MEMORIA`).
+pub const TOPE_RSS_SIN_CONFIGURAR: u64 = 4 << 30;
+
+/// 11.5 (I3): cada cuanto se mira el RSS de node mientras corre (el bucle de espera de
+/// `run_file` ya despierta cada 5 ms; el RSS se lee cada 2 vueltas). Lo que un programa reserva y
+/// toca entre dos lecturas pasa el tope antes de que lo maten (MEDIDO, ver el INFORME de 11b); el
+/// pico (`ru_maxrss`) igual lo ve al cosecharlo.
+const SONDEO_RSS: u32 = 2;
+
+/// 11.5 (I3): causa de `recursos/` (meta.txt) y comienzo del mensaje de una ejecucion de node que
+/// paso el tope de RSS.
+pub const NODE_MEMORIA: &str = "node_memoria";
+
+/// 11.5 (I3): una ejecucion de node paso un tope de difuzz (memoria). No es un resultado del
+/// programa ni un error del runner: lo que se leyo de ella no se compara. `run_file` no devuelve
+/// un `Exec`: desenrolla con esto (`std::panic::resume_unwind`, que no llama al hook de panic)
+/// hasta quien procesa el caso (`main`: el worker, y cada variante de `--mutaciones`), que lo manda
+/// a `recursos/` con su causa. Asi ningun re-chequeo, confirmacion ni pasada observada puede
+/// tomar una ejecucion cortada por un tope como si hubiera terminado (regla madre: ni iguales, ni
+/// divergencia, ni known/, ni descartes por algo de difuzz).
+#[derive(Debug)]
+pub struct Excedido {
+    /// `NODE_MEMORIA`.
+    pub causa: &'static str,
+    /// Que tope, cuanto y que archivo (para meta.txt).
+    pub mensaje: String,
+    /// El programa que corrio node (el texto del caso, del original o del minificado, o de un
+    /// re-chequeo), para repetirlo a mano.
+    pub programa: String,
+    /// Extension del programa (`cjs` o `mjs`).
+    pub ext: &'static str,
+}
+
 pub struct Exec {
     pub status: Status,
     pub stdout: String,
@@ -425,6 +460,8 @@ pub struct Runner {
     /// 8.7: con el sensor prendido desde el arranque aunque `puede_atrapar` diga que no
     /// (`sensor_entero`). No prende nada si `sensor` es false (ni con `omitido`).
     entero: bool,
+    /// 11.5 (I3): tope de RSS de cada ejecucion de node, en bytes (0: sin tope). Ver `Excedido`.
+    tope_rss: u64,
     /// Copia que comparte los archivos del runner original (`observing`,
     /// `sin_sensor`): al soltarse no borra nada.
     prestado: bool,
@@ -451,8 +488,16 @@ impl Runner {
             sandbox: Sandbox::Apagado,
             omitido: false,
             entero: false,
+            tope_rss: TOPE_RSS_SIN_CONFIGURAR,
             prestado: false,
         }
+    }
+
+    /// 11.5 (I3): el tope de RSS (bytes) de cada ejecucion de este runner y de sus copias; 0, sin
+    /// tope. Al pasarlo, node muere y `run_file` desenrolla con `Excedido`.
+    pub fn con_tope_rss(mut self, bytes: u64) -> Runner {
+        self.tope_rss = bytes;
+        self
     }
 
     /// n-sandbox: todas las ejecuciones de este runner (y de sus copias) con `s`.
@@ -542,6 +587,7 @@ impl Runner {
             sandbox: self.sandbox,
             omitido: self.omitido,
             entero: self.entero,
+            tope_rss: self.tope_rss,
             prestado: true,
         }
     }
@@ -989,31 +1035,40 @@ fn run_file(r: &Runner, script: &Path, start: Instant, timeout: Duration, opts: 
     let out_buf = drain(child.stdout.take().expect("stdout fue pedido como piped"), tx.clone());
     let err_buf = drain(child.stderr.take().expect("stderr fue pedido como piped"), tx);
 
+    // 11.5 (I3): node se espera con `wait4` (no `Child::try_wait`) para tener su pico de RSS
+    // (`ru_maxrss`) al cosecharlo; desde aca `child` no se espera ni se mata por std. Mientras
+    // corre, su RSS se lee cada `SONDEO_RSS` vueltas: si pasa `tope_rss`, se mata el grupo.
+    let mut cos = Cosecha::new(pid);
+    let mut rss_visto = 0u64;
+    let mut matado_por_rss = false;
+    let mut vuelta = 0u32;
     let status = loop {
-        match child.try_wait() {
-            Ok(Some(st)) => {
-                break match st.code() {
-                    Some(code) => Status::Exited(code),
-                    None => Status::Signal,
-                };
-            }
-            Ok(None) => {
+        match cos.esperar(false) {
+            Ok(true) => break cos.status(),
+            Ok(false) => {
+                vuelta = vuelta.wrapping_add(1);
+                if r.tope_rss > 0 && vuelta.is_multiple_of(SONDEO_RSS) {
+                    rss_visto = rss_visto.max(crate::subproceso::rss(pid));
+                    if rss_visto > r.tope_rss {
+                        matado_por_rss = true;
+                        cos.matar();
+                        break Status::Signal;
+                    }
+                }
                 if start.elapsed() >= timeout {
-                    kill_group(pid);
-                    let _ = child.kill();
-                    let _ = child.wait();
+                    cos.matar();
                     break Status::Timeout;
                 }
                 std::thread::sleep(Duration::from_millis(5));
             }
             Err(e) => {
-                kill_group(pid);
-                let _ = child.kill();
-                let _ = child.wait();
+                cos.matar();
                 break Status::Failed(format!("wait: {e}"));
             }
         }
     };
+    let pico = cos.pico_rss().max(rss_visto);
+    let por_memoria = r.tope_rss > 0 && (matado_por_rss || pico > r.tope_rss);
     drop(en_curso);
     // Tambien al terminar normalmente: lo que el programa dejo corriendo muere.
     // Riesgo aceptado: node ya fue cosechado y su pid podria reusarse, pero un
@@ -1048,6 +1103,11 @@ fn run_file(r: &Runner, script: &Path, start: Instant, timeout: Duration, opts: 
     let take = |b: &Arc<Mutex<Vec<u8>>>| std::mem::take(&mut *b.lock().unwrap_or_else(|e| e.into_inner()));
     let stdout = take(&out_buf);
     let stderr = take(&err_buf);
+    // 11.5 (I3): lo que se leyo de una ejecucion que paso el tope no se compara (ver `Excedido`).
+    if por_memoria {
+        let como = if matado_por_rss { "matada al pasarlo" } else { "el pico cayo entre dos lecturas; termino sola" };
+        exceder(r, script, NODE_MEMORIA, format!("paso el tope de RSS de node: {} MiB > {} MiB ({como})", pico >> 20, r.tope_rss >> 20));
+    }
 
     let mut ctl = std::fs::read(&r.ctl).map(|b| decode_lossless(&b)).unwrap_or_default();
     let (stdout, stderr) = (decode_lossless(&stdout), decode_lossless(&stderr));
@@ -1474,6 +1534,90 @@ fn drain(mut pipe: impl Read + Send + 'static, done: mpsc::Sender<()>) -> Arc<Mu
         let _ = done.send(());
     });
     buf
+}
+
+/// 11.5 (I3): desenrolla con `Excedido` (ver ahi). `script` es el archivo que corrio node (el
+/// programa, o el envoltorio observador que lo importa); el texto que se guarda es el del programa.
+fn exceder(r: &Runner, script: &Path, causa: &'static str, que: String) -> ! {
+    // Sin la ruta: lleva el pid de difuzz y el worker.
+    let de = if script == r.script { "del programa (programa.*)" } else { "del envoltorio observador que importa el programa (programa.*)" };
+    std::panic::resume_unwind(Box::new(Excedido {
+        causa,
+        mensaje: format!("{causa}: la ejecucion de node {de} {que}"),
+        programa: std::fs::read_to_string(&r.script).unwrap_or_default(),
+        ext: r.kind.ext(),
+    }))
+}
+
+/// 11.5 (I3): node se espera con `wait4` para tener su pico de RSS. Desde que se cosecha no se
+/// toca su pid (podria reusarse).
+struct Cosecha {
+    pid: libc::pid_t,
+    wst: libc::c_int,
+    uso: libc::rusage,
+    cosechado: bool,
+}
+
+impl Cosecha {
+    fn new(pid: u32) -> Cosecha {
+        Cosecha {
+            pid: libc::pid_t::try_from(pid).unwrap_or(libc::pid_t::MAX),
+            wst: 0,
+            // SAFETY: `rusage` es una estructura de enteros: todo en cero es valido.
+            uso: unsafe { std::mem::zeroed() },
+            cosechado: false,
+        }
+    }
+
+    /// `wait4` del hijo, sin bloquear (`bloquear` false) o hasta que termine. `Ok(true)`: ya esta
+    /// cosechado (ahora o antes).
+    fn esperar(&mut self, bloquear: bool) -> std::io::Result<bool> {
+        while !self.cosechado {
+            // SAFETY: punteros a campos propios, vivos durante la llamada.
+            let w = unsafe { libc::wait4(self.pid, &mut self.wst, if bloquear { 0 } else { libc::WNOHANG }, &mut self.uso) };
+            if w == self.pid {
+                self.cosechado = true;
+            } else if w == 0 {
+                return Ok(false);
+            } else {
+                let e = std::io::Error::last_os_error();
+                if e.kind() != std::io::ErrorKind::Interrupted {
+                    return Err(e);
+                }
+            }
+        }
+        Ok(true)
+    }
+
+    /// SIGKILL al grupo y a node, y lo cosecha (si todavia no estaba cosechado).
+    fn matar(&mut self) {
+        if self.cosechado {
+            return;
+        }
+        kill_group(self.pid as u32);
+        // SAFETY: kill(2) no toca memoria; el pid es de un hijo sin cosechar (no se reuso).
+        unsafe {
+            libc::kill(self.pid, libc::SIGKILL);
+        }
+        let _ = self.esperar(true);
+    }
+
+    /// Como termino (solo despues de `esperar` en `Ok(true)`).
+    fn status(&self) -> Status {
+        if libc::WIFEXITED(self.wst) {
+            Status::Exited(libc::WEXITSTATUS(self.wst))
+        } else {
+            Status::Signal
+        }
+    }
+
+    /// El pico de RSS de node (`ru_maxrss`, en KiB en Linux), en bytes; 0 si no se cosecho.
+    fn pico_rss(&self) -> u64 {
+        if !self.cosechado {
+            return 0;
+        }
+        u64::try_from(self.uso.ru_maxrss).unwrap_or(0).saturating_mul(1024)
+    }
 }
 
 /// M2: SIGKILL al grupo de procesos `pid` (creado con `process_group(0)`).
@@ -2172,5 +2316,58 @@ mod tests {
         assert!(matches!(camino, crate::recheck::Camino::NoSe(ref n) if n.contains(SENSOR_OMITIDO)), "{camino:?}");
         let c = r.run(js);
         eprintln!("b7-8: con el sensor: {:?}, sensor_caido={}", c.status, c.ctl.lines().any(|l| l == SENSOR_CAIDO));
+    }
+
+    /// 11.5 (I3): una ejecucion que pasa el tope de RSS no devuelve un `Exec`: desenrolla con
+    /// `Excedido` (causa, mensaje y el programa). La cortan antes de reservar lo que pide (3 GiB en
+    /// trozos de 32 MiB, tocados); con el sensor prendido o sin el, igual. Un programa chico, con el
+    /// mismo tope, corre como siempre.
+    #[test]
+    fn tope_de_rss_desenrolla_con_excedido() {
+        use super::{Excedido, Preload, Runner, Status, NODE_MEMORIA};
+        use std::time::Duration;
+        if !crate::test_util::requiere_node() {
+            return;
+        }
+        let preload = Preload::write_tagged("tope-rss").unwrap();
+        let tope = 256u64 << 20;
+        let r = Runner::new(&preload, crate::test_util::id_runner(), Duration::from_secs(60)).con_tope_rss(tope);
+        assert_eq!(r.run("console.log(1);\n").status, Status::Exited(0));
+        let js = "const b = [];\nfor (let i = 0; i < 96; i++) b.push(Buffer.alloc(32 << 20, 1));\nconsole.log(b.length);\n";
+        for runner in [r.sin_sensor(), r.sensor_entero()] {
+            let Err(p) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| runner.run(js))) else {
+                panic!("tenia que pasar el tope");
+            };
+            let x = p.downcast::<Excedido>().expect("el payload es Excedido");
+            assert_eq!((x.causa, x.programa.as_str(), x.ext), (NODE_MEMORIA, js, "cjs"));
+            assert!(x.mensaje.starts_with("node_memoria: ") && x.mensaje.contains("> 256 MiB (matada al pasarlo)"), "{}", x.mensaje);
+            // El pico que vio difuzz: lejos de los 3 GiB pedidos (la mato a tiempo).
+            let pico: u64 = x.mensaje.split("RSS de node: ").nth(1).and_then(|s| s.split(' ').next()).and_then(|n| n.parse().ok()).unwrap();
+            assert!(pico < 1024, "pico {pico} MiB: {}", x.mensaje);
+        }
+    }
+
+    /// 11.5 (I3): `Cosecha` da el pico de RSS de node (`ru_maxrss` de `wait4`), tambien el que no
+    /// alcanzo a verse mientras corria.
+    #[test]
+    // Lo cosecha `Cosecha` con wait4, no `Child::wait` (como en `run_file`).
+    #[allow(clippy::zombie_processes)]
+    fn cosecha_da_el_pico_de_rss() {
+        if !crate::test_util::requiere_node() {
+            return;
+        }
+        let hijo = std::process::Command::new(super::node_path())
+            .args(["-e", "Buffer.alloc(200 << 20, 1);"])
+            .stdin(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        let mut c = super::Cosecha::new(hijo.id());
+        assert!(c.esperar(true).unwrap());
+        assert_eq!(c.status(), super::Status::Exited(0));
+        let pico = c.pico_rss() >> 20;
+        assert!((200..1024).contains(&pico), "pico {pico} MiB");
+        // Ya cosechado: ni espera ni mata otra vez.
+        assert!(c.esperar(false).unwrap());
+        c.matar();
     }
 }

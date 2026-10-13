@@ -122,7 +122,8 @@ thread_local! {
 
 /// R2-H04: el presupuesto por worker: `--mem-hijo` si vino, si no la mitad de
 /// MemTotal repartida entre los workers (la otra mitad queda para node, difuzz
-/// y el resto de la maquina), con techo `LIMITE_MEMORIA` y piso
+/// y el resto de la maquina; 11.5: node tiene su tope con esta misma cuenta,
+/// `tope_node`, porque corre cuando estos hijos esperan), con techo `LIMITE_MEMORIA` y piso
 /// `PRESUPUESTO_MINIMO`. Devuelve (bytes, de donde sale).
 fn presupuesto(mem_total: Option<u64>, jobs: usize, mem_hijo_mib: Option<u64>) -> (u64, String) {
     if let Some(m) = mem_hijo_mib {
@@ -161,6 +162,20 @@ pub fn configurar_memoria(jobs: usize, mem_hijo_mib: Option<u64>) -> String {
         ana >> 20,
         limite_as(ana) >> 20
     )
+}
+
+/// 11.5 (I3): el tope de RSS de cada ejecucion de node (bytes) y de donde sale: `--mem-node` si
+/// vino; si no, la misma cuenta que el presupuesto por worker de `configurar_memoria` sin
+/// `--mem-hijo` (MemTotal/2 / workers, entre `PRESUPUESTO_MINIMO` y `LIMITE_MEMORIA`). Node corre
+/// cuando los minificadores y el hijo de analisis de su worker esperan (cada worker hace una cosa a
+/// la vez), asi que `jobs` x tope sigue acotando lo que corre a la vez; la otra mitad de la memoria
+/// queda para difuzz, los hijos ociosos y el resto de la maquina. Es un tope de RSS medido (no
+/// RLIMIT_AS: ver `runner::Excedido` y el INFORME de 11b).
+pub fn tope_node(jobs: usize, mem_node_mib: Option<u64>) -> (u64, String) {
+    match mem_node_mib {
+        Some(m) => (m.saturating_mul(1 << 20), "--mem-node".into()),
+        None => presupuesto(mem_total(), jobs, None),
+    }
 }
 
 /// R2-H04: RLIMIT_AS para un presupuesto de RSS (0: el techo de siempre).
@@ -1181,7 +1196,7 @@ pub(crate) mod tests {
         let rep = crate::oracle::Reporter::new(&d, "swc+carril_a+tal_cual".into(), "");
         let caso = std::path::Path::new("lento/input.js");
         let msg = format!("{PREFIJO_TIMEOUT} el minifier no termino en 60.0 s (lento o colgado; hijo matado)");
-        rep.recurso(caso, "x;\n", causa_recurso(&msg).unwrap(), &msg);
+        rep.recurso(caso, "x;\n", causa_recurso(&msg).unwrap(), &msg, &[]);
         let meta = std::fs::read_to_string(d.join("recursos/lento/meta.txt")).unwrap();
         assert!(meta.contains("kind: Recursos\ncausa: timeout\n") && meta.contains(&msg), "{meta}");
         assert!(!d.join("panic").exists());
@@ -1225,6 +1240,10 @@ pub(crate) mod tests {
         let (p, aviso) = presupuesto(Some(4 * gib), 64, None);
         assert!(p == PRESUPUESTO_MINIMO && aviso.starts_with("aviso"), "{aviso}");
         assert_eq!(limite_as(0), LIMITE_MEMORIA, "sin configurar: el de siempre");
+        // 11.5 (I3): el tope de node es la misma cuenta, salvo --mem-node; --mem-hijo no lo cambia.
+        assert_eq!(tope_node(1, Some(300)), (300 << 20, "--mem-node".to_string()));
+        assert_eq!(tope_node(16, None).0, presupuesto(mem_total(), 16, None).0);
+        assert_eq!(crate::runner::TOPE_RSS_SIN_CONFIGURAR, LIMITE_MEMORIA);
     }
 
     /// Aceptacion de M34: un abort real del hijo (desborde de pila) es un

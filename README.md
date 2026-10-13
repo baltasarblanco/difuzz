@@ -165,6 +165,7 @@ Opciones principales (la lista completa, con defaults, está en `difuzz --help`)
 | `--indice DIR` | anotar cada hallazgo en `DIR/index-<celda>.tsv` | |
 | `--en-proceso` | minificar en el proceso de difuzz, sin hijo | |
 | `--mem-hijo MiB` | presupuesto de memoria de los hijos de cada worker | MemTotal/2 / workers |
+| `--mem-node MiB` | tope de RSS de cada ejecución de node; al pasarlo, el caso va a `recursos/` (ver [Topes de node](#topes-de-node)) | MemTotal/2 / workers (256 MiB a 4 GiB) |
 | `--sandbox` | node con su modelo de permisos (ver [Sandbox](#sandbox)) | apagado |
 | `--sandbox-red` | `--sandbox` más namespaces de Linux: sin red (ver [Sandbox](#sandbox)) | apagado |
 | `--crudo` | además corre el texto crudo de cada caso y lo compara con el original impreso; lo que difiere va a `codegen/` (ver [El texto crudo](#el-texto-crudo---crudo)) | apagado |
@@ -488,7 +489,8 @@ suyo.
     ├── known/<caso>/          divergencias explicadas por una asunción documentada
     ├── panic/<caso>/          el minifier hizo panic (también sin debug assertions)
     ├── asserts/<caso>/        panic solo con debug assertions y sin divergencia
-    ├── recursos/<caso>/       el minifier no terminó en 60 s o pasó el presupuesto de memoria
+    ├── recursos/<caso>/       el minifier no terminó en 60 s o pasó el presupuesto de memoria, o
+    │                          una ejecución de node pasó un tope de difuzz (ver Topes de node)
     ├── lint/<caso>/           sospechosos del lint: el minificado escribe sobre literales nuevos
     └── codegen/<caso>/        con --crudo: el texto crudo y el original impreso dan otra salida
 ```
@@ -950,6 +952,31 @@ En esos casos no hay violaciones atrapadas: una divergencia que solo ellas expli
 `div/`, nunca en `known/`. En el corpus de tests de SWC son 8 de 3119 `input.js`. El patrón no ve
 una clase o un `eval` que solo están en strings (código armado en runtime): para eso queda el
 reintento.
+
+## Topes de node
+
+Cada ejecución de node (el original, el minificado, las confirmaciones, los re-chequeos, las
+pasadas observadas, `--invocar`, las variantes y el crudo) corre bajo topes de difuzz. Lo que pasa
+un tope no es un resultado del programa: lo que imprimió no se compara con nada. El caso (o la
+variante) va a `recursos/` con la causa en `meta.txt`, el mensaje y el programa que corrió
+(`programa.cjs` o `.mjs`: el original, el minificado o el de un re-chequeo), nunca a iguales, a
+`div/`, a `known/` ni a `descartes.tsv`. En la línea de stats: `RECURSOS=N (timeout=… memoria=…
+node_memoria=…)` (las dos primeras son del minificador). Si lo pasa una ejecución del chequeo de
+`--crudo`, el chequeo cuenta como `runner=` en su línea y el caso sigue.
+
+- **Memoria (`--mem-node MiB`, causa `node_memoria`).** difuzz lee el RSS de node cada ~10 ms
+  mientras corre y, al cosecharlo, su pico (`ru_maxrss`): si pasa el tope, lo mata (a él y a su
+  grupo). El default es la misma cuenta que el presupuesto de los hijos minificadores (MemTotal/2
+  repartido entre los workers, entre 256 MiB y 4 GiB; `--mem-hijo` no lo cambia): cada worker
+  hace una cosa a la vez, así que `--jobs` × tope acota lo que corre junto y la otra mitad queda
+  para difuzz y el resto de la máquina. Con 32 workers y 31 GiB son 496 MiB; con un solo caso,
+  un solo worker y 4 GiB. Un caso legítimo que necesita más va a `recursos/`: se repite con
+  `--mem-node` más alto o menos `--jobs`. Lo que un programa reserva y toca entre dos lecturas
+  pasa el tope antes de que lo maten (medido: 267 MiB con un tope de 256, reservando de a
+  32 MiB). Mide solo a node, no a los procesos que el programa lance (sin `--sandbox`). No se usa
+  `RLIMIT_AS`: V8 reserva 1,4 GB de espacio virtual para arrancar y WebAssembly ~10 GB, y con
+  el límite una reserva grande es un `RangeError` que el programa ve (y A y B darían iguales con
+  otro programa); `--max-old-space-size` solo cubre el heap de V8 (no los `Buffer`).
 
 ## Códigos de salida
 
