@@ -632,7 +632,7 @@ fn tope_de_memoria_de_node_va_a_recursos() {
     for (c, n) in [("total", 3), ("iguales", 1), ("DIVERGENCIAS", 0), ("RECURSOS", 2), ("node_memoria", 2), ("panics_del_fuzzer", 0)] {
         assert_eq!(campo(stats, c), n, "{c}: {stats}");
     }
-    assert!(err(&o).contains("memoria de node: 256 MiB de RSS por ejecucion (--mem-node)"), "{}", err(&o));
+    assert!(err(&o).contains("topes de node: 256 MiB de RSS por ejecucion (--mem-node) y 16 MiB de salida"), "{}", err(&o));
     let celda = out.join("oxc+carril_a+tal_cual");
     for (c, dice) in [("mem", "Buffer.alloc"), ("solo-b", "readFileSync")] {
         let meta = std::fs::read_to_string(celda.join("recursos").join(c).join("meta.txt")).unwrap();
@@ -666,5 +666,51 @@ fn tope_de_memoria_de_node_va_a_recursos() {
         assert!(meta.contains("causa: node_memoria\n"), "{meta}");
         assert!(d.join("variante.js").is_file() && d.join("programa.cjs").is_file(), "{d:?}");
     }
+    std::fs::remove_dir_all(&b).unwrap();
+}
+
+/// 11.7 (I5): una ejecucion de node que escribe mas que `--max-salida` (stdout mas stderr) manda el
+/// caso a recursos/ (causa `node_salida`), nunca a iguales ni a div/: lo juntado esta cortado. El
+/// original que escribe de mas por stdout (`grande`) o por stderr (`err`), y el que solo escribe de
+/// mas minificado (`solo-b`; sin el tope, div/: no se compara un B cortado contra un A entero, se
+/// guarda para correrlo con un tope mayor). Lo que entra en el tope se compara como siempre (`entra`).
+#[test]
+fn tope_de_salida_de_node_va_a_recursos() {
+    if !test_util::requiere_node() {
+        return;
+    }
+    let b = base("tope-salida");
+    let corpus = b.join("corpus");
+    let escribir = |n: usize, por: &str| format!("const s = \"x\".repeat(1 << 20) + \"\\n\";\nfor (let i = 0; i < {n}; i++) process.{por}.write(s);\n");
+    caso(&corpus, "entra", format!("{}console.log(\"fin\");\n", escribir(1, "stdout")).as_bytes());
+    caso(&corpus, "grande", escribir(3, "stdout").as_bytes());
+    caso(&corpus, "err", format!("console.log(1);\n{}", escribir(3, "stderr")).as_bytes());
+    let relleno = "x".repeat(300);
+    caso(
+        &corpus,
+        "solo-b",
+        format!(
+            "(function () {{ const relleno = \"{relleno}\"; }})();\nconst n = require(\"fs\").readFileSync(__filename, \"utf8\").length < 300 ? 3 : 1;\n{}",
+            escribir(1, "stdout").replace("i < 1", "i < n")
+        )
+        .as_bytes(),
+    );
+    let out = b.join("out");
+    let o = difuzz(&b, &[corpus.to_str().unwrap(), "--out", out.to_str().unwrap(), "--max-salida", "2", "--no-cache", "--jobs", "1"]);
+    assert_eq!(rc(&o), Some(0), "{}", err(&o));
+    let stdout = String::from_utf8_lossy(&o.stdout);
+    let stats = stdout.lines().find(|l| l.starts_with("total=")).unwrap();
+    for (c, n) in [("total", 4), ("iguales", 1), ("DIVERGENCIAS", 0), ("RECURSOS", 3), ("node_salida", 3), ("node_memoria", 0), ("panics_del_fuzzer", 0)] {
+        assert_eq!(campo(stats, c), n, "{c}: {stats}");
+    }
+    assert!(err(&o).contains(" y 2 MiB de salida (--max-salida)"), "{}", err(&o));
+    let celda = out.join("oxc+carril_a+tal_cual");
+    for c in ["grande", "err", "solo-b"] {
+        let meta = std::fs::read_to_string(celda.join("recursos").join(c).join("meta.txt")).unwrap();
+        assert!(meta.contains("causa: node_salida\n") && meta.contains("paso el tope de salida de 2 MiB"), "{meta}");
+        assert!(celda.join("recursos").join(c).join("programa.cjs").is_file());
+    }
+    let filas = std::fs::read_to_string(celda.join("descartes.tsv")).unwrap().lines().filter(|l| !l.starts_with('#')).count();
+    assert_eq!(campo(stats, "total"), campo(stats, "iguales") + campo(stats, "RECURSOS") + filas, "{stats}");
     std::fs::remove_dir_all(&b).unwrap();
 }

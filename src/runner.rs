@@ -123,6 +123,17 @@ const SONDEO_RSS: u32 = 2;
 /// paso el tope de RSS.
 pub const NODE_MEMORIA: &str = "node_memoria";
 
+/// 11.7 (I5): tope por defecto de la salida que difuzz junta de una ejecucion de node (stdout mas
+/// stderr), en MiB (`--max-salida`). MEDIDO: la entrada mas grande de las 77 caches de A de las
+/// corridas del 7 al 12 de octubre (254 442 entradas: sintetico, corpus SWC y corpus real de D2)
+/// pesa 1,4 MiB con el programa incluido. difuzz copia la salida unas 5 veces (decodificar,
+/// normalizar, comparar; MEDIDO en I5: 512 MiB de stdout, 2,6 GB de RSS): con 32 workers, 16 MiB
+/// son ~2,5 GB en el peor caso.
+pub const MAX_SALIDA_MIB: u64 = 16;
+
+/// 11.7 (I5): causa de `recursos/` de una ejecucion que escribio mas que el tope de salida.
+pub const NODE_SALIDA: &str = "node_salida";
+
 /// 11.5 (I3): una ejecucion de node paso un tope de difuzz (memoria). No es un resultado del
 /// programa ni un error del runner: lo que se leyo de ella no se compara. `run_file` no devuelve
 /// un `Exec`: desenrolla con esto (`std::panic::resume_unwind`, que no llama al hook de panic)
@@ -130,9 +141,11 @@ pub const NODE_MEMORIA: &str = "node_memoria";
 /// a `recursos/` con su causa. Asi ningun re-chequeo, confirmacion ni pasada observada puede
 /// tomar una ejecucion cortada por un tope como si hubiera terminado (regla madre: ni iguales, ni
 /// divergencia, ni known/, ni descartes por algo de difuzz).
+/// 11.7 (I5): tambien el tope de la salida que se junta (`NODE_SALIDA`): una salida cortada no se
+/// compara como si estuviera entera.
 #[derive(Debug)]
 pub struct Excedido {
-    /// `NODE_MEMORIA`.
+    /// `NODE_MEMORIA` o `NODE_SALIDA`.
     pub causa: &'static str,
     /// Que tope, cuanto y que archivo (para meta.txt).
     pub mensaje: String,
@@ -462,6 +475,9 @@ pub struct Runner {
     entero: bool,
     /// 11.5 (I3): tope de RSS de cada ejecucion de node, en bytes (0: sin tope). Ver `Excedido`.
     tope_rss: u64,
+    /// 11.7 (I5): tope de la salida (stdout + stderr) que se junta de cada ejecucion, en bytes (0:
+    /// sin tope). Ver `Excedido`.
+    tope_salida: u64,
     /// Copia que comparte los archivos del runner original (`observing`,
     /// `sin_sensor`): al soltarse no borra nada.
     prestado: bool,
@@ -489,8 +505,16 @@ impl Runner {
             omitido: false,
             entero: false,
             tope_rss: TOPE_RSS_SIN_CONFIGURAR,
+            tope_salida: MAX_SALIDA_MIB << 20,
             prestado: false,
         }
+    }
+
+    /// 11.7 (I5): el tope de salida (bytes, stdout + stderr) de cada ejecucion de este runner y de
+    /// sus copias; 0, sin tope. Al pasarlo, node muere y `run_file` desenrolla con `Excedido`.
+    pub fn con_tope_salida(mut self, bytes: u64) -> Runner {
+        self.tope_salida = bytes;
+        self
     }
 
     /// 11.5 (I3): el tope de RSS (bytes) de cada ejecucion de este runner y de sus copias; 0, sin
@@ -588,6 +612,7 @@ impl Runner {
             omitido: self.omitido,
             entero: self.entero,
             tope_rss: self.tope_rss,
+            tope_salida: self.tope_salida,
             prestado: true,
         }
     }
@@ -1038,8 +1063,10 @@ fn run_file(r: &Runner, script: &Path, start: Instant, timeout: Duration, opts: 
     // buffer compartido: si un proceso escapo del grupo (setsid) y retiene el
     // pipe, el join tiene limite y se usa lo que haya.
     let (tx, rx) = mpsc::channel::<()>();
-    let out_buf = drain(child.stdout.take().expect("stdout fue pedido como piped"), tx.clone());
-    let err_buf = drain(child.stderr.take().expect("stderr fue pedido como piped"), tx);
+    // 11.7 (I5): lo que se junta de los dos pipes, contra el tope de salida.
+    let salida = Arc::new(Salida { tope: r.tope_salida, ..Salida::default() });
+    let out_buf = drain(child.stdout.take().expect("stdout fue pedido como piped"), tx.clone(), Arc::clone(&salida));
+    let err_buf = drain(child.stderr.take().expect("stderr fue pedido como piped"), tx, Arc::clone(&salida));
 
     // 11.5 (I3): node se espera con `wait4` (no `Child::try_wait`) para tener su pico de RSS
     // (`ru_maxrss`) al cosecharlo; desde aca `child` no se espera ni se mata por std. Mientras
@@ -1054,6 +1081,11 @@ fn run_file(r: &Runner, script: &Path, start: Instant, timeout: Duration, opts: 
         match cos.esperar(false) {
             Ok(true) => break cos.status(),
             Ok(false) => {
+                // 11.7 (I5): paso el tope de salida: lo que siga no se junta; se corta aca.
+                if salida.excedida.load(std::sync::atomic::Ordering::SeqCst) {
+                    cos.matar();
+                    break Status::Signal;
+                }
                 vuelta = vuelta.wrapping_add(1);
                 if r.tope_rss > 0 && vuelta.is_multiple_of(SONDEO_RSS) {
                     rss_visto = rss_visto.max(crate::subproceso::rss(pid));
@@ -1112,7 +1144,13 @@ fn run_file(r: &Runner, script: &Path, start: Instant, timeout: Duration, opts: 
     let take = |b: &Arc<Mutex<Vec<u8>>>| std::mem::take(&mut *b.lock().unwrap_or_else(|e| e.into_inner()));
     let stdout = take(&out_buf);
     let stderr = take(&err_buf);
-    // 11.5 (I3): lo que se leyo de una ejecucion que paso el tope no se compara (ver `Excedido`).
+    // 11.5 (I3) / 11.7 (I5): lo que se leyo de una ejecucion que paso un tope no se compara (ver
+    // `Excedido`). La salida primero: lo juntado ya esta cortado (y node pudo terminar solo antes de
+    // que el bucle lo viera: igual se cuenta, lo que se escribio paso el tope).
+    if salida.excedida.load(std::sync::atomic::Ordering::SeqCst) {
+        let n = salida.usado.load(std::sync::atomic::Ordering::SeqCst);
+        exceder(r, script, NODE_SALIDA, format!("escribio por stdout y stderr {} MiB o mas: paso el tope de salida de {} MiB (lo de mas no se junto; matada al verlo)", n >> 20, r.tope_salida >> 20));
+    }
     if por_memoria {
         let como = if matado_por_rss { "matada al pasarlo" } else { "el pico cayo entre dos lecturas; termino sola" };
         exceder(r, script, NODE_MEMORIA, format!("paso el tope de RSS de node: {} MiB > {} MiB ({como})", pico >> 20, r.tope_rss >> 20));
@@ -1527,9 +1565,23 @@ fn node_path() -> &'static Path {
 /// mato su grupo. Solo se agota si un proceso escapo del grupo.
 const READ_GRACE: Duration = Duration::from_secs(1);
 
+/// 11.7 (I5): la salida de una ejecucion contra el tope (`Runner::tope_salida`): los bytes leidos de
+/// los dos pipes y si ya pasaron el tope.
+#[derive(Default)]
+struct Salida {
+    /// En bytes; 0, sin tope.
+    tope: u64,
+    usado: std::sync::atomic::AtomicU64,
+    excedida: std::sync::atomic::AtomicBool,
+}
+
 /// Lee `pipe` hasta EOF en un hilo propio, acumulando en un buffer compartido.
 /// Avisa por `done` al llegar al EOF (o a un error de lectura).
-fn drain(mut pipe: impl Read + Send + 'static, done: mpsc::Sender<()>) -> Arc<Mutex<Vec<u8>>> {
+/// 11.7 (I5): lo que pasa el tope de `salida` (sumando los dos pipes) ya no se guarda: se sigue
+/// leyendo y tirando hasta el EOF (para que node no se trabe escribiendo antes de que lo maten) y
+/// queda marcada (`Salida::excedida`).
+fn drain(mut pipe: impl Read + Send + 'static, done: mpsc::Sender<()>, salida: Arc<Salida>) -> Arc<Mutex<Vec<u8>>> {
+    use std::sync::atomic::Ordering;
     let buf = Arc::new(Mutex::new(Vec::new()));
     let b = Arc::clone(&buf);
     std::thread::spawn(move || {
@@ -1537,7 +1589,14 @@ fn drain(mut pipe: impl Read + Send + 'static, done: mpsc::Sender<()>) -> Arc<Mu
         loop {
             match pipe.read(&mut chunk) {
                 Ok(0) | Err(_) => break,
-                Ok(n) => b.lock().unwrap_or_else(|e| e.into_inner()).extend_from_slice(&chunk[..n]),
+                Ok(n) => {
+                    let total = salida.usado.fetch_add(n as u64, Ordering::SeqCst) + n as u64;
+                    if salida.tope > 0 && total > salida.tope {
+                        salida.excedida.store(true, Ordering::SeqCst);
+                    } else {
+                        b.lock().unwrap_or_else(|e| e.into_inner()).extend_from_slice(&chunk[..n]);
+                    }
+                }
             }
         }
         let _ = done.send(());
@@ -2465,6 +2524,41 @@ mod tests {
             // El pico que vio difuzz: lejos de los 3 GiB pedidos (la mato a tiempo).
             let pico: u64 = x.mensaje.split("RSS de node: ").nth(1).and_then(|s| s.split(' ').next()).and_then(|n| n.parse().ok()).unwrap();
             assert!(pico < 1024, "pico {pico} MiB: {}", x.mensaje);
+        }
+    }
+
+    /// 11.7 (I5): una ejecucion que escribe mas que el tope de salida (sumando stdout y stderr) no
+    /// devuelve un `Exec`: desenrolla con `Excedido` (`NODE_SALIDA`) y node muere (un programa que
+    /// escribiria 1 GiB no llega a escribirlo). Justo en el tope, se compara como siempre.
+    #[test]
+    fn tope_de_salida_desenrolla_con_excedido() {
+        use super::{Excedido, Preload, Runner, Status, NODE_SALIDA};
+        use std::time::{Duration, Instant};
+        if !crate::test_util::requiere_node() {
+            return;
+        }
+        let preload = Preload::write_tagged("tope-salida").unwrap();
+        let r = Runner::new(&preload, crate::test_util::id_runner(), Duration::from_secs(60)).con_tope_salida(1 << 20).sin_sensor();
+        // Exactamente 1 MiB (512 KiB por cada pipe): entra.
+        let justo = "const s = \"x\".repeat(512 * 1024 - 1) + \"\\n\";\nprocess.stdout.write(s);\nprocess.stderr.write(s);\n";
+        let e = r.run(justo);
+        assert_eq!((e.status, e.stdout.len(), e.stderr.len()), (Status::Exited(0), 512 * 1024, 512 * 1024));
+        for (que, js) in [
+            ("stdout", "const s = \"x\".repeat(1 << 20) + \"\\n\";\nfor (let i = 0; i < 1024; i++) process.stdout.write(s);\n"),
+            ("stdout y stderr", "const s = \"x\".repeat(700 * 1024) + \"\\n\";\nprocess.stdout.write(s);\nprocess.stderr.write(s);\n"),
+            // `fs.writeSync`: `process.stderr.write` de 2 MiB a un pipe deja la mayor parte en la cola
+            // de node, que el bucle no deja vaciar (MEDIDO: timeout, sin pasar el tope).
+            ("stderr, mientras gira", "const fs = require(\"fs\");\nfor (let i = 0; i < 32; i++) fs.writeSync(2, \"x\".repeat(64 * 1024));\nwhile (true) {}\n"),
+        ] {
+            let t0 = Instant::now();
+            let Err(p) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| r.run(js))) else {
+                panic!("{que}: tenia que pasar el tope");
+            };
+            let x = p.downcast::<Excedido>().expect("el payload es Excedido");
+            assert_eq!((x.causa, x.programa.as_str()), (NODE_SALIDA, js), "{que}");
+            assert!(x.mensaje.starts_with("node_salida: ") && x.mensaje.contains("paso el tope de salida de 1 MiB"), "{que}: {}", x.mensaje);
+            // Cortado al pasarlo, no al terminar (1 GiB, o el bucle, que solo corta el timeout).
+            assert!(t0.elapsed() < Duration::from_secs(30), "{que}: {:?}", t0.elapsed());
         }
     }
 

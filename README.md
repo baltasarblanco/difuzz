@@ -166,6 +166,7 @@ Opciones principales (la lista completa, con defaults, está en `difuzz --help`)
 | `--en-proceso` | minificar en el proceso de difuzz, sin hijo | |
 | `--mem-hijo MiB` | presupuesto de memoria de los hijos de cada worker | MemTotal/2 / workers |
 | `--mem-node MiB` | tope de RSS de cada ejecución de node; al pasarlo, el caso va a `recursos/` (ver [Topes de node](#topes-de-node)) | MemTotal/2 / workers (256 MiB a 4 GiB) |
+| `--max-salida MiB` | tope de la salida (stdout + stderr) que difuzz junta de cada ejecución de node; al pasarlo, el caso va a `recursos/` | 16 |
 | `--sandbox` | node con su modelo de permisos (ver [Sandbox](#sandbox)) | apagado |
 | `--sandbox-red` | `--sandbox` más namespaces de Linux: sin red (ver [Sandbox](#sandbox)) | apagado |
 | `--crudo` | además corre el texto crudo de cada caso y lo compara con el original impreso; lo que difiere va a `codegen/` (ver [El texto crudo](#el-texto-crudo---crudo)) | apagado |
@@ -961,8 +962,10 @@ un tope no es un resultado del programa: lo que imprimió no se compara con nada
 variante) va a `recursos/` con la causa en `meta.txt`, el mensaje y el programa que corrió
 (`programa.cjs` o `.mjs`: el original, el minificado o el de un re-chequeo), nunca a iguales, a
 `div/`, a `known/` ni a `descartes.tsv`. En la línea de stats: `RECURSOS=N (timeout=… memoria=…
-node_memoria=…)` (las dos primeras son del minificador). Si lo pasa una ejecución del chequeo de
-`--crudo`, el chequeo cuenta como `runner=` en su línea y el caso sigue.
+node_memoria=… node_salida=…)` (las dos primeras son del minificador; las variantes de
+`--mutaciones` suman en el `RECURSOS=` de su línea). Si lo pasa una ejecución del chequeo de
+`--crudo`, el chequeo cuenta como `runner=` en su línea y el caso sigue. Al arrancar, difuzz
+imprime los dos topes (`topes de node: ...`).
 
 - **Memoria (`--mem-node MiB`, causa `node_memoria`).** difuzz lee el RSS de node cada ~10 ms
   mientras corre y, al cosecharlo, su pico (`ru_maxrss`): si pasa el tope, lo mata (a él y a su
@@ -977,6 +980,14 @@ node_memoria=…)` (las dos primeras son del minificador). Si lo pasa una ejecuc
   `RLIMIT_AS`: V8 reserva 1,4 GB de espacio virtual para arrancar y WebAssembly ~10 GB, y con
   el límite una reserva grande es un `RangeError` que el programa ve (y A y B darían iguales con
   otro programa); `--max-old-space-size` solo cubre el heap de V8 (no los `Buffer`).
+- **Salida (`--max-salida MiB`, causa `node_salida`; default 16 MiB).** Lo que difuzz junta de
+  stdout y stderr, sumados. Lo que pasa el tope ya no se guarda (se sigue leyendo y se tira) y node
+  muere: una salida cortada no se compara como si estuviera entera. Antes la salida se juntaba
+  entera en la memoria de difuzz, unas 5 veces (512 MiB de stdout: 2,6 GB de RSS). La salida más
+  grande de las cachés de A de las corridas del 7 al 12 de octubre (254 442 ejecuciones, con el
+  corpus real) pesa 1,4 MiB con el programa incluido. Un minificado que escribe de más donde el
+  original no (una diferencia real) también va a `recursos/`, con el programa (el minificado) en
+  `programa.cjs`: se repite con un tope mayor.
 - **node no sobrevive a difuzz.** Cada node muere con SIGKILL si muere difuzz, también de golpe
   (SIGKILL, el OOM killer): `PR_SET_PDEATHSIG`, puesto con `setpriv --pdeathsig KILL` de
   util-linux si está en el `PATH` (si no, entre fork y exec, que cuesta más: +8 % de pared medido

@@ -61,7 +61,7 @@ use runner::Status;
 const USAGE: &str = "\
 uso: difuzz <corpus_dir> [--out DIR] [--minifier M] [--config C] [--forma F] [--carril K] [--timeout-ms N] [--limit N] [--jobs N] [--no-observe]
              [--invocar] [--mutaciones N] [--mutaciones-extra N] [--stubs] [--cache DIR | --no-cache] [--indice DIR] [--en-proceso]
-             [--mem-hijo MiB] [--mem-node MiB] [--sandbox | --sandbox-red] [--crudo]
+             [--mem-hijo MiB] [--mem-node MiB] [--max-salida MiB] [--sandbox | --sandbox-red] [--crudo]
        difuzz --cruce DIR
        difuzz --emitir ARCHIVO [--minifier M] [--config C] [--forma F] [--carril K]
        difuzz --help
@@ -121,6 +121,9 @@ uso: difuzz <corpus_dir> [--out DIR] [--minifier M] [--config C] [--forma F] [--
                  el, MemTotal/2 / workers entre 256 MiB y 4 GiB; --mem-hijo no lo cambia). Una
                  ejecucion que lo pasa muere y el caso (o la variante) va a recursos/ con causa
                  node_memoria: lo que imprimio no se compara
+  --max-salida MiB 11.7: tope de lo que difuzz junta de cada ejecucion de node, stdout mas stderr
+                 (default: 16). La que lo pasa muere y el caso (o la variante) va a recursos/ con
+                 causa node_salida: una salida cortada no se compara
 
   oraculo sin debug assertions (R1-H05): este binario lleva debug assertions (Cargo.toml) y el
   paquete npm del minifier no. Ante un panic, el caso se re-minifica con el mismo difuzz compilado
@@ -185,7 +188,7 @@ const SALIDA_INTERRUMPIDA: i32 = 130;
 
 /// Las opciones de `Cli::parse` que toman el argumento siguiente como valor. Las
 /// usa `pide_ayuda`; el test `opciones_con_valor_al_dia` las cruza con `Cli::parse`.
-const OPCIONES_CON_VALOR: [&str; 16] = [
+const OPCIONES_CON_VALOR: [&str; 17] = [
     "--out",
     "--timeout-ms",
     "--limit",
@@ -195,6 +198,7 @@ const OPCIONES_CON_VALOR: [&str; 16] = [
     "--indice",
     "--mem-hijo",
     "--mem-node",
+    "--max-salida",
     "--emitir",
     "--cruce",
     "--mutaciones",
@@ -305,6 +309,8 @@ struct Cli {
     mem_hijo: Option<u64>,
     /// 11.5 (I3): `--mem-node MiB`, tope de RSS de cada ejecucion de node (`subproceso::tope_node`).
     mem_node: Option<u64>,
+    /// 11.7 (I5): `--max-salida MiB`, tope de la salida que se junta de cada ejecucion de node.
+    max_salida: u64,
     /// 10.1: `--crudo`, el texto crudo contra el original impreso (`chequeo_crudo`).
     crudo: bool,
 }
@@ -365,6 +371,7 @@ impl Cli {
         let mut emitir = None;
         let mut mem_hijo = None;
         let mut mem_node = None;
+        let mut max_salida = runner::MAX_SALIDA_MIB;
         let mut crudo = false;
 
         let mut it = args.into_iter();
@@ -423,6 +430,13 @@ impl Cli {
                         return Err("--mem-node tiene que ser >= 1".into());
                     }
                     mem_node = Some(m);
+                }
+                "--max-salida" => {
+                    let v = it.next().ok_or("--max-salida necesita un valor")?;
+                    max_salida = v.parse().map_err(|_| format!("--max-salida invalido: {v}"))?;
+                    if max_salida == 0 {
+                        return Err("--max-salida tiene que ser >= 1".into());
+                    }
                 }
                 "--emitir" => emitir = Some(valor_de_ruta("--emitir", it.next().ok_or("--emitir necesita un archivo")?)?),
                 "--cruce" => cruce = Some(valor_de_ruta("--cruce", it.next().ok_or("--cruce necesita un directorio")?)?),
@@ -507,6 +521,7 @@ impl Cli {
             emitir,
             mem_hijo,
             mem_node,
+            max_salida,
             crudo,
         })
     }
@@ -543,6 +558,8 @@ struct Stats {
     recursos_memoria: usize,
     /// 11.5 (I3): una ejecucion de node del caso paso el tope de RSS (`runner::Excedido`).
     recursos_node_memoria: usize,
+    /// 11.7 (I5): una ejecucion de node del caso paso el tope de salida (`runner::Excedido`).
+    recursos_node_salida: usize,
     /// Sospechosos del lint de escrituras sobre literales (independiente del veredicto).
     lint: usize,
     same: usize,
@@ -709,6 +726,7 @@ impl Stats {
         self.recursos_timeout += o.recursos_timeout;
         self.recursos_memoria += o.recursos_memoria;
         self.recursos_node_memoria += o.recursos_node_memoria;
+        self.recursos_node_salida += o.recursos_node_salida;
         self.lint += o.lint;
         self.same += o.same;
         self.divergences += o.divergences;
@@ -768,17 +786,18 @@ impl Stats {
 
     fn line(&self) -> String {
         format!(
-            "total={} iguales={} DIVERGENCIAS={} conocidas={} conocidas_sintoma_nuevo={} PANICS={} RECURSOS={} (timeout={} memoria={} node_memoria={}) LINT={} observados={} observados_por_globals={} lanzaron={} | descartados: original={} (exit={} timeout={} senal={} invalido={} observado_sin_salida={} mudo_sin_observar={} enlace={} no_determinista={}) mudos_sin_bindings={} parse={} (esm={} otro={} script={}) codegen={} runner={} (a={} b={}) ilegibles={} panics_del_fuzzer={} | identicos={} lint_equivalentes={} cache_a_hits={}",
+            "total={} iguales={} DIVERGENCIAS={} conocidas={} conocidas_sintoma_nuevo={} PANICS={} RECURSOS={} (timeout={} memoria={} node_memoria={} node_salida={}) LINT={} observados={} observados_por_globals={} lanzaron={} | descartados: original={} (exit={} timeout={} senal={} invalido={} observado_sin_salida={} mudo_sin_observar={} enlace={} no_determinista={}) mudos_sin_bindings={} parse={} (esm={} otro={} script={}) codegen={} runner={} (a={} b={}) ilegibles={} panics_del_fuzzer={} | identicos={} lint_equivalentes={} cache_a_hits={}",
             self.total,
             self.same,
             self.divergences,
             self.known,
             self.known_drift,
             self.panics,
-            self.recursos_timeout + self.recursos_memoria + self.recursos_node_memoria,
+            self.recursos_timeout + self.recursos_memoria + self.recursos_node_memoria + self.recursos_node_salida,
             self.recursos_timeout,
             self.recursos_memoria,
             self.recursos_node_memoria,
+            self.recursos_node_salida,
             self.lint,
             self.observed,
             self.observed_globals,
@@ -1043,7 +1062,12 @@ fn main() {
     }
     // 11.5 (I3): el tope de RSS de node, con los workers reales (tambien con --en-proceso).
     let (tope_node, de_donde) = subproceso::tope_node(jobs, cli.mem_node);
-    eprintln!("memoria de node: {} MiB de RSS por ejecucion ({de_donde}); al pasarlo, a recursos/ (node_memoria)", tope_node >> 20);
+    // 11.7 (I5): y el de la salida que se junta.
+    eprintln!(
+        "topes de node: {} MiB de RSS por ejecucion ({de_donde}) y {} MiB de salida (--max-salida); al pasarlos, a recursos/ (node_memoria, node_salida)",
+        tope_node >> 20,
+        cli.max_salida
+    );
 
     eprintln!(
         "difuzz · {} casos · config {} · {jobs} workers · timeout {:?} · observador {} · backlog conocido {} · salida en {} · cache {}",
@@ -1957,7 +1981,12 @@ fn report_panic(ctx: &Ctx, stats: &mut Stats, rel: &Path, src: &str, msg: &str) 
 /// subconjuntos (`observados=`, `lanzaron=`, LINT, `--crudo`) pueden incluir lo que el caso hizo
 /// antes de pasarse.
 fn recurso_de_node(ctx: &Ctx, stats: &mut Stats, rel: &Path, src: &str, x: &runner::Excedido) {
-    stats.recursos_node_memoria += 1;
+    // 11.7 (I5): o el tope de salida.
+    if x.causa == runner::NODE_SALIDA {
+        stats.recursos_node_salida += 1;
+    } else {
+        stats.recursos_node_memoria += 1;
+    }
     reportar_excedido(ctx, rel, src, x);
 }
 
@@ -2200,6 +2229,7 @@ fn runner_de_celda(preload: &runner::Preload, worker: usize, cli: &Cli) -> runne
         .with_stubs(cli.stubs)
         .with_sensor(cli.minifier.politica().usa_sensor())
         .with_sandbox(cli.sandbox)
+        .con_tope_salida(cli.max_salida.saturating_mul(1 << 20))
 }
 
 /// b7-8: el paso `sensor` de meta.txt de un caso con el sensor omitido.
@@ -2997,9 +3027,12 @@ fn hint_lines(out: &Path, stats: &Stats) -> Vec<String> {
     if stats.lint + m.lint > 0 {
         v.push(format!("sospechosos del lint (triage a mano) en {o}/lint"));
     }
-    // 11.5 (I3): tambien node sobre su tope (las variantes suman en `m.recursos`, sin la causa).
-    if stats.recursos_timeout + stats.recursos_memoria + stats.recursos_node_memoria + m.recursos > 0 {
-        v.push(format!("minifier lento o sin memoria (timeout/memoria) o node sobre su tope (node_memoria; ver --mem-node) en {o}/recursos"));
+    // 11.5 (I3) / 11.7 (I5): tambien node sobre sus topes (las variantes suman en `m.recursos`, sin
+    // la causa).
+    if stats.recursos_timeout + stats.recursos_memoria + stats.recursos_node_memoria + stats.recursos_node_salida + m.recursos > 0 {
+        v.push(format!(
+            "minifier lento o sin memoria (timeout/memoria) o node sobre sus topes (node_memoria/node_salida; ver --mem-node y --max-salida) en {o}/recursos"
+        ));
     }
     if stats.solo_asserts_sin_div > 0 {
         v.push(format!("panics solo de debug assertions, sin divergencia, en {o}/asserts"));
@@ -3667,9 +3700,9 @@ mod tests {
             assert_eq!(es_opcion_de_difuzz(o), conocida, "{o}");
             de_difuzz += usize::from(conocida);
         }
-        // 24 opciones de Cli::parse mas --help (recontar si se agrega una; 10.1: --crudo; 11.5:
-        // --mem-node).
-        assert_eq!(de_difuzz, 25);
+        // 25 opciones de Cli::parse mas --help (recontar si se agrega una; 10.1: --crudo; 11.5:
+        // --mem-node; 11.7: --max-salida).
+        assert_eq!(de_difuzz, 26);
         assert!(es_opcion_de_difuzz("-h") && !es_opcion_de_difuzz("-x") && !es_opcion_de_difuzz("--"));
     }
 
