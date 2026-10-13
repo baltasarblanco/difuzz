@@ -722,8 +722,10 @@ Principios:
   - la profundidad, cuando la salida depende como dato de un desborde de pila **nativo** (por
     ejemplo, si `JSON.stringify` de un arreglo anidado 7000 veces lanzó o no) y el bug deja en B
     el valor de A con más pila pegado a un literal salado que el programa imprime en el **mismo
-    token** (letras con letras: `"es" + bool` imprime `estrue`; la sal cae adentro del token que
-    difiere). Hasta 10.2 bastaba con la misma línea, antes o después del valor
+    token** (letras con letras: `"es" + bool` imprime `estrue`; dígitos con dígitos: `"1" + t[i]`
+    imprime `10` contra `12`; la sal cae adentro del token que difiere; MEDIDO el de dígitos en
+    la revisión A del bloque 10, x01, `known/` en las 4 celdas de oxc). Hasta 10.2 bastaba con la
+    misma línea, antes o después del valor
     (`console.log("valor:", [0, bug.length][i])`, `console.log([true, bug][i], "es entero")`,
     `"n=".concat(...)`): la sal llegaba a la línea por la etiqueta, `sal_alcanza` la daba por
     alcanzada y el caso iba a `known/` (MEDIDO en la revisión del bloque 9, rev-b9-A s01 y s02, y
@@ -739,11 +741,21 @@ Principios:
     salar), la misma con un literal salable que no es el de la coincidencia, un booleano
     (`[true, Number.isInteger(5e-324)]`), un número (`[0, bug.length]`, el residuo de 8.1), la
     etiqueta en otra línea y la tabla en las ramas de un `?:`; con 9.2 van a `div/`. Las formas de
-    la etiqueta en la misma línea (antes, después o pegada al valor), con 10.2. El costo: un positivo de verdad (el original
+    la etiqueta en la misma línea, antes o después del valor o pegada a él en otro token (`n=0`),
+    con 10.2; pegada en el mismo token, no (arriba). El costo: un positivo de verdad (el original
     desborda y el minificado no) que imprime un número o un booleano (`console.log(rec(4800))`)
     no tiene nada que salar y va a `div/` como `profundidad_inconcluso`; con la tabla en un
     arreglo, en las ramas de un `?:`, en un `return`, en un argumento, en una plantilla o pasada
     por `toUpperCase`, sigue en `known/`. Con una recursión de JS la cobertura cambia y va a `div/`.
+  - la profundidad nativa (como arriba) cuando el valor del bug no se imprime: **elige** qué
+    literal se imprime, y A con más pila elige el mismo. `console.log(t[i] === 0 ? "cero" :
+    "otro")` con `t = [0, bug.length]` (A: `otro`; B y A con más pila: `cero`), o el mismo valor en
+    un `if` que imprime una línea que A no tiene (`if (t[i] === 0) console.log("cero")`). La sal
+    llega a `cero`, el token que difiere, y el salado también coincide: `known/` (MEDIDO en la
+    revisión A del bloque 10 con oxc 0.153.0 y el bug F, `rev-b10-A/corpus-sal` x02, x03 y x05,
+    en las 4 celdas de oxc; igual con `c9eab79`). Por la salida no se distingue de un positivo de
+    verdad (`rec(4800) ? "desbordo" : "cupo"`, que sigue en `known/`): la sal no lo puede cerrar.
+    Caso fijo `26-b102b-l01` en la aceptación, con su destino actual.
   - el sensor de uso de `global_conocido` ve lecturas (`typeof`, `window`, `globalThis.window`),
     no `"window" in globalThis` ni `hasOwnProperty`; el de `builtins`, lecturas después de pisar
     (si el programa redefine o borra la propiedad, inconcluso); el de coerción, las definiciones
@@ -831,7 +843,14 @@ Principios:
   sale también `[Function: A]` (no `[class A]`: el tipo saldría del código fuente). El constructor
   de una instancia serializada no se escribe (`inst{...}`): un nombre de clase solo visible así
   sigue sin verse. El preload es parte de la clave de la caché de A (`main.rs`, `cache_parts`):
-  las entradas viejas no se reusan.
+  las entradas viejas no se reusan. Ruido conocido en swc carril_a (H2 de la revisión A del
+  bloque 10, MEDIDO en una muestra de 300 fixtures de SWC: `swc a` y `swc b` pasan de 1 a 4
+  `div/`; en oxc, 0): SWC inlina un binding de un solo uso (`var a1 = () => ...`, `var nameless =
+  class {}`) dentro de la llamada de observación que agrega difuzz (`__difuzzObserve(["a1",
+  () => ...])`) y la función pierde el nombre inferido (`[Function: a1]` contra `[Function
+  (anonymous)]`). El único uso es el epílogo de difuzz y el programa nunca lee `.name`; si
+  `keep_fnames` de SWC promete los nombres inferidos no está decidido (como los casos de 9.1): va a
+  `div/`, la dirección segura. En el corpus completo no se midió.
 - **El sensor de violaciones atrapadas se apaga a las 256 pausas** (`MAX_PAUSAS` en el preload):
   cada excepción atrapada lo pausa y cuesta de 0,5 ms (sin marcos) a 1,4 ms (50 marcos de
   profundidad); sin tope, 10 000 excepciones atrapadas tardan de 5 a 15 s y llegan al timeout por
@@ -918,9 +937,9 @@ Sin `node` en el `PATH`, los tests que lo necesitan fallan con un mensaje claro.
 
 - **Golden de detección** (`tests/golden/`): 16 casos con bugs conocidos de oxc y swc, en 8
   celdas, más `--invocar` y `--stubs`; la clase esperada de cada caso está en `esperado.tsv`.
-- **Aceptación de los re-chequeos** (`tests/aceptacion/rechequeos/`): 175 casos que combinan un
+- **Aceptación de los re-chequeos** (`tests/aceptacion/rechequeos/`): 176 casos que combinan un
   bug real de oxc con un flag de asunción (o con la forma en que se imprime), en las 4 celdas de oxc
-  (700 comparaciones).
+  (704 comparaciones).
 - **Corpus de codegen** (`tests/codegen/`, 10.1): 142 formas propias cuya semántica depende de la
   sintaxis exacta (paréntesis, comas, directivas, ASI, claves computadas, escapes), con `--crudo`
   en 8 celdas (1136 comparaciones). Las 9 del bug de los paréntesis de oxc van a `codegen/`; los

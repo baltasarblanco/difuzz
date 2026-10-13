@@ -848,3 +848,11 @@
 26-b103-o02-export-objeto-con-fn	oxc-a-carril_a	descarte:parse_esm
 26-b103-o02-export-objeto-con-fn	oxc-b-core_defaults	igual
 26-b103-o02-export-objeto-con-fn	oxc-b-carril_a	div:Stdout
+# 10.2b (H1 de la revision A del bloque 10, x03): LIMITE CONOCIDO, no un positivo. El valor del bug F de oxc elige que
+# literal de un ?: se imprime, y A con mas pila elige el mismo: la sal llega al token que difiere y confirma. known/ con
+# c9eab79 y con el tope de 10.2b (MEDIDO), aunque B ejecuta el bug (README, Limites conocidos). Si un cambio lo manda a
+# div/, actualizar esto y el README.
+26-b102b-l01-rama-elegida-por-bug	oxc-a-core_defaults	known
+26-b102b-l01-rama-elegida-por-bug	oxc-a-carril_a	known
+26-b102b-l01-rama-elegida-por-bug	oxc-b-core_defaults	known
+26-b102b-l01-rama-elegida-por-bug	oxc-b-carril_a	known
