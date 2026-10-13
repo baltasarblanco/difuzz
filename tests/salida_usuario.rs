@@ -578,6 +578,8 @@ fn indice_con_escrituras_perdidas_no_se_publica() {
     let (r, e, corrida) = correr("out1");
     assert_eq!(r, Some(1), "{e}");
     assert!(e.contains("no pude crear el indice"), "{e}");
+    // 10.2c (N2): el mensaje final no le atribuye al reporter en <out> el indice que no se creo.
+    assert!(!e.contains("el reporter no pudo escribir") && e.contains("una es el indice, que no se pudo crear (--indice)"), "{e}");
     assert!(corrida.starts_with("estado: incompleta\n") && corrida.contains("\nindice_no_creado: "), "{corrida}");
     assert!(indice(".parcial").is_file() && indice("").is_file());
     let t = cruce(&b);

@@ -1204,6 +1204,7 @@ fn main() {
     if lost > 0 {
         notas.push(format!("escrituras_perdidas: {lost}"));
     }
+    let sin_indice = indice_perdido.is_some();
     notas.extend(indice_perdido);
     if let Some(c) = &cambiado {
         notas.push(format!("binario_cambiado: {c}"));
@@ -1211,7 +1212,14 @@ fn main() {
     let entera = lost == 0 && stats.total == total && cambiado.is_none();
     corrida.cerrar(if cancelled { "interrumpida" } else if entera { "completa" } else { "incompleta" }, &notas);
     if lost > 0 && !cancelled {
-        eprintln!("el reporter no pudo escribir {lost} archivos en {}: la corrida no es confiable", cell_out.display());
+        // 10.2c (N2 de la revision B del bloque 10, vuelta 2): las escrituras perdidas no son solo
+        // del reporter en <out>/<celda>: tambien el indice (--indice), sus lineas y las tablas. El
+        // mensaje no da un lugar que puede ser el equivocado; los avisos de arriba dicen cuales.
+        let indice = if sin_indice { "; una es el indice, que no se pudo crear (--indice)" } else { "" };
+        eprintln!(
+            "se perdieron {lost} escrituras (ver los avisos de arriba y escrituras_perdidas en {}){indice}: la corrida no es confiable",
+            cell_out.join(corrida::ARCHIVO).display()
+        );
         drop(preload);
         std::process::exit(SALIDA_ERROR);
     }
