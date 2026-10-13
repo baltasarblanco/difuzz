@@ -1024,6 +1024,19 @@ caso sigue. Al arrancar, difuzz imprime los dos topes (`topes de node: ...`).
   SIGKILL, ni a los que hicieron `setsid` (el subreaper los mata después de cada ejecución, si
   difuzz sigue vivo).
 
+Límites que quedan (11.2b, de las revisiones de 11b):
+
+- El kind de un B que no termina dentro de los topes es `ExitStatus` (lo mató difuzz), aunque sin
+  topes habría sido `Timeout` (un bucle que imprime) o `Stdout` (un B que escribe o reserva mucho y
+  termina): la salida cortada no se compara. Si con los topes mayores termina, el kind es el de
+  siempre.
+- `node --check` (el chequeo de que node acepta un texto) y la prueba de `setpriv` al arrancar
+  corren sin topes ni `PR_SET_PDEATHSIG`: son cortos y no ejecutan el programa.
+- Con setpriv queda una ventana de microsegundos entre su exec y su `prctl` en la que, si difuzz
+  muere, node no recibe la señal.
+- Un caso en `recursos/` por memoria no se reproduce corriéndolo suelto con los defaults (el tope
+  depende de los workers): hay que pasar el `--mem-node` que dice su `meta.txt`.
+
 ## Códigos de salida
 
 | código | significado |
