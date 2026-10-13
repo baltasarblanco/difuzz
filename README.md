@@ -492,7 +492,15 @@ relativa al corpus, sin `input.js` y con `/` cambiado por `__` (`terser/compress
 - **`--indice DIR` y `--cruce DIR`.** Con `--indice`, cada celda deja `DIR/index-<celda>.tsv`
   al terminar (una corrida interrumpida deja intacto el índice anterior). `difuzz --cruce DIR` lee esos índices y, sin correr
   nada, imprime una tabla caso × celda con el `kind` de cada hallazgo (`S`=Stdout,
-  `N`=ThrowNew, `P`=panic, ...) y los totales por celda.
+  `N`=ThrowNew, `P`=panic, ...) y los totales por celda. Solo una corrida entera publica su
+  índice (10.2b): si terminó con escrituras perdidas (también del índice mismo, de
+  `known-sintomas.tsv` o de `lint-triage.tsv`) o con casos sin contar, o si el índice no se pudo
+  crear, el índice anterior queda como vigente, la corrida sale con 1 y `incompleta`, y
+  `--cruce` lo avisa al final (`<celda>: incompleta (...)`, marca `index-<celda>.tsv.parcial`).
+  Si el directorio del índice no se puede escribir ni siquiera para la marca, `--cruce` muestra
+  el índice anterior sin aviso: la corrida lo dice por stderr y en `CORRIDA.txt`
+  (`indice_no_creado:`). `--cruce` también avisa las líneas ilegibles de un índice (una
+  escritura cortada).
 
 ## Cómo leer un hallazgo
 

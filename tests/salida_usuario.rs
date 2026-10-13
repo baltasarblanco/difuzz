@@ -543,3 +543,59 @@ fn pipe_cerrado_no_pierde_la_divergencia() {
     }
     std::fs::remove_dir_all(&b).unwrap();
 }
+
+/// 10.2b (B-H1 y B-H2 de la revision B del bloque 10): una corrida con `--indice` que pierde
+/// escrituras no publica un indice como completo. (a) El indice no se puede crear (el `.tmp` de la
+/// celda es un directorio): antes rc 0, `completa` y `--cruce` mostraba la corrida anterior sin
+/// aviso. (b) `known-sintomas.tsv` no se puede guardar (es un directorio): antes rc 0 y `completa`
+/// y el indice se publicaba. Ahora rc 1, `incompleta`, el indice de la corrida queda `.parcial` y
+/// `--cruce` avisa.
+#[test]
+fn indice_con_escrituras_perdidas_no_se_publica() {
+    if !test_util::requiere_node() {
+        return;
+    }
+    let b = base("indice-perdido");
+    let corpus = b.join("corpus");
+    let o1 = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/golden/corpus/oxc-o1/input.js");
+    caso(&corpus, "o1", &std::fs::read(o1).unwrap());
+    let (ix, celda) = (b.join("ix"), "oxc+carril_a+tal_cual");
+    let correr = |out: &str| {
+        let out = b.join(out);
+        let o = difuzz(&b, &[corpus.to_str().unwrap(), "--out", out.to_str().unwrap(), "--indice", ix.to_str().unwrap(), "--no-cache", "--jobs", "1"]);
+        let corrida = std::fs::read_to_string(out.join(celda).join("CORRIDA.txt")).unwrap_or_default();
+        (rc(&o), err(&o), corrida)
+    };
+    let indice = |suf: &str| ix.join(format!("index-{celda}.tsv{suf}"));
+    // Una corrida completa: el indice vigente.
+    let (r, e, corrida) = correr("out0");
+    assert_eq!(r, Some(0), "{e}");
+    assert!(corrida.starts_with("estado: completa\n") && indice("").is_file(), "{corrida}");
+    let cruce = |b: &Path| String::from_utf8_lossy(&difuzz(b, &["--cruce", ix.to_str().unwrap()]).stdout).into_owned();
+    assert!(!cruce(&b).contains("incompleta"));
+    // (a) el indice no se puede crear.
+    std::fs::create_dir_all(indice(".tmp").join("x")).unwrap();
+    let (r, e, corrida) = correr("out1");
+    assert_eq!(r, Some(1), "{e}");
+    assert!(e.contains("no pude crear el indice"), "{e}");
+    assert!(corrida.starts_with("estado: incompleta\n") && corrida.contains("\nindice_no_creado: "), "{corrida}");
+    assert!(indice(".parcial").is_file() && indice("").is_file());
+    let t = cruce(&b);
+    assert!(t.contains(&format!("\n{celda}: incompleta (escrituras perdidas, casos sin contar o sin indice)\n")), "{t}");
+    std::fs::remove_dir_all(indice(".tmp")).unwrap();
+    // Una corrida completa borra la marca.
+    let (r, e, _) = correr("out2");
+    assert_eq!(r, Some(0), "{e}");
+    assert!(!indice(".parcial").exists() && !cruce(&b).contains("incompleta"));
+    // (b) known-sintomas.tsv no se puede guardar: el indice de la corrida no reemplaza al vigente.
+    let vigente = std::fs::read_to_string(indice("")).unwrap();
+    std::fs::create_dir_all(b.join("out3").join(celda).join("known-sintomas.tsv/x")).unwrap();
+    let (r, e, corrida) = correr("out3");
+    assert_eq!(r, Some(1), "{e}");
+    assert!(e.contains("no pude guardar known-sintomas.tsv"), "{e}");
+    assert!(corrida.starts_with("estado: incompleta\n") && corrida.contains("\nescrituras_perdidas: 1\n"), "{corrida}");
+    assert!(indice(".parcial").is_file() && !indice(".tmp").exists());
+    assert_eq!(std::fs::read_to_string(indice("")).unwrap(), vigente);
+    assert!(cruce(&b).contains("incompleta (escrituras perdidas"));
+    std::fs::remove_dir_all(&b).unwrap();
+}

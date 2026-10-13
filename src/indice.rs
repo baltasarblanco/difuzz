@@ -51,6 +51,7 @@ impl Index {
         self.file.lock().unwrap_or_else(|e| e.into_inner()).flush()?;
         std::fs::rename(&self.tmp, &self.dest)?;
         let _ = std::fs::remove_file(incompleta_of(&self.dest));
+        let _ = std::fs::remove_file(parcial_of(&self.dest));
         Ok(())
     }
 
@@ -60,6 +61,30 @@ impl Index {
     pub fn abandon(&self) {
         if std::fs::rename(&self.tmp, incompleta_of(&self.dest)).is_err() {
             let _ = std::fs::remove_file(&self.tmp);
+        }
+    }
+
+    /// 10.2b (B-H2 / A-H7 de las revisiones del bloque 10): la corrida termino, pero con escrituras
+    /// perdidas o casos sin contar: el indice (al que le pueden faltar filas) no reemplaza al
+    /// anterior; queda como `index-<celda>.tsv.parcial`, que `--cruce` avisa como incompleta.
+    pub fn abandon_parcial(&self) {
+        if std::fs::rename(&self.tmp, parcial_of(&self.dest)).is_err() {
+            let _ = std::fs::remove_file(&self.tmp);
+        }
+    }
+
+    /// Como cerrar el indice al final de la corrida (`oracle::Reporter::finish`).
+    pub fn cerrar(&self, cierre: Cierre) -> std::io::Result<()> {
+        match cierre {
+            Cierre::Completa => self.commit(),
+            Cierre::Interrumpida => {
+                self.abandon();
+                Ok(())
+            }
+            Cierre::Parcial => {
+                self.abandon_parcial();
+                Ok(())
+            }
         }
     }
 
@@ -77,6 +102,25 @@ impl Index {
     }
 }
 
+/// 10.2b: como termino la corrida, para el indice.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Cierre {
+    /// Entera: el indice nuevo reemplaza al anterior.
+    Completa,
+    /// SIGINT/SIGTERM o el binario cambio (R1-H18): `.incompleta`.
+    Interrumpida,
+    /// Termino con escrituras perdidas o casos sin contar: `.parcial`.
+    Parcial,
+}
+
+/// 10.2b (B-H1 de la revision B del bloque 10): `Index::create` fallo, asi que esta corrida no
+/// deja indice. La marca `index-<celda>.tsv.parcial` hace que `--cruce` avise que la ultima
+/// corrida de la celda no lo dejo (la tabla sigue con el indice de la anterior, si hay). Si
+/// tampoco se puede escribir la marca (el directorio no se puede escribir), `Err`.
+pub fn marcar_parcial(dir: &Path, cell: &str) -> std::io::Result<()> {
+    std::fs::write(parcial_of(&file_of(dir, cell)), format!("{HEADER}\n# sin indice: no se pudo crear\n"))
+}
+
 fn file_of(dir: &Path, cell: &str) -> PathBuf {
     dir.join(format!("index-{cell}.tsv"))
 }
@@ -85,8 +129,13 @@ fn incompleta_of(dest: &Path) -> PathBuf {
     PathBuf::from(format!("{}.incompleta", dest.display()))
 }
 
+fn parcial_of(dest: &Path) -> PathBuf {
+    PathBuf::from(format!("{}.parcial", dest.display()))
+}
+
 /// R2-H05: celdas cuya ultima corrida no termino: `.incompleta` (cortada por
 /// SIGINT/SIGTERM) o `.tmp` (en curso, o muerta sin cierre: SIGKILL, abort).
+/// 10.2b: `.parcial` (termino con escrituras perdidas o casos sin contar, o sin indice).
 fn sin_terminar(dir: &Path) -> Vec<(String, &'static str)> {
     let mut v: Vec<(String, &'static str)> = std::fs::read_dir(dir)
         .into_iter()
@@ -97,6 +146,8 @@ fn sin_terminar(dir: &Path) -> Vec<(String, &'static str)> {
             let cell = name.strip_prefix("index-")?;
             if let Some(c) = cell.strip_suffix(".tsv.incompleta") {
                 Some((c.to_string(), "interrumpida"))
+            } else if let Some(c) = cell.strip_suffix(".tsv.parcial") {
+                Some((c.to_string(), "incompleta (escrituras perdidas, casos sin contar o sin indice)"))
             } else {
                 cell.strip_suffix(".tsv.tmp").map(|c| (c.to_string(), "en curso o muerta sin cierre"))
             }
@@ -113,9 +164,15 @@ struct Row {
     kind: String,
 }
 
-fn read_rows(dir: &Path) -> std::io::Result<(Vec<String>, Vec<Row>)> {
+/// 10.2b (B-H2): tambien las lineas que no tienen los 5 campos (una escritura cortada a la mitad),
+/// por archivo: antes se descartaban en silencio.
+/// Las celdas, las filas y las lineas ilegibles por archivo.
+type Leido = (Vec<String>, Vec<Row>, Vec<(String, usize)>);
+
+fn read_rows(dir: &Path) -> std::io::Result<Leido> {
     let mut cells = BTreeSet::new();
     let mut rows = Vec::new();
+    let mut ilegibles = Vec::new();
     for entry in std::fs::read_dir(dir)?.flatten() {
         let name = entry.file_name().to_string_lossy().into_owned();
         let Some(cell) = name.strip_prefix("index-").and_then(|n| n.strip_suffix(".tsv")) else {
@@ -123,6 +180,7 @@ fn read_rows(dir: &Path) -> std::io::Result<(Vec<String>, Vec<Row>)> {
         };
         cells.insert(cell.to_string());
         let text = std::fs::read_to_string(entry.path())?;
+        let mut malas = 0;
         for line in text.lines().filter(|l| !l.starts_with('#')) {
             let f: Vec<&str> = line.split('\t').collect();
             if let [case, cell, dest, kind, _hash] = f[..] {
@@ -132,9 +190,15 @@ fn read_rows(dir: &Path) -> std::io::Result<(Vec<String>, Vec<Row>)> {
                     dest: dest.into(),
                     kind: kind.into(),
                 });
+            } else {
+                malas += 1;
             }
         }
+        if malas > 0 {
+            ilegibles.push((name, malas));
+        }
     }
+    ilegibles.sort();
     if cells.is_empty() {
         return Err(std::io::Error::new(
             std::io::ErrorKind::NotFound,
@@ -146,7 +210,7 @@ fn read_rows(dir: &Path) -> std::io::Result<(Vec<String>, Vec<Row>)> {
     // backend intercambiable: antes se cortaba en el primer '+' y salia al reves.
     let mut cells: Vec<String> = cells.into_iter().collect();
     cells.sort_by_key(|c| Cell::parse(c).key());
-    Ok((cells, rows))
+    Ok((cells, rows, ilegibles))
 }
 
 /// M24: `backend+preset+forma[+carril_b][+invocar][+mutN]`. Una celda vieja
@@ -250,7 +314,7 @@ fn kind_letter(kind: &str) -> char {
 /// puede cambiar entre celdas, p. ej. `delete_*` es Stdout en A y ThrowNew en
 /// B). Al final, cuantos hallazgos hay por celda y destino.
 pub fn cruce(dir: &Path) -> std::io::Result<String> {
-    let (cells, rows) = match read_rows(dir) {
+    let (cells, rows, ilegibles) = match read_rows(dir) {
         // R2-H05: sin ninguna corrida completa, el error dice cuales se cortaron.
         Err(e) if e.kind() == std::io::ErrorKind::NotFound && !sin_terminar(dir).is_empty() => {
             let v: Vec<String> = sin_terminar(dir).into_iter().map(|(c, e)| format!("{c} ({e})")).collect();
@@ -338,6 +402,12 @@ pub fn cruce(dir: &Path) -> std::io::Result<String> {
         for (c, estado) in pendientes {
             let nota = if cells.contains(&c) { "" } else { " (sin corrida completa: no esta en la tabla)" };
             out.push_str(&format!("{c}: {estado}{nota}\n"));
+        }
+    }
+    if !ilegibles.is_empty() {
+        out.push_str("\n=== lineas ilegibles (no tienen los 5 campos: una escritura cortada?): la tabla no las cuenta\n");
+        for (archivo, n) in ilegibles {
+            out.push_str(&format!("{archivo}: {n}\n"));
         }
     }
     Ok(out)
@@ -511,5 +581,41 @@ mod tests {
         let antes = crate::oracle::write_errors();
         ix.record("caso", "div", "Stdout", 1);
         assert!(crate::oracle::write_errors() > antes);
+    }
+
+    /// 10.2b (B-H2 de la revision B del bloque 10): un cierre `Parcial` no reemplaza al indice
+    /// vigente y `--cruce` lo avisa; una linea cortada se cuenta como ilegible (antes se
+    /// descartaba en silencio); una corrida completa borra la marca.
+    #[test]
+    fn cierre_parcial_y_lineas_ilegibles() {
+        let d = std::env::temp_dir().join(format!("difuzz-test-indice-parcial-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        let c = "oxc+carril_a+tal_cual";
+        let a = Index::create(&d, c).unwrap();
+        a.record("viejo", "div", "Stdout", 1);
+        a.cerrar(Cierre::Completa).unwrap();
+        drop(a);
+        let b = Index::create(&d, c).unwrap();
+        b.record("nuevo", "div", "Stdout", 2);
+        b.cerrar(Cierre::Parcial).unwrap();
+        drop(b);
+        let t = cruce(&d).unwrap();
+        assert!(t.contains("viejo") && !t.contains("nuevo"), "{t}");
+        assert!(t.contains(&format!("\n{c}: incompleta (escrituras perdidas, casos sin contar o sin indice)\n")), "{t}");
+        // Una linea cortada a la mitad en el indice vigente.
+        let mut f = std::fs::OpenOptions::new().append(true).open(d.join(format!("index-{c}.tsv"))).unwrap();
+        f.write_all(b"cortad").unwrap();
+        drop(f);
+        let t = cruce(&d).unwrap();
+        assert!(t.contains("\n=== lineas ilegibles") && t.contains(&format!("\nindex-{c}.tsv: 1\n")), "{t}");
+        // `marcar_parcial` (el indice no se pudo crear) y despues una corrida completa.
+        std::fs::remove_file(d.join(format!("index-{c}.tsv.parcial"))).unwrap();
+        marcar_parcial(&d, c).unwrap();
+        assert!(cruce(&d).unwrap().contains(&format!("{c}: incompleta")));
+        let e = Index::create(&d, c).unwrap();
+        e.cerrar(Cierre::Completa).unwrap();
+        drop(e);
+        assert!(!cruce(&d).unwrap().contains("incompleta"));
+        std::fs::remove_dir_all(&d).unwrap();
     }
 }

@@ -933,10 +933,25 @@ fn main() {
         .with_kind(cli.kind)
         .with_invocar(cli.invocar)
         .with_versions(&cache::node_version(), cli.minifier.version());
+    // 10.2b (B-H1 de la revision B del bloque 10): un `--indice` que no se puede crear pierde todas
+    // las filas de la corrida: cuenta como escritura perdida (se suma despues del chequeo de --out
+    // de abajo, que si no cortaria la corrida) y deja la marca `.parcial` para que `--cruce` avise
+    // que la tabla de esta celda es de una corrida anterior. Antes: rc 0, `completa` y el indice
+    // viejo como si fuera el actual.
+    let mut indice_perdido = None;
     if let Some(dir) = &cli.indice {
         match indice::Index::create(dir, &cell) {
             Ok(ix) => reporter = reporter.with_index(ix),
-            Err(e) => eprintln!("no pude crear el indice en {}: {e}", dir.display()),
+            Err(e) => {
+                eprintln!("no pude crear el indice en {}: {e}", dir.display());
+                if let Err(m) = indice::marcar_parcial(dir, &cell) {
+                    eprintln!(
+                        "indice: tampoco pude dejar la marca .parcial ({m}): si hay un indice anterior de {cell} en {}, --cruce lo va a mostrar sin aviso",
+                        dir.display()
+                    );
+                }
+                indice_perdido = Some(format!("indice_no_creado: {}: {e}", dir.display()));
+            }
         }
     }
     // Todo lo que cambia la ejecucion de A ademas del texto; la celda no: es
@@ -972,6 +987,9 @@ fn main() {
         // exit no corre los Drop: el preload (y su directorio) se sueltan a mano.
         drop(preload);
         std::process::exit(SALIDA_ERROR);
+    }
+    if indice_perdido.is_some() {
+        oracle::write_failed();
     }
     let triage = triage::Triage::load(&cli.out);
     let known = known::Known::load(
@@ -1094,13 +1112,26 @@ fn main() {
     if late > 0 {
         eprintln!("subreaper: mate {late} procesos huerfanos al final de la corrida");
     }
-    reporter.finish(!cancelled && cambiado.is_none());
+    // 10.2b (A-H7 / B-H2 de las revisiones del bloque 10): las tablas se guardan antes de cerrar
+    // el indice, y si no se pueden guardar es una escritura perdida (antes solo stderr). El indice
+    // se publica solo si la corrida es entera (sin escrituras perdidas y con todos los casos
+    // contados, como `entera` abajo); si no, queda como `.parcial` y `--cruce` lo avisa. Antes se
+    // publicaba con las filas que faltaran.
     if let Err(e) = known.save() {
         eprintln!("no pude guardar known-sintomas.tsv: {e}");
+        oracle::write_failed();
     }
     if let Err(e) = triage.save() {
         eprintln!("no pude guardar lint-triage.tsv: {e}");
+        oracle::write_failed();
     }
+    reporter.finish(if cancelled || cambiado.is_some() {
+        indice::Cierre::Interrumpida
+    } else if oracle::write_errors() == errors_before && stats.total == total {
+        indice::Cierre::Completa
+    } else {
+        indice::Cierre::Parcial
+    });
     print_hint(&cell_out, &stats);
     // 9.4: las lineas de stats van a stdout juntas y sin panic (`a_stdout`); antes, println!.
     let mut so = String::new();
@@ -1173,6 +1204,7 @@ fn main() {
     if lost > 0 {
         notas.push(format!("escrituras_perdidas: {lost}"));
     }
+    notas.extend(indice_perdido);
     if let Some(c) = &cambiado {
         notas.push(format!("binario_cambiado: {c}"));
     }

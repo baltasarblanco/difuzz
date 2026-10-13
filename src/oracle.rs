@@ -420,18 +420,15 @@ impl Reporter {
         }
     }
 
-    /// M23: cierra el indice (si hay): `complete` lo publica, si no lo descarta.
-    pub fn finish(&self, complete: bool) {
+    /// M23: cierra el indice (si hay): `Completa` lo publica; si no, queda al costado (10.2b:
+    /// `.incompleta` si se corto, `.parcial` si termino con escrituras perdidas o casos sin contar).
+    pub fn finish(&self, cierre: crate::indice::Cierre) {
         if let Some(ix) = &self.index {
-            if complete {
-                if let Err(e) = ix.commit() {
-                    eprintln!("indice: no pude cerrar: {e}");
-                    // 10.4 (M1 de rev-b9-A): queda el indice anterior y `--cruce` lo muestra sin
-                    // aviso; antes la corrida cerraba `completa` y con 0. `main` lo cuenta despues.
-                    write_failed();
-                }
-            } else {
-                ix.abandon();
+            if let Err(e) = ix.cerrar(cierre) {
+                eprintln!("indice: no pude cerrar: {e}");
+                // 10.4 (M1 de rev-b9-A): queda el indice anterior y `--cruce` lo muestra sin
+                // aviso; antes la corrida cerraba `completa` y con 0. `main` lo cuenta despues.
+                write_failed();
             }
         }
     }
@@ -1124,7 +1121,7 @@ mod tests {
         // El .tmp del indice ya no esta: el rename del cierre falla.
         std::fs::remove_file(d.join("indice/index-celda.tsv.tmp")).unwrap();
         let antes = write_errors();
-        r.finish(true);
+        r.finish(crate::indice::Cierre::Completa);
         assert!(write_errors() > antes, "el cierre fallido del indice no conto");
         if std::path::Path::new("/dev/full").exists() {
             let full = std::fs::OpenOptions::new().write(true).open("/dev/full").unwrap();
@@ -1150,7 +1147,7 @@ mod tests {
         let rep = Reporter::new(&d, "celda".into(), "//preload").with_index(ix);
         let _borrados = con_nombres_crudos(false);
         rep.codegen(std::path::Path::new("c/input.js"), "crudo", "orig", &r, &a, Kind::Stdout, "-");
-        rep.finish(true);
+        rep.finish(crate::indice::Cierre::Completa);
         let crudo = {
             let _c = con_nombres_crudos(true);
             symptom(Kind::Stdout, &r, &a)
