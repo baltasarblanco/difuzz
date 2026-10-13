@@ -2642,7 +2642,7 @@ mod tests {
             return;
         }
         let preload = Preload::write_tagged("tope-salida").unwrap();
-        let r = Runner::new(&preload, crate::test_util::id_runner(), Duration::from_secs(60)).con_tope_salida(1 << 20).sin_sensor();
+        let r = Runner::new(&preload, crate::test_util::id_runner(), Duration::from_secs(60)).con_tope_salida(1 << 20).with_sensor(false);
         // Exactamente 1 MiB (512 KiB por cada pipe): entra.
         let justo = "const s = \"x\".repeat(512 * 1024 - 1) + \"\\n\";\nprocess.stdout.write(s);\nprocess.stderr.write(s);\n";
         let e = r.run(justo);
@@ -2678,7 +2678,7 @@ mod tests {
             return;
         }
         let preload = Preload::write_tagged("ctl-tope").unwrap();
-        let r = Runner::new(&preload, crate::test_util::id_runner(), Duration::from_secs(60)).sin_sensor();
+        let r = Runner::new(&preload, crate::test_util::id_runner(), Duration::from_secs(60)).with_sensor(false);
         let js = "console.log(\"antes\");\nthrow new Error(\"x\".repeat(8 << 20));\n";
         let e = r.run(js);
         assert!(e.threw(), "{:?} {}", e.status, e.ctl.len());
@@ -2686,7 +2686,7 @@ mod tests {
         assert!(exc.len() < 70 * 1024 && exc.contains("[... difuzz recorto "), "{}", exc.len());
         assert!(e.ctl.len() < 80 * 1024, "{}", e.ctl.len());
         // Con un tope de salida de 1 KiB, la linea `exc` (64 KiB) ya lo pasa.
-        let chico = Runner::new(&preload, crate::test_util::id_runner(), Duration::from_secs(60)).sin_sensor().con_tope_salida(1 << 10);
+        let chico = Runner::new(&preload, crate::test_util::id_runner(), Duration::from_secs(60)).with_sensor(false).con_tope_salida(1 << 10);
         let Err(p) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| chico.run(js))) else {
             panic!("el canal tenia que pasar el tope");
         };
@@ -2811,7 +2811,7 @@ mod tests {
             return;
         }
         let preload = Preload::write_tagged("pico-node").unwrap();
-        let r = Runner::new(&preload, crate::test_util::id_runner(), Duration::from_secs(60)).sin_sensor().con_tope_rss(256 << 20);
+        let r = Runner::new(&preload, crate::test_util::id_runner(), Duration::from_secs(60)).with_sensor(false).con_tope_rss(256 << 20);
         let hijo = "const out = require(\"child_process\").execFileSync(process.execPath, [\"-e\", \"const b = Buffer.alloc(400 << 20, 1); console.log(b.length > 0)\"]);\nconsole.log(String(out).trim());\n";
         let e = r.run(hijo);
         assert_eq!((e.status, e.stdout.as_str()), (Status::Exited(0), "true\n"), "{}", e.stderr);

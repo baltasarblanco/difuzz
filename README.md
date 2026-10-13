@@ -1012,7 +1012,9 @@ caso sigue. Al arrancar, difuzz imprime los dos topes (`topes de node: ...`).
   tope: el mensaje y el stack de un throw sin atrapar (la línea `exc`, que no se compara y va a
   `a.exc`/`b.exc`) se recortan a 64 Ki caracteres, y un canal que pesa más que `--max-salida` no se
   lee y cuenta como pasarse de salida (antes, `throw new Error("x".repeat(256 << 20))` llevaba a
-  difuzz a 790 MB).
+  difuzz a 790 MB). Una entrada de la caché de A que pesa más que `--max-salida` (grabada por un binario sin
+  tope o con un tope mayor) no se lee: A corre en fresco con los topes de esta corrida (11.2b; si
+  no, un A cacheado más grande que el tope se compararía con un B que sí lo pasa).
 - **node no sobrevive a difuzz.** Cada node muere con SIGKILL si muere difuzz, también de golpe
   (SIGKILL, el OOM killer): `PR_SET_PDEATHSIG`, puesto con `setpriv --pdeathsig KILL` de
   util-linux si está en el `PATH` (si no, entre fork y exec, que cuesta más: +8 % de pared medido

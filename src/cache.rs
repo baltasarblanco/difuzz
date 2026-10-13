@@ -41,6 +41,10 @@ use std::time::Duration;
 use crate::known::fnv1a;
 use crate::runner::{Exec, Runner, Status};
 
+/// 11.2b (rev-b11b-B H4): lo que una entrada puede pesar ademas de la salida y el texto (encabezado,
+/// canal de control, con la linea `exc` recortada a 64 Ki caracteres por el preload).
+const MARGEN_ENTRADA: u64 = 256 << 10;
+
 /// M10: v2 guarda tambien el canal de control (`Exec::ctl`).
 const MAGIC: &str = "difuzz-cache-a v2";
 
@@ -92,9 +96,16 @@ impl CacheA {
     /// hubo que ejecutar. M3: el `bool` dice si A salio de la cache (hit), para
     /// que una divergencia se confirme corriendo A en fresco.
     /// M28: el tag del runner (pasada observada del carril B) entra en la clave.
+    /// 11.2b (rev-b11b-B H4): una entrada que pesa mas que el tope de salida del runner (mas el texto
+    /// y `MARGEN_ENTRADA`) no se lee: es un miss y A corre en fresco, con los topes de esta corrida.
+    /// Antes una entrada grabada sin tope (o con un `--max-salida` mayor) se cargaba entera.
     pub fn run(&self, runner: &Runner, js: &str, hits: &mut usize) -> (Exec, bool) {
         let tag = runner.cache_tag();
-        if let Some(a) = self.get_tagged(tag, js) {
+        let limite = match runner.topes().1 {
+            0 => None,
+            t => Some(t.saturating_add(js.len() as u64).saturating_add(MARGEN_ENTRADA)),
+        };
+        if let Some(a) = self.get_tagged(tag, js, limite) {
             *hits += 1;
             return (a, true);
         }
@@ -150,11 +161,16 @@ impl CacheA {
 
     #[cfg(test)]
     pub fn get(&self, js: &str) -> Option<Exec> {
-        self.get_tagged("", js)
+        self.get_tagged("", js, None)
     }
 
-    fn get_tagged(&self, tag: &str, js: &str) -> Option<Exec> {
-        let text = std::fs::read_to_string(self.entry(tag, js)?).ok()?;
+    /// 11.2b: `limite`, el tamano maximo de entrada que se lee (bytes); mas grande es un miss.
+    fn get_tagged(&self, tag: &str, js: &str, limite: Option<u64>) -> Option<Exec> {
+        let path = self.entry(tag, js)?;
+        if limite.is_some_and(|l| std::fs::metadata(&path).is_ok_and(|m| m.len() > l)) {
+            return None;
+        }
+        let text = std::fs::read_to_string(path).ok()?;
         decode(&text, &self.oracle_for(tag), js)
     }
 
@@ -336,6 +352,31 @@ mod tests {
     }
 
     /// M3: una entrada envenenada queda como miss y no se vuelve a escribir.
+    /// 11.2b (rev-b11b-B H4): una entrada que pesa mas que el tope de salida del runner es un miss
+    /// (A corre en fresco, con los topes de esta corrida); con un tope mayor, la misma entrada es un hit.
+    #[test]
+    fn entrada_mas_grande_que_el_tope_es_miss() {
+        use crate::runner::Preload;
+        if !crate::test_util::requiere_node() {
+            return;
+        }
+        let d = tmp("tope");
+        let c = CacheA::with_oracle(Some(d.clone()), "o".into());
+        let js = "console.log(1);\n";
+        // Una entrada vieja (sin tope): 2 MiB de stdout que la corrida fresca no da.
+        c.put(js, &exec(&"x".repeat(2 << 20)));
+        let preload = Preload::write_tagged("cache-tope").unwrap();
+        let runner = |tope: u64| Runner::new(&preload, crate::test_util::id_runner(), Duration::from_secs(20)).with_sensor(false).con_tope_salida(tope);
+        let mut hits = 0;
+        let (a, cacheado) = c.run(&runner(1 << 20), js, &mut hits);
+        assert_eq!((cacheado, hits, a.stdout.as_str()), (false, 0, "1\n"));
+        // La corrida fresca (que entra en el tope) reemplaza la entrada.
+        c.put(js, &exec(&"x".repeat(2 << 20)));
+        let (a, cacheado) = c.run(&runner(16 << 20), js, &mut hits);
+        assert_eq!((cacheado, hits, a.stdout.len()), (true, 1, 2 << 20));
+        std::fs::remove_dir_all(&d).unwrap();
+    }
+
     #[test]
     fn lapida_es_miss_y_put_no_la_pisa() {
         let d = tmp("lapida");
