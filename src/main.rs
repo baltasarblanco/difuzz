@@ -1958,7 +1958,11 @@ fn pasada_bloques(
 /// para meta.txt. Devuelve si el lint puede correr (estan los dos lados).
 fn contar_analisis(stats: &mut Stats, analisis: checks::Analisis) -> bool {
     stats.nota_pasada = analisis.nota();
-    if analisis.perdido() {
+    // 10.2b (A-H8 de la revision A del bloque 10): un fallo de difuzz no es un texto que SWC no
+    // parsea: va en `casos_con_fallo=` (A6), no en `analisis_swc perdidos=`.
+    if analisis.solo_fallido() {
+        // nada: lo cuenta `fallos_analisis`
+    } else if analisis.perdido() {
         stats.analisis_perdido += 1;
     } else if !analisis.limpio() {
         stats.analisis_recuperado += 1;

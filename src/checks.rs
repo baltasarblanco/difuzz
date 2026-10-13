@@ -585,7 +585,18 @@ impl Analisis {
         .into_iter()
         .flatten()
         .collect();
-        Some(format!("analisis con el parser de SWC (R1-H13): {}", partes.join("; ")))
+        // 10.2b (A-H8 de la revision A del bloque 10): si lo unico que no fue limpio es un fallo
+        // de difuzz, la nota no habla del parser de SWC.
+        let cabecera = if self.solo_fallido() { "analisis de difuzz fallido (A6/R1-H12)" } else { "analisis con el parser de SWC (R1-H13)" };
+        Some(format!("{cabecera}: {}", partes.join("; ")))
+    }
+
+    /// 10.2b (A-H8): lo que no fue limpio es todo `Fallido` (fallo el analisis de difuzz, no el
+    /// parser). `main::contar_analisis` no lo suma a `analisis_swc perdidos=`: ya esta en
+    /// `analisis de difuzz casos_con_fallo=`.
+    pub fn solo_fallido(&self) -> bool {
+        let ps = [self.fuente, self.original, self.minificado];
+        ps.contains(&Parseo::Fallido) && ps.iter().all(|p| matches!(p, Parseo::Limpio | Parseo::Fallido))
     }
 
     /// Para el protocolo del hijo de analisis (operacion `checks`, b2-int):
@@ -734,5 +745,8 @@ mod tests {
         assert!(!n.contains("no lo parsea") && n.contains("fallo el analisis de difuzz (ver analisis_de_difuzz_fallo)"), "{n}");
         assert!(f.perdido() && !f.lint_valido() && !f.limpio());
         assert_eq!(Analisis::de_codigo(&f.codigo()), Some(f));
+        // 10.2b (A-H8): la nota de un fallo no habla del parser de SWC; uno real si.
+        assert!(n.starts_with("analisis de difuzz fallido (A6/R1-H12): ") && f.solo_fallido(), "{n}");
+        assert!(a.nota().unwrap().starts_with("analisis con el parser de SWC (R1-H13): ") && !a.solo_fallido() && !limpio.solo_fallido());
     }
 }
