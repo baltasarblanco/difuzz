@@ -841,6 +841,20 @@ mod tests {
         }
     }
 
+    /// 11.4 (I7 de rev-integral-1): un B muerto por senal (crash de V8, abort, OOM killer) es
+    /// ExitStatus contra cualquier A, aunque el stdout coincida; un B colgado, Timeout. Antes
+    /// ningun test lo veia: la mutacion `Signal => Same` (m3) sobrevivia a todo.
+    #[test]
+    fn b_muerto_por_senal_diverge() {
+        use super::{compare, Kind};
+        use crate::runner::Status::{Exited, Signal, Timeout};
+        let b = corrida(Signal, "vivo\n", "");
+        for a in [corrida(Exited(0), "vivo\n", ""), corrida(Exited(1), "vivo\n", ""), corrida(Exited(70), "!dz throw TypeError\n", "throw TypeError\n")] {
+            assert_eq!(kind(compare(&a, &b)), Some(Kind::ExitStatus), "{:?}", a.status);
+            assert_eq!(kind(compare(&a, &corrida(Timeout, "vivo\n", ""))), Some(Kind::Timeout), "{:?}", a.status);
+        }
+    }
+
     /// 11.2 (I2 de rev-integral-1): un original que sale con un codigo propio se compara. El
     /// mismo codigo y el mismo stdout: iguales; otro stdout: Stdout; otro codigo (o 0, o un
     /// throw): ExitStatus. Sin codigo propio en A, un B con uno sigue siendo ExitStatus (como

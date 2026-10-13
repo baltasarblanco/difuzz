@@ -139,6 +139,9 @@ const TRAZA_CAUSA: &str = "\nclasificacion:\n  contenido: Explica (A depende del
 
 const TRAZA_INVALIDO: &str = "\nclasificacion:\n  profundidad: no aplica (A con mas pila da lo mismo, o la corrida honda fallo)\n  asunciones: sensor, asuncion: oxc: Coercion Methods Are Pure\n  minificado_invalido: si (node --check rechaza el minificado y acepta el original): sin flags, ninguna\n  decision: div/\n";
 
+/// 11.4: la traza de un B muerto por senal.
+const TRAZA_SENAL: &str = "\nclasificacion:\n  sensor: A con el sensor, B sin el sensor (sensor_caido: senal o timeout con el) -> A y B comparados sin el sensor (I3)\n  profundidad: no aplica (A con mas pila da lo mismo, o la corrida honda fallo)\n  asunciones: ninguna (ni flag de la tabla, ni ruta, ni backlog)\n  decision: div/\n";
+
 /// 11.3: las trazas del re-chequeo de nombres de core_defaults (oxc de verdad).
 const TRAZA_NOMBRES_EXPLICA: &str = "\nclasificacion:\n  profundidad: no aplica (A con mas pila da lo mismo, o la corrida honda fallo)\n  nombres: Explica (con los nombres preservados la divergencia desaparece)\n  asunciones: sensor, asuncion: oxc: No Reliance on Function.prototype.name (keep_names apagado en core_defaults)\n  minificado_invalido: no (node --check acepta el minificado)\n  sintoma: el de known-sintomas.tsv (o primero registrado)\n  decision: known/ (sensor, asuncion: oxc: No Reliance on Function.prototype.name (keep_names apagado en core_defaults))\n";
 const TRAZA_NOMBRES_RENOMBRE: &str = "\nclasificacion:\n  profundidad: no aplica (A con mas pila da lo mismo, o la corrida honda fallo)\n  nombres: Explica (con los nombres preservados la divergencia desaparece; B es un renombre del minificado sin mangle, que da lo mismo que A)\n  asunciones: sensor, asuncion: oxc: No Reliance on Function.prototype.name (keep_names apagado en core_defaults)\n  minificado_invalido: no (node --check acepta el minificado)\n  sintoma: el de known-sintomas.tsv (o primero registrado)\n  decision: known/ (sensor, asuncion: oxc: No Reliance on Function.prototype.name (keep_names apagado en core_defaults))\n";
@@ -165,6 +168,18 @@ fn tabla() -> Vec<Fila> {
             args: &[],
             destino: Destino::Div,
             meta: &["kind: Stdout\n", "\nobserved: true\n", "\nknown: no\n", TRAZA_DIV],
+        },
+        // 11.4 (I7 de rev-integral-1): el minificado muere por senal (SIGSEGV, como un crash de
+        // V8) y el original no: ExitStatus en div/. Con `Signal => Same` en `oracle::compare` (la
+        // mutacion m3 de la revision) daba iguales. B se repite sin el sensor (`sensor_caido`) y
+        // A y B se comparan sin el (I3): la traza lo dice.
+        Fila {
+            caso: "div-senal-b",
+            programa: "console.log(41);\n",
+            back: Back::Rompe("console.log(41)", "console.log(41),process.kill(process.pid,\"SIGSEGV\")"),
+            args: &[],
+            destino: Destino::Div,
+            meta: &["kind: ExitStatus\n", "\nobserved: false\n", "\nknown: no\n", "\nminificado: Signal en ", TRAZA_SENAL],
         },
         // 11.1 (I1 de rev-integral-1): lo que el programa escribe directo a stderr se compara (el
         // preload lo pasa a stdout como `[stderr] ...`). Antes: iguales (con algo en stdout) o

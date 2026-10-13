@@ -84,3 +84,13 @@ oxc-cbrt-exit1	oxc-a-core_defaults	div:Stdout
 oxc-cbrt-exit1	oxc-a-carril_a	div:Stdout
 oxc-cbrt-exit1	oxc-b-core_defaults	div:Stdout
 oxc-cbrt-exit1	oxc-b-carril_a	div:Stdout
+# 11.4 (I7 de rev-integral-1): prueba del oraculo, no un bug. Solo el minificado (sin el nombre de su
+# variable local) se mata con SIGSEGV: ExitStatus en las 8 celdas. Con `Signal => Same` (mutacion m3) daba igual.
+difuzz-senal-b	swc-a-core_defaults	div:ExitStatus
+difuzz-senal-b	swc-a-carril_a	div:ExitStatus
+difuzz-senal-b	swc-b-core_defaults	div:ExitStatus
+difuzz-senal-b	swc-b-carril_a	div:ExitStatus
+difuzz-senal-b	oxc-a-core_defaults	div:ExitStatus
+difuzz-senal-b	oxc-a-carril_a	div:ExitStatus
+difuzz-senal-b	oxc-b-core_defaults	div:ExitStatus
+difuzz-senal-b	oxc-b-carril_a	div:ExitStatus

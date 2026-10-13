@@ -1,6 +1,6 @@
 # Golden de detección de difuzz
 
-`verificar.sh [opciones] [BIN] [OUT]` corre `corpus/` (18 casos) en 8 celdas (swc|oxc × carril a|b ×
+`verificar.sh [opciones] [BIN] [OUT]` corre `corpus/` (19 casos) en 8 celdas (swc|oxc × carril a|b ×
 core_defaults|carril_a, `--no-cache --jobs 4`) y compara la clase de cada caso con `esperado.tsv`. Verifica
 también que cada `CORRIDA.txt` diga `completa`, la identidad de stats por celda y que `--invocar` y `--stubs`
 (oxc, core_defaults, A y B) no pierdan ningún div/panic de la celda base. Sale con 0 si todo coincide.
@@ -40,6 +40,11 @@ Por qué cada clase esperada:
 - `oxc-cbrt-exit1` (11.2, repro `s6` de la revisión integral 1): el mismo bug impreso por stdout en un programa que
   sale con `process.exit(1)` a propósito. El original con un código propio se compara (antes: descarte `exit`):
   Stdout en las 4 de oxc. swc: igual.
+- `difuzz-senal-b` (11.4, como el repro `senal/q1-b-muere` de la revisión integral 1): no es un bug del minifier sino
+  una prueba del oráculo. El programa lee su propio texto (`process.argv[1]`) y se mata con SIGSEGV si ya no tiene el
+  nombre de su variable local: el original impreso lo tiene; el minificado no (mangle de los nombres locales o
+  inlining, en las 8 celdas). Solo B muere por señal: ExitStatus en las 8. Con `Signal => Same` en `oracle::compare`
+  (la mutación m3 de la revisión) daba igual.
 - `control-limpio`: igual en todas.
 
 ## Historia

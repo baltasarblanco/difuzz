@@ -971,7 +971,7 @@ DIFUZZ_SIN_NODE=1 cargo test --no-fail-fast           # sin node: saltea y cuent
 Sin `node` en el `PATH`, los tests que lo necesitan fallan con un mensaje claro. Con
 `DIFUZZ_SIN_NODE=1` se saltean y cada uno deja una línea `DIFUZZ_SALTEADO_SIN_NODE` en stderr.
 
-- **Golden de detección** (`tests/golden/`): 18 casos con bugs conocidos de oxc y swc, en 8
+- **Golden de detección** (`tests/golden/`): 19 casos (18 con bugs conocidos de oxc y swc y una prueba del oráculo), en 8
   celdas, más `--invocar` y `--stubs`; la clase esperada de cada caso está en `esperado.tsv`.
 - **Aceptación de los re-chequeos** (`tests/aceptacion/rechequeos/`): 180 casos que combinan un
   bug real de oxc con un flag de asunción (o con la forma en que se imprime), en las 4 celdas de oxc
