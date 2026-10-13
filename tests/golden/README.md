@@ -58,3 +58,7 @@ Por qué cada clase esperada:
   contaba como `igual`): `oxc-o7` pasa de `igual` a `asserts`. Caso nuevo `oxc-eval-indirecto`. Opciones para
   reutilizarlo con otro corpus. MEDIDO con el binario de `46e6749`: 172/172 (128 de celdas base + 44 de modos),
   unos 15 s con `--jobs 2`.
+- 11a (2026-10-13): 3 casos nuevos de la revisión integral 1: `oxc-cbrt-stderr` (11.1), `oxc-cbrt-exit1` (11.2) y
+  `difuzz-senal-b` (11.4). MEDIDO con los binarios de `5e55637` y `c780b2e`: 208/208 (152 de celdas base + 56 de modos). Con el
+  binario base (`2ff4d90`) los tres terminan en `igual` (el primero), `descarte:exit` y `div:ExitStatus`; con
+  `Signal => Same` (mutación m3) `difuzz-senal-b` falla en las 8 celdas.
