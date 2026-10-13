@@ -2368,8 +2368,16 @@ fn tokens_cambiados(a: &[char], b: &[char]) -> Option<Vec<bool>> {
     let (ta, tb) = (tokens(a), tokens(b));
     let ta: Vec<&[char]> = ta.iter().map(|&(d, h)| &a[d..h]).collect();
     let tb: Vec<&[char]> = tb.iter().map(|&(d, h)| &b[d..h]).collect();
+    lcs_cambiados(&ta, &tb)
+}
+
+/// 11.3: lo de `tokens_cambiados` sobre tokens ya cortados (cualquier tipo comparable): que
+/// elementos de `tb` no estan en una subsecuencia comun mas larga de `ta` y `tb` (sin el prefijo y
+/// el sufijo comunes). `None` si la tabla pasa `TOPE_ALINEAR`. Lo usa tambien
+/// `clasificar::difiere_solo_en_nombres`, con sus tokens de JS.
+pub(crate) fn lcs_cambiados<T: PartialEq>(ta: &[T], tb: &[T]) -> Option<Vec<bool>> {
     let mut cambiado = vec![true; tb.len()];
-    let pre = ta.iter().zip(&tb).take_while(|(x, y)| x == y).count();
+    let pre = ta.iter().zip(tb).take_while(|(x, y)| x == y).count();
     let suf = ta[pre..].iter().rev().zip(tb[pre..].iter().rev()).take_while(|(x, y)| x == y).count();
     for c in cambiado.iter_mut().take(pre) {
         *c = false;

@@ -139,6 +139,11 @@ const TRAZA_CAUSA: &str = "\nclasificacion:\n  contenido: Explica (A depende del
 
 const TRAZA_INVALIDO: &str = "\nclasificacion:\n  profundidad: no aplica (A con mas pila da lo mismo, o la corrida honda fallo)\n  asunciones: sensor, asuncion: oxc: Coercion Methods Are Pure\n  minificado_invalido: si (node --check rechaza el minificado y acepta el original): sin flags, ninguna\n  decision: div/\n";
 
+/// 11.3: las trazas del re-chequeo de nombres de core_defaults (oxc de verdad).
+const TRAZA_NOMBRES_EXPLICA: &str = "\nclasificacion:\n  profundidad: no aplica (A con mas pila da lo mismo, o la corrida honda fallo)\n  nombres: Explica (con los nombres preservados la divergencia desaparece)\n  asunciones: sensor, asuncion: oxc: No Reliance on Function.prototype.name (keep_names apagado en core_defaults)\n  minificado_invalido: no (node --check acepta el minificado)\n  sintoma: el de known-sintomas.tsv (o primero registrado)\n  decision: known/ (sensor, asuncion: oxc: No Reliance on Function.prototype.name (keep_names apagado en core_defaults))\n";
+const TRAZA_NOMBRES_RENOMBRE: &str = "\nclasificacion:\n  profundidad: no aplica (A con mas pila da lo mismo, o la corrida honda fallo)\n  nombres: Explica (con los nombres preservados la divergencia desaparece; B es un renombre del minificado sin mangle, que da lo mismo que A)\n  asunciones: sensor, asuncion: oxc: No Reliance on Function.prototype.name (keep_names apagado en core_defaults)\n  minificado_invalido: no (node --check acepta el minificado)\n  sintoma: el de known-sintomas.tsv (o primero registrado)\n  decision: known/ (sensor, asuncion: oxc: No Reliance on Function.prototype.name (keep_names apagado en core_defaults))\n";
+const TRAZA_NOMBRES_NO_EXPLICA: &str = "\nclasificacion:\n  profundidad: no aplica (A con mas pila da lo mismo, o la corrida honda fallo)\n  nombres: NoExplica (con los nombres preservados sigue)\n  asunciones: ninguna (ni flag de la tabla, ni ruta, ni backlog)\n  solo_sloppy: NoExplica (con \"use strict\" sigue)\n  decision: div/\n";
+
 fn tabla() -> Vec<Fila> {
     vec![
         // Control: el minificado es el original; ni siquiera corre B.
@@ -228,6 +233,37 @@ fn tabla() -> Vec<Fila> {
             args: &["--minifier", "oxc", "--config", "core_defaults"],
             destino: Destino::Known,
             meta: &["\nknown: sensor, asuncion: oxc: No TDZ Violation (atrapada)\n", TRAZA_TDZ_ATRAPADA],
+        },
+        // 11.3 (I6 de rev-integral-1): el re-chequeo de nombres de core_defaults, por el camino de
+        // produccion (oxc de verdad). Positivo: el `.name` de una funcion que oxc manglea va a
+        // known/. Negativo: el bug E de oxc (`Math.cbrt(-8)` -> NaN) en un programa que nombra
+        // `.name` va a div/: con keep_names el bug sigue (NoExplica). Si el paso de nombres diera
+        // siempre Explica (la mutacion m1 de la revision), iria a known/.
+        Fila {
+            caso: "known-nombres",
+            programa: "(function () { function handler() {} console.log(handler.name); })();\n",
+            back: Back::Celda,
+            args: &["--minifier", "oxc", "--config", "core_defaults"],
+            destino: Destino::Known,
+            meta: &["kind: Stdout\n", TRAZA_NOMBRES_EXPLICA],
+        },
+        // Un valor que sale de un nombre (`si`/`no`, palabras de un string, no nombres del codigo):
+        // lo explica el renombre (el minificado sin mangle da lo mismo que A y B es un renombre de el).
+        Fila {
+            caso: "known-nombres-renombre",
+            programa: "(function () {\n  var inferred = function () {};\n  console.log(inferred.name === \"inferred\" ? \"si\" : \"no\", typeof inferred);\n})();\n",
+            back: Back::Celda,
+            args: &["--minifier", "oxc", "--config", "core_defaults"],
+            destino: Destino::Known,
+            meta: &["kind: Stdout\n", TRAZA_NOMBRES_RENOMBRE],
+        },
+        Fila {
+            caso: "div-nombres-cbrt",
+            programa: "console.log(Object.name, Math.cbrt(-8));\n",
+            back: Back::Celda,
+            args: &["--minifier", "oxc", "--config", "core_defaults"],
+            destino: Destino::Div,
+            meta: &["kind: Stdout\n", "\nknown: no\n", TRAZA_NOMBRES_NO_EXPLICA],
         },
         // R2-H07 (b6-usuario): `coercion` (estatico, sin re-chequeo) y `stack`, que el
         // re-chequeo de contenido confirma: la razon es la de `stack`, no la del primer

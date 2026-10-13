@@ -424,6 +424,13 @@ pub fn alfa(b0: &str, b: &str, kind: SourceKind) -> Result<Option<Result<Vec<Str
     }))
 }
 
+/// 11.3: los identificadores del codigo de `src` (`clasificar::identificadores_de`: nombres de
+/// bindings, de propiedades y privados; no lo que hay adentro de un string ni de un comentario).
+/// `Ok(None)`: no parsea.
+pub fn identificadores(src: &str, kind: SourceKind) -> Result<Option<Vec<String>>, String> {
+    correr("identificadores", kind, &[src])
+}
+
 /// b4-a: `recheck::neutralize_violaciones` (`spec`: una violacion por linea).
 pub fn sin_violaciones(src: &str, kind: SourceKind, spec: &str) -> Result<Option<String>, String> {
     correr("violaciones", kind, &[src, spec]).map(|v| v.and_then(|mut v| v.pop()))
@@ -499,6 +506,7 @@ fn ejecutar(op: &str, kind: SourceKind, p: &[&str]) -> Option<Vec<String>> {
             Some(vec![f.join(","), d0.to_string(), d1.to_string(), a.codigo()])
         }
         ("bloques", [src]) => crate::minify::instrument_bloques(src, kind).map(|s| vec![s]),
+        ("identificadores", [src]) => crate::clasificar::identificadores_de(src, kind),
         ("mutar", [src, n, e, s]) => {
             let num = |x: &str| x.parse::<u64>().unwrap_or(0);
             let vs = crate::mutate::variants_ext(src, num(n) as usize, num(e) as usize, num(s), kind)?;

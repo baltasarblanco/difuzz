@@ -297,11 +297,20 @@ pub fn clasificar<'a>(
     if let Some(c) = names_cfg {
         if !names_visible(original, &a.stdout) {
             traza.paso("nombres", "no aplica (la salida no puede mostrar nombres)");
-        } else if names_only(runner, c, original, a) {
-            traza.paso("nombres", "Explica (con los nombres preservados la divergencia desaparece)");
-            flags.push("nombres");
         } else {
-            traza.paso("nombres", "NoExplica (con los nombres preservados sigue)");
+            match names_only(runner, c, (original, minified), a, b, ctx.medido) {
+                (recheck::Recheck::Explica, detalle) => {
+                    traza.paso("nombres", format!("Explica (con los nombres preservados la divergencia desaparece{detalle})"));
+                    flags.push("nombres");
+                }
+                (recheck::Recheck::NoExplica, _) => traza.paso("nombres", "NoExplica (con los nombres preservados sigue)"),
+                // 11.3: sin el flag `nombres` (div/), con la nota y `nombres_inconcluso`.
+                (recheck::Recheck::Inconcluso(n), _) => {
+                    traza.paso("nombres", format!("Inconcluso -> nombres_inconcluso: {n}"));
+                    notes.push(format!("re-chequeo de nombres inconcluso: {n}"));
+                    flags.push("nombres_inconcluso");
+                }
+            }
         }
     }
     // 8.3 (= 7.11; desde cd54ad2, d2/difuzz-1, hono sse.js): A y B difieren solo en mensajes de
@@ -553,11 +562,186 @@ fn names_visible(original: &str, a_stdout: &str) -> bool {
 /// La divergencia desaparece si se minifica igual pero preservando nombres: es
 /// el costo de keep_* apagado (`f.name`, `Foo { x: 7 }` impreso como `{ x: 7 }`),
 /// no un bug. Se minifica el original ya impreso: es el mismo programa.
-fn names_only(runner: &runner::Runner, cfg: &minify::Config, original: &str, a: &runner::Exec) -> bool {
-    let minify::Outcome::Ok { minified, .. } = minify::prepare(original, cfg) else {
-        return false;
+///
+/// 11.3 (I6 de rev-integral-1, la regla de t-principio): con eso solo no alcanza. keep_names
+/// tambien apaga pasadas de oxc (el inlining de una funcion o clase anonima de un solo uso, su
+/// borrado si no se usa, el borrado del nombre de una expresion de funcion): un bug real en una de
+/// ellas desaparece igual con keep_names y, en un programa que nombra `.name` en cualquier lado
+/// (`names_visible` es textual), iba a known/. Ahora, ademas, B tiene que diferir de A solo en
+/// nombres (`difiere_solo_en_nombres`): si no, Inconcluso (div/ con la nota). No hay paso de
+/// camino como en `recheck::veredicto_neutralizado`: B y el minificado con keep_names son textos
+/// distintos y la cobertura de V8 no se puede comparar entre ellos. Un minificado que nadie pudo
+/// re-minificar con keep_names sigue siendo NoExplica, como antes.
+///
+/// Un valor que sale de un nombre (`inferred.name === 'inferred' ? f : null`, MEDIDO en el corpus
+/// real: cjs/10506) no pasa `difiere_solo_en_nombres`. Para esos, si el backend tiene variante
+/// sin mangle (oxc), la misma prueba que `recheck::mensaje_nombre_matters`: el minificado sin
+/// mangle (B0) da lo mismo que A y B es un renombre de B0 (`analisis::alfa`, el resolver de SWC:
+/// cada identificador resuelve al binding que corresponde, sin `with` ni `eval` directo). Entonces
+/// B difiere de algo que se comporta como A solo en los nombres de sus bindings: Explica. Si el
+/// nombre lo cambia una pasada de compress (12306 de SWC: oxc borra el nombre de una expresion de
+/// funcion al inlinearla), B0 tampoco da lo mismo que A y sigue Inconcluso.
+fn names_only(
+    runner: &runner::Runner,
+    cfg: &minify::Config,
+    (original, minified): (&str, &str),
+    a: &runner::Exec,
+    b: &runner::Exec,
+    medido: Option<Medido>,
+) -> (recheck::Recheck, &'static str) {
+    let minify::Outcome::Ok { minified: con_nombres, .. } = minify::prepare(original, cfg) else {
+        return (recheck::Recheck::NoExplica, "");
     };
-    matches!(oracle::compare(a, &runner.run(&minified)), oracle::Verdict::Same)
+    if !matches!(oracle::compare(a, &runner.run(&con_nombres)), oracle::Verdict::Same) {
+        return (recheck::Recheck::NoExplica, "");
+    }
+    let Err(n) = difiere_solo_en_nombres(a, b, original, minified, runner.kind()) else {
+        return (recheck::Recheck::Explica, "");
+    };
+    let renombre = medido.map_or(Err("sin backend medido".to_string()), |m| solo_renombre(runner, m, original, minified, a));
+    match renombre {
+        Ok(()) => (recheck::Recheck::Explica, "; B es un renombre del minificado sin mangle, que da lo mismo que A"),
+        Err(r) => (
+            recheck::Recheck::Inconcluso(format!(
+                "con los nombres preservados la divergencia desaparece, pero B difiere de A en algo que no es un nombre ({n}) y no se pudo ver que B sea un renombre de algo que se comporta como A ({r}): keep_names tambien apaga pasadas del minifier y el bug puede estar en una de ellas"
+            )),
+            "",
+        ),
+    }
+}
+
+/// 11.3: el minificado sin mangle (B0) da lo mismo que A y B es un renombre de B0 (ver
+/// `names_only`). `Err` con la razon.
+fn solo_renombre(runner: &runner::Runner, m: Medido, original: &str, minified: &str, a: &runner::Exec) -> Result<(), String> {
+    let cfg = minify::Config::sin_mangle(m.minifier, m.preset, m.kind).ok_or_else(|| format!("{} no tiene variante sin mangle", m.minifier.name()))?;
+    let minify::Outcome::Ok { minified: m0, .. } = minify::prepare(original, &cfg) else {
+        return Err("no pude minificar sin mangle".into());
+    };
+    let b0 = runner.run(&m0);
+    if !matches!(oracle::compare(a, &b0), oracle::Verdict::Same) {
+        return Err("el minificado sin mangle tampoco da lo mismo que A".into());
+    }
+    match analisis::alfa(&m0, minified, m.kind) {
+        Ok(Some(Ok(_))) => Ok(()),
+        Ok(Some(Err(e))) => Err(format!("el minificado no es un renombre del minificado sin mangle: {e}")),
+        Ok(None) => Err("el analisis de difuzz no parsea el minificado o el minificado sin mangle".into()),
+        Err(e) => {
+            analisis::registrar("re-chequeo de nombres (renombre)", &e);
+            Err(format!("fallo el analisis de difuzz: {}", e.lines().next().unwrap_or_default()))
+        }
+    }
+}
+
+/// Palabras que tienen forma de nombre pero son valores que un bug puede cambiar: los de
+/// `String(x)` de los primitivos y lo que da `typeof`.
+const NO_SON_NOMBRES: [&str; 13] =
+    ["NaN", "Infinity", "undefined", "null", "true", "false", "number", "string", "object", "function", "boolean", "symbol", "bigint"];
+
+/// 11.3: A y B (normalizados como en `oracle::compare`) terminan igual, imprimen la misma
+/// cantidad de lineas y, en cada linea en que difieren, lo que cambia (por tokens de JS:
+/// identificadores, numeros y signos sueltos, alineados con `recheck::lcs_cambiados`) son
+/// nombres: identificadores que aparecen como identificador en el texto que corrio de ese lado
+/// (`original` para A, `minified` para B) y que no son un valor (`NO_SON_NOMBRES`). Un numero, un
+/// signo o una palabra de valor que cambia no es un nombre. `Err` con la razon.
+pub(crate) fn difiere_solo_en_nombres(a: &runner::Exec, b: &runner::Exec, original: &str, minified: &str, kind: minify::SourceKind) -> Result<(), String> {
+    if a.status != b.status || a.threw() != b.threw() {
+        return Err(format!("A y B no terminan igual: {:?} contra {:?}", a.status, b.status));
+    }
+    let (na, nb) = oracle::normalizadas(a, b);
+    let (la, lb): (Vec<&str>, Vec<&str>) = (na.lines().collect(), nb.lines().collect());
+    if la.len() != lb.len() {
+        return Err(format!("A imprime {} lineas y B {}", la.len(), lb.len()));
+    }
+    // Los identificadores del codigo (SWC, en el hijo de analisis), no las palabras de un string:
+    // con `"PASS"`/`"FAIL"` en el fuente, un bug que imprime FAIL no pasa por un nombre.
+    let ids = |s: &str| -> Result<std::collections::HashSet<String>, String> {
+        match analisis::identificadores(s, kind) {
+            Ok(Some(v)) => Ok(v.into_iter().collect()),
+            Ok(None) => Err("el analisis de difuzz no parsea el original o el minificado".into()),
+            Err(e) => {
+                analisis::registrar("re-chequeo de nombres (identificadores)", &e);
+                Err(format!("fallo el analisis de difuzz: {}", e.lines().next().unwrap_or_default()))
+            }
+        }
+    };
+    let (mut ids_a, mut ids_b) = (None, None);
+    for (i, (x, y)) in la.iter().zip(&lb).enumerate().filter(|(_, (x, y))| x != y) {
+        let (tx, ty) = (tokens_js(x), tokens_js(y));
+        let (Some(cx), Some(cy)) = (recheck::lcs_cambiados(&ty, &tx), recheck::lcs_cambiados(&tx, &ty)) else {
+            return Err(format!("la linea {} es demasiado larga para alinear", i + 1));
+        };
+        // Los espacios que cambian no cuentan (`Foo { x: 7 }` contra `{ x: 7 }`: util.inspect no
+        // pone el prefijo ni su espacio de una instancia sin nombre), pero una linea en que solo
+        // cambian espacios no difiere en un nombre.
+        let mut algun_nombre = false;
+        for (lado, toks, cambiados, texto, cache) in [("A", &tx, &cx, original, &mut ids_a), ("B", &ty, &cy, minified, &mut ids_b)] {
+            let conocidos: &std::collections::HashSet<String> = match cache {
+                Some(c) => c,
+                vacio => vacio.insert(ids(texto)?),
+            };
+            let mut distintos = toks.iter().zip(cambiados).filter(|(t, c)| **c && !t.trim().is_empty()).map(|(t, _)| t).peekable();
+            algun_nombre |= distintos.peek().is_some();
+            if let Some(t) = distintos.find(|t| !es_identificador(t) || NO_SON_NOMBRES.contains(&t.as_str()) || !conocidos.contains(t.as_str())) {
+                return Err(format!("en la linea {} {lado} imprime `{t}`, que no es un nombre de su texto", i + 1));
+            }
+        }
+        if !algun_nombre {
+            return Err(format!("en la linea {} solo cambian espacios", i + 1));
+        }
+    }
+    Ok(())
+}
+
+/// 11.3: los identificadores del codigo de `src` (nombres de bindings y referencias, de
+/// propiedades y privados), sin repetir. `None` si SWC no lo parsea. Corre en el hijo de
+/// analisis (`analisis::identificadores`).
+pub(crate) fn identificadores_de(src: &str, kind: minify::SourceKind) -> Option<Vec<String>> {
+    use swc_ecma_visit::{Visit, VisitWith};
+    struct Ids(std::collections::BTreeSet<String>);
+    impl Visit for Ids {
+        fn visit_ident(&mut self, n: &swc_ecma_ast::Ident) {
+            self.0.insert(n.sym.to_string());
+        }
+        fn visit_ident_name(&mut self, n: &swc_ecma_ast::IdentName) {
+            self.0.insert(n.sym.to_string());
+        }
+        fn visit_private_name(&mut self, n: &swc_ecma_ast::PrivateName) {
+            self.0.insert(n.name.to_string());
+        }
+    }
+    swc_common::GLOBALS.set(&swc_common::Globals::new(), || {
+        let p = crate::backend::swc::parse_for(src, kind)?;
+        let mut v = Ids(Default::default());
+        p.visit_with(&mut v);
+        Some(v.0.into_iter().collect())
+    })
+}
+
+fn es_identificador(t: &str) -> bool {
+    t.chars().next().is_some_and(|c| c.is_alphabetic() || c == '_' || c == '$')
+}
+
+/// Tokens de JS para `difiere_solo_en_nombres`: identificadores (`[letra_$][letra digito _$]*`),
+/// numeros (digitos seguidos) y cualquier otro caracter suelto.
+fn tokens_js(s: &str) -> Vec<String> {
+    let ident = |c: char| c.is_alphanumeric() || c == '_' || c == '$';
+    let (mut v, mut it) = (Vec::new(), s.chars().peekable());
+    while let Some(c) = it.next() {
+        let mut t = String::from(c);
+        if c.is_alphabetic() || c == '_' || c == '$' {
+            while let Some(&d) = it.peek().filter(|d| ident(**d)) {
+                t.push(d);
+                it.next();
+            }
+        } else if c.is_ascii_digit() {
+            while let Some(&d) = it.peek().filter(|d| d.is_ascii_digit()) {
+                t.push(d);
+                it.next();
+            }
+        }
+        v.push(t);
+    }
+    v
 }
 
 /// M13: el flag `extends` (estatico) mira todo el programa: en 9460 un
@@ -819,6 +1003,52 @@ mod tests {
         let mut v: Vec<&str> = Vec::new();
         super::sin_repetidos(&mut v);
         assert!(v.is_empty());
+    }
+
+    /// 11.3 (I6 de rev-integral-1): el re-chequeo de nombres solo explica una divergencia en que
+    /// B difiere de A en nombres de su texto. El bug E de oxc (`-2` contra `NaN`), un `typeof` que
+    /// cambia o un nombre que no esta en el minificado no son nombres.
+    #[test]
+    fn difiere_solo_en_nombres_pide_nombres() {
+        use crate::runner::{Exec, Status};
+        let ex = |status: Status, out: &str| Exec {
+            status,
+            stdout: out.into(),
+            stderr: String::new(),
+            flags: Vec::new(),
+            elapsed: std::time::Duration::ZERO,
+            ctl: String::new(),
+        };
+        let ok = |out: &str| ex(Status::Exited(0), out);
+        let solo = |a: &Exec, b: &Exec, o: &str, m: &str| super::difiere_solo_en_nombres(a, b, o, m, crate::minify::SourceKind::Script);
+        let (o, m) = ("(function () { function handler() {} class Foo {} console.log(handler.name, Object.name); })();", "(function(){function e(){}class t{}console.log(e.name,Object.name)})();");
+        // Nombres: `.name`, la clase de una instancia, un mensaje de V8 y un stack.
+        assert_eq!(solo(&ok("handler Object\n"), &ok("e Object\n"), o, m), Ok(()));
+        assert_eq!(solo(&ok("Foo { x: 7 }\n"), &ok("t { x: 7 }\n"), o, m), Ok(()));
+        assert_eq!(solo(&ok("1\nhandler is not a function\n"), &ok("1\ne is not a function\n"), o, m), Ok(()));
+        // Un `.name` que en B queda vacio, y una instancia de una clase que en B no tiene nombre
+        // (sin el prefijo ni su espacio: negate_iife_issue_1073 de terser).
+        assert_eq!(solo(&ok("name: handler\n"), &ok("name: \n"), o, m), Ok(()));
+        assert_eq!(solo(&ok("Foo { x: 7 }\n"), &ok("{ x: 7 }\n"), o, m), Ok(()));
+        // Solo espacios no es un nombre.
+        assert!(solo(&ok("a b\n"), &ok("a  b\n"), o, m).is_err(), "solo espacios");
+        // Un valor que sale de un nombre (`f.name === 'g'`, fixture 12306 de SWC) no se distingue
+        // de un bug que cambia un booleano (la identidad de una funcion inlineada): no es un nombre.
+        assert!(solo(&ok("true\n"), &ok("false\n"), "f.name === 'g'", "f.name==='g'").is_err());
+        // No son nombres.
+        assert!(solo(&ok("Object -2\n"), &ok("Object NaN\n"), o, m).is_err(), "el bug E de oxc");
+        assert!(solo(&ok("handler -2\n"), &ok("e NaN\n"), o, m).is_err(), "un nombre y el bug en la misma linea");
+        assert!(solo(&ok("number\n"), &ok("string\n"), "typeof x === 'number' || 'string'", "typeof x=='number'||'string'").is_err());
+        assert!(solo(&ok("handler 1\n"), &ok("e 2\n"), o, m).is_err(), "un numero que cambia");
+        assert!(solo(&ok("handler\n"), &ok("otro\n"), o, m).is_err(), "`otro` no esta en el minificado");
+        assert!(solo(&ok("handler\n"), &ok("e\nhandler\n"), o, m).is_err(), "otra cantidad de lineas");
+        assert!(solo(&ok("handler\n"), &ex(Status::Exited(1), "e\n"), o, m).is_err(), "otro estado");
+        // Las palabras de un string no son nombres del codigo: un bug que imprime FAIL en vez de
+        // PASS en un programa que nombra `.name` no pasa (los identificadores salen de SWC).
+        let (o2, m2) = ("console.log(f.name, ok ? 'PASS' : 'FAIL');", "console.log(f.name,ok?'PASS':'FAIL');");
+        assert!(solo(&ok("f PASS\n"), &ok("f FAIL\n"), o2, m2).is_err(), "PASS/FAIL");
+        // Un texto que SWC no parsea: no se puede saber.
+        assert!(solo(&ok("handler\n"), &ok("e\n"), "var = ;", m).is_err(), "no parsea");
     }
 
     #[test]

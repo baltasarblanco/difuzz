@@ -588,7 +588,26 @@ Principios:
     Para un original que liga `arguments` (no compila en estricto), primero se prueba el
     renombre solo: si A con el binding renombrado da lo mismo que A y su minificado también,
     la divergencia la explica ligar `arguments`, válido solo en sloppy.
-  - los nombres (minificar preservándolos), en los dos: que la divergencia desaparezca.
+  - los nombres (minificar preservándolos, solo en core_defaults y si la salida puede mostrar
+    un nombre: el original lee `.name` o A imprime una instancia `X {`), en los dos: que la
+    divergencia desaparezca y (11.3) que B difiera de A solo en nombres: misma cantidad de
+    líneas, mismo estado y, en cada línea distinta, lo que cambia (salvo espacios) son
+    identificadores del código de ese lado (el original para A, el minificado para B; los saca
+    el parser de SWC, no las palabras de un string) que no son un valor (`NaN`, `undefined`,
+    `true`, lo que da `typeof`, ...). Si no, en oxc, alcanza con que el minificado sin mangle dé
+    lo mismo que A y B sea un renombre de él (la misma prueba de `mensaje_nombre`, abajo): así
+    pasa un valor que sale de un nombre (`inferred.name === 'inferred' ? f : null`, un paquete
+    del corpus real). keep_names también apaga pasadas de oxc (el inlining de una función
+    anónima de un solo uso, su borrado, el del nombre de una expresión de función): un bug en una
+    de ellas desaparece con keep_names igual, y antes iba a `known/` con que el programa nombrara
+    `.name` en cualquier lado. Si la divergencia desaparece pero no pasa ninguna de las dos:
+    `Inconcluso`, `div/` con nota y `nombres_inconcluso`. Costo medido: `fixture/issues/12306` de
+    SWC (`f.name === 'g'` da `true` contra `false` porque oxc borra el nombre de la expresión al
+    inlinearla) va de `known/` a `div/` en las dos celdas core_defaults de oxc: por la salida no
+    se distingue de un bug del inlining que cambia un booleano. No hay paso de camino (abajo): B
+    y el minificado con keep_names son textos distintos y sus coberturas no se comparan. Límite:
+    un bug que solo cambia qué nombre se imprime (B llama a otra función e imprime su `.name`
+    mangleado) y que keep_names apaga pasa por un nombre.
   - el **nombre local en un mensaje de V8** (`mensaje_nombre`, solo oxc; no es una asunción de oxc
     sino una decisión de difuzz, como `stack`): V8 arma `X is not a function` (también `is not a
     constructor`, `is not iterable` y sus variantes async) con el texto de la expresión, y el
@@ -954,9 +973,9 @@ Sin `node` en el `PATH`, los tests que lo necesitan fallan con un mensaje claro.
 
 - **Golden de detección** (`tests/golden/`): 18 casos con bugs conocidos de oxc y swc, en 8
   celdas, más `--invocar` y `--stubs`; la clase esperada de cada caso está en `esperado.tsv`.
-- **Aceptación de los re-chequeos** (`tests/aceptacion/rechequeos/`): 176 casos que combinan un
+- **Aceptación de los re-chequeos** (`tests/aceptacion/rechequeos/`): 180 casos que combinan un
   bug real de oxc con un flag de asunción (o con la forma en que se imprime), en las 4 celdas de oxc
-  (704 comparaciones).
+  (720 comparaciones).
 - **Corpus de codegen** (`tests/codegen/`, 10.1): 142 formas propias cuya semántica depende de la
   sintaxis exacta (paréntesis, comas, directivas, ASI, claves computadas, escapes), con `--crudo`
   en 8 celdas (1136 comparaciones). Las 9 del bug de los paréntesis de oxc van a `codegen/`; los

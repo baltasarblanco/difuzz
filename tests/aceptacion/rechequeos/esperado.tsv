@@ -856,3 +856,21 @@
 26-b102b-l01-rama-elegida-por-bug	oxc-a-carril_a	known
 26-b102b-l01-rama-elegida-por-bug	oxc-b-core_defaults	known
 26-b102b-l01-rama-elegida-por-bug	oxc-b-carril_a	known
+# 11.3 (I6 de rev-integral-1): el re-chequeo de nombres de core_defaults pide ademas que B difiera de A
+# solo en nombres de su texto. n01/n02: el bug E de oxc en un programa que nombra `.name` (div/ en las 4;
+# con el paso de nombres siempre Explica, la mutacion m1, iban a known/ en core_defaults). p01: solo el
+# nombre mangleado: known/ en core_defaults, igual en carril_a (keep_names).
+27-b113-n01-nombres-cbrt	oxc-a-core_defaults	div:Stdout
+27-b113-n01-nombres-cbrt	oxc-a-carril_a	div:Stdout
+27-b113-n01-nombres-cbrt	oxc-b-core_defaults	div:Stdout
+27-b113-n01-nombres-cbrt	oxc-b-carril_a	div:Stdout
+27-b113-n02-nombre-y-bug	oxc-a-core_defaults	div:Stdout
+27-b113-n02-nombre-y-bug	oxc-a-carril_a	div:Stdout
+27-b113-n02-nombre-y-bug	oxc-b-core_defaults	div:Stdout
+27-b113-n02-nombre-y-bug	oxc-b-carril_a	div:Stdout
+27-b113-p01-solo-nombre	oxc-a-core_defaults	known
+27-b113-p01-solo-nombre	oxc-b-core_defaults	known
+# 11.3: p02, un valor que sale de un nombre: known/ en core_defaults por el renombre (el minificado sin
+# mangle da lo mismo que A y B es un renombre de el), igual en carril_a.
+27-b113-p02-valor-de-un-nombre	oxc-a-core_defaults	known
+27-b113-p02-valor-de-un-nombre	oxc-b-core_defaults	known
