@@ -70,3 +70,10 @@ swc-s1-use-strict	swc-a-carril_a	div:Stdout
 swc-s3-neg-zero-member	swc-a-carril_a	div:ThrowNew
 swc-s3-neg-zero-member	swc-b-core_defaults	div:ThrowType
 swc-s3-neg-zero-member	swc-b-carril_a	div:ThrowType
+# 11.1 (I1 de rev-integral-1): el bug E de oxc (`Math.cbrt(-8)` -> NaN) escrito solo por stderr
+# (`process.stderr.write`). El preload lo pasa a stdout como `[stderr] ...`: div:Stdout en las 4 de
+# oxc. Antes: igual. swc no tiene el bug: igual.
+oxc-cbrt-stderr	oxc-a-core_defaults	div:Stdout
+oxc-cbrt-stderr	oxc-a-carril_a	div:Stdout
+oxc-cbrt-stderr	oxc-b-core_defaults	div:Stdout
+oxc-cbrt-stderr	oxc-b-carril_a	div:Stdout

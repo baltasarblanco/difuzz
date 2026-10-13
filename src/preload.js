@@ -10,7 +10,9 @@
 //   4. Sensor de asunciones: marca si el programa usa algo que AGENTS.md del minifier
 //      declara asumido (toString de funciones, .stack, Proxy, built-ins pisados, TDZ).
 //      Al salir escribe los flags por el canal de control (M10, ver abajo).
-//   5. Canales: console.error/warn/trace van a stdout (stderr no se compara), y al salir
+//   5. Canales: console.error/warn/trace y lo que el programa escribe directo a stderr
+//      (11.1: process.stderr.write, fs.writeSync(2), process._rawDebug) van a stdout
+//      (el stderr real no se compara), y al salir
 //      se imprimen los globals que el programa creo (sin tocar el fuente: sin efecto
 //      observador).
 //
@@ -862,6 +864,64 @@
     console[m] = (...args) => {
       write(`[${m}] ${util.format(...args)}\n`);
     };
+  }
+  // 11.1 (I1 de rev-integral-1): lo que el programa escribe DIRECTO a stderr tampoco se comparaba
+  // (MEDIDO: `process.stderr.write(String(Math.cbrt(-8)))`, el bug E de oxc, daba iguales). Va a
+  // stdout, en el orden en que se escribe, precedido por `[stderr] ` (una vez por escritura, como
+  // `[error] ` en console.error: las lineas siguientes de un stack quedan con sus espacios y
+  // `oracle::normalize_stack_positions` las sigue viendo como marcos). No pasa por el stderr real:
+  // ahi solo queda lo que escribe node (y lo que no se cubre, abajo), que sigue sin compararse
+  // (trae rutas y pids). Se cubren las tres vias que miden la revision: `process.stderr.write` (y lo
+  // que escribe por ella: `stream.pipe(process.stderr)`, un `console.Console` sobre
+  // `process.stderr`), `fs.writeSync(2, ...)` y `process._rawDebug`. Fuera (README, limites):
+  // `process.stderr.end(dato)`, `fs.write(2, ...)` asincronico, `fs.writeFileSync(2 o
+  // '/dev/stderr')`, un stream nuevo sobre el fd 2 y los procesos hijos que heredan el stderr.
+  // `fs.writeSync(2, ...)` se escribe con el `writeSync` real al fd 1 (mismas firmas, mismo
+  // valor de retorno, mismos errores); `process.stderr.write`, con el `write` de stdout tomado
+  // arriba. El nombre y el largo de lo envuelto son los del original (el programa puede leerlos;
+  // A y B ven lo mismo de todas formas).
+  {
+    const PREF_STDERR = '[stderr] ';
+    const formato = util.format;
+    const envolver = (obj, clave, f) => {
+      try {
+        const d = Object.getOwnPropertyDescriptor(obj, clave);
+        const orig = d && 'value' in d ? d.value : obj[clave];
+        if (typeof orig !== 'function') return;
+        definir(f, 'name', { value: orig.name, configurable: true });
+        definir(f, 'length', { value: orig.length, configurable: true });
+        definir(obj, clave, { value: f, writable: true, configurable: true, enumerable: d ? d.enumerable : false });
+      } catch {}
+    };
+    let stderr = null;
+    try {
+      stderr = process.stderr;
+    } catch {}
+    if (stderr) {
+      envolver(stderr, 'write', {
+        write(chunk, encoding, cb) {
+          write(PREF_STDERR);
+          return write(chunk, encoding, cb);
+        },
+      }.write);
+    }
+    const writeSyncReal = fs.writeSync;
+    // Sin spread (el programa puede pisar el iterador de los arreglos): `arguments` tal cual o
+    // copiado a mano con el fd 1.
+    envolver(fs, 'writeSync', {
+      writeSync(fd) {
+        if (fd !== 2) return aplicar(writeSyncReal, this, arguments);
+        const args = [1];
+        for (let i = 1; i < arguments.length; i++) args[i] = arguments[i];
+        writeSync(fs, 1, PREF_STDERR);
+        return aplicar(writeSyncReal, this, args);
+      },
+    }.writeSync);
+    envolver(process, '_rawDebug', {
+      _rawDebug() {
+        write(`${PREF_STDERR}${aplicar(formato, util, arguments)}\n`);
+      },
+    }._rawDebug);
   }
 
   // M30 / re-chequeo de `global_conocido`: stub inerte y determinista. Una funcion

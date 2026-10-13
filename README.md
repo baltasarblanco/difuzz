@@ -27,8 +27,14 @@ difieren, el minifier cambió el comportamiento del programa: es un candidato a 
    - hace de sensor de asunciones: marca con *flags* si el programa usa algo que el minifier
      declara asumido (contenido de `Function.prototype.toString` o de `.stack`, built-ins
      pisados, TDZ, ...);
-   - manda `console.error`/`warn`/`trace` a stdout y, al salir, imprime los globals que el
-     programa creó.
+   - manda `console.error`/`warn`/`trace` a stdout (`[error] ...`, `[warn] ...`, `[trace] ...`),
+     y también lo que el programa escribe directo a stderr con `process.stderr.write`,
+     `fs.writeSync(2, ...)` o `process._rawDebug` (`[stderr] ...`, una vez por escritura); al
+     salir, imprime los globals que el programa creó. El stderr real de node no se compara (trae
+     rutas y pids); tampoco lo que llega al fd 2 por otras vías: `process.stderr.end(dato)`,
+     `fs.write(2, ...)`, `fs.writeFileSync(2)` o `'/dev/stderr'`, un stream nuevo sobre el fd 2 y
+     los procesos hijos que heredan el stderr. Una escritura que lanza (un `chunk` inválido) deja
+     el `[stderr] ` sin dato, igual en los dos lados;
 4. **Comparar.** Si el estado de salida o el stdout difieren, hay divergencia, de una de estas
    clases (`kind`):
 
@@ -425,7 +431,8 @@ programa mudo), el envoltorio de módulos del carril B, `--invocar` ni las varia
 `--mutaciones`: un mudo se compara solo por su estado de salida y sus globals. Se compara lo que
 el programa imprime en stdout, con los mismos límites que el oráculo: `console.error`,
 `console.warn` y `console.trace` sí cuentan (el preload los pasa a stdout como `[error] ...`,
-`[warn] ...`, `[trace] ...`), pero el stderr de node no, y de un `throw` o un rechazo no
+`[warn] ...`, `[trace] ...`), y también lo escrito directo a stderr por las vías que cubre el
+preload (`[stderr] ...`, ver [Cómo funciona](#cómo-funciona)), pero el stderr de node no, y de un `throw` o un rechazo no
 atrapados solo se compara el tipo (`!dz throw <Tipo>`), no el mensaje: un crudo y un A que
 lanzan el mismo tipo con otro mensaje dan iguales. Un bug del parser que hace que el texto no
 parsee (`descarte:parse_*`) no llega al chequeo. Si el crudo y A se cuelgan los dos e imprimen lo
@@ -935,7 +942,7 @@ DIFUZZ_SIN_NODE=1 cargo test --no-fail-fast           # sin node: saltea y cuent
 Sin `node` en el `PATH`, los tests que lo necesitan fallan con un mensaje claro. Con
 `DIFUZZ_SIN_NODE=1` se saltean y cada uno deja una línea `DIFUZZ_SALTEADO_SIN_NODE` en stderr.
 
-- **Golden de detección** (`tests/golden/`): 16 casos con bugs conocidos de oxc y swc, en 8
+- **Golden de detección** (`tests/golden/`): 17 casos con bugs conocidos de oxc y swc, en 8
   celdas, más `--invocar` y `--stubs`; la clase esperada de cada caso está en `esperado.tsv`.
 - **Aceptación de los re-chequeos** (`tests/aceptacion/rechequeos/`): 176 casos que combinan un
   bug real de oxc con un flag de asunción (o con la forma en que se imprime), en las 4 celdas de oxc

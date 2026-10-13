@@ -161,6 +161,43 @@ fn tabla() -> Vec<Fila> {
             destino: Destino::Div,
             meta: &["kind: Stdout\n", "\nobserved: true\n", "\nknown: no\n", TRAZA_DIV],
         },
+        // 11.1 (I1 de rev-integral-1): lo que el programa escribe directo a stderr se compara (el
+        // preload lo pasa a stdout como `[stderr] ...`). Antes: iguales (con algo en stdout) o
+        // descarte `mudo_sin_bindings` (sin nada).
+        Fila {
+            caso: "div-stderr-write",
+            programa: "process.stderr.write(\"41\\n\");\n",
+            back: Back::Rompe("41", "42"),
+            args: &[],
+            destino: Destino::Div,
+            meta: &["kind: Stdout\n", "\nobserved: false\n", "\nknown: no\n", TRAZA_DIV],
+        },
+        Fila {
+            caso: "div-stderr-fd2",
+            programa: "console.log(\"listo\");\nrequire(\"fs\").writeSync(2, \"41\\n\");\n",
+            back: Back::Rompe("41", "42"),
+            args: &[],
+            destino: Destino::Div,
+            meta: &["kind: Stdout\n", "\nobserved: false\n", "\nknown: no\n", TRAZA_DIV],
+        },
+        Fila {
+            caso: "div-stderr-rawdebug",
+            programa: "process._rawDebug(\"41\");\n",
+            back: Back::Rompe("41", "42"),
+            args: &[],
+            destino: Destino::Div,
+            meta: &["kind: Stdout\n", "\nobserved: false\n", "\nknown: no\n", TRAZA_DIV],
+        },
+        // 11.1, control de ruido: un stack escrito a stderr que solo cambia de columna al
+        // minificar no diverge (las lineas de los marcos siguen sin el prefijo `[stderr] `).
+        Fila {
+            caso: "stderr-stack-columna",
+            programa: "process.stderr.write(new Error('e').stack + '\\n');\n",
+            back: Back::Rompe("write(new", "write( new"),
+            args: &[],
+            destino: Destino::Ninguno,
+            meta: &[],
+        },
         // Flag estatico real (checks.rs: `coercion`) -> asuncion de la tabla de oxc.
         Fila {
             caso: "known-estatico",
