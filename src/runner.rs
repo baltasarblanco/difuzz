@@ -134,6 +134,11 @@ pub const MAX_SALIDA_MIB: u64 = 16;
 /// 11.7 (I5): causa de `recursos/` de una ejecucion que escribio mas que el tope de salida.
 pub const NODE_SALIDA: &str = "node_salida";
 
+/// 11.2b (A-H1): por cuanto se multiplican los topes al confirmar un B que paso uno
+/// (`Runner::con_topes_mayores`).
+pub const TOPE_MAYOR_RSS: u64 = 2;
+pub const TOPE_MAYOR_SALIDA: u64 = 4;
+
 /// 11.5 (I3): una ejecucion de node paso un tope de difuzz (memoria). No es un resultado del
 /// programa ni un error del runner: lo que se leyo de ella no se compara. `run_file` no devuelve
 /// un `Exec`: desenrolla con esto (`std::panic::resume_unwind`, que no llama al hook de panic)
@@ -143,7 +148,12 @@ pub const NODE_SALIDA: &str = "node_salida";
 /// divergencia, ni known/, ni descartes por algo de difuzz).
 /// 11.7 (I5): tambien el tope de la salida que se junta (`NODE_SALIDA`): una salida cortada no se
 /// compara como si estuviera entera.
-#[derive(Debug)]
+///
+/// 11.2b (A-H1/B-H2, revisiones de 11b): el caso entero va a `recursos/` solo si el que se paso es
+/// el original (A). Si se pasa el minificado (B) con A terminado, `main::correr_b` lo atrapa y sigue
+/// con `parcial` (status `Signal`, `Exec::tope`): `confirm` lo repite con topes mayores, como un
+/// Timeout de B, y si se vuelve a pasar es una divergencia. Si se pasa un re-chequeo o una
+/// confirmacion de A, ese paso queda Inconcluso (`clasificar::sin_tope`) y el caso sigue en `div/`.
 pub struct Excedido {
     /// `NODE_MEMORIA` o `NODE_SALIDA`.
     pub causa: &'static str,
@@ -154,6 +164,15 @@ pub struct Excedido {
     pub programa: String,
     /// Extension del programa (`cjs` o `mjs`).
     pub ext: &'static str,
+    /// 11.2b: lo que se junto (cortado), con status `Signal` y la causa en el canal (`Exec::tope`).
+    /// Nunca se compara su salida: solo dice que la ejecucion no termino dentro de los topes.
+    pub parcial: Exec,
+}
+
+impl std::fmt::Debug for Excedido {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Excedido").field("causa", &self.causa).field("mensaje", &self.mensaje).finish_non_exhaustive()
+    }
 }
 
 pub struct Exec {
@@ -195,6 +214,14 @@ impl Exec {
     /// cuenta como entera con el sensor.
     pub fn sensor_degradado(&self) -> Option<&'static str> {
         [SENSOR_CAIDO, SENSOR_TOPE, SENSOR_OMITIDO].into_iter().find(|s| self.ctl.lines().any(|l| l == *s))
+    }
+
+    /// 11.2b (A-H1): esta es la parte juntada de una ejecucion que paso un tope de difuzz
+    /// (`Excedido::parcial`, primera linea del canal): `NODE_MEMORIA` o `NODE_SALIDA`. Su status es
+    /// `Signal` (difuzz la mato): `oracle::compare` la ve como divergencia y nunca como igual.
+    pub fn tope(&self) -> Option<&'static str> {
+        let primera = self.ctl.lines().next()?;
+        [NODE_MEMORIA, NODE_SALIDA].into_iter().find(|c| *c == primera && self.status == Status::Signal)
     }
 
     /// 7.4 (Fase R I3): `self` es el mismo programa repetido sin el sensor porque el sensor
@@ -522,6 +549,21 @@ impl Runner {
     pub fn con_tope_rss(mut self, bytes: u64) -> Runner {
         self.tope_rss = bytes;
         self
+    }
+
+    /// 11.2b (A-H1): el mismo runner (mismos archivos) con los topes mayores con que se confirma un B
+    /// que paso uno (`main::confirm`, como el timeout largo de un B en Timeout): el doble de RSS y
+    /// cuatro veces la salida. Un tope en 0 (sin tope) queda en 0.
+    pub fn con_topes_mayores(&self) -> Runner {
+        let mut r = self.prestar();
+        r.tope_rss = r.tope_rss.saturating_mul(TOPE_MAYOR_RSS);
+        r.tope_salida = r.tope_salida.saturating_mul(TOPE_MAYOR_SALIDA);
+        r
+    }
+
+    /// 11.2b: los topes de este runner (RSS, salida), en bytes, para los mensajes.
+    pub fn topes(&self) -> (u64, u64) {
+        (self.tope_rss, self.tope_salida)
     }
 
     /// n-sandbox: todas las ejecuciones de este runner (y de sus copias) con `s`.
@@ -1144,17 +1186,21 @@ fn run_file(r: &Runner, script: &Path, start: Instant, timeout: Duration, opts: 
     let take = |b: &Arc<Mutex<Vec<u8>>>| std::mem::take(&mut *b.lock().unwrap_or_else(|e| e.into_inner()));
     let stdout = take(&out_buf);
     let stderr = take(&err_buf);
-    // 11.5 (I3) / 11.7 (I5): lo que se leyo de una ejecucion que paso un tope no se compara (ver
-    // `Excedido`). La salida primero: lo juntado ya esta cortado (y node pudo terminar solo antes de
-    // que el bucle lo viera: igual se cuenta, lo que se escribio paso el tope).
-    if salida.excedida.load(std::sync::atomic::Ordering::SeqCst) {
+    // 11.5 (I3) / 11.7 (I5): una ejecucion que paso un tope no vuelve como un `Exec` comparable
+    // (ver `Excedido`). La salida primero: lo juntado ya esta cortado (y node pudo terminar solo
+    // antes de que el bucle lo viera: igual se cuenta, lo que se escribio paso el tope).
+    let excedida = if salida.excedida.load(std::sync::atomic::Ordering::SeqCst) {
         let n = salida.usado.load(std::sync::atomic::Ordering::SeqCst);
-        exceder(r, script, NODE_SALIDA, format!("escribio por stdout y stderr {} MiB o mas: paso el tope de salida de {} MiB (lo de mas no se junto; matada al verlo)", n >> 20, r.tope_salida >> 20));
-    }
-    if por_memoria {
+        Some((
+            NODE_SALIDA,
+            format!("escribio por stdout y stderr {} MiB o mas: paso el tope de salida de {} MiB (lo de mas no se junto; matada al verlo)", n >> 20, r.tope_salida >> 20),
+        ))
+    } else if por_memoria {
         let como = if matado_por_rss { "matada al pasarlo" } else { "el pico cayo entre dos lecturas; termino sola" };
-        exceder(r, script, NODE_MEMORIA, format!("paso el tope de RSS de node: {} MiB > {} MiB ({como})", pico >> 20, r.tope_rss >> 20));
-    }
+        Some((NODE_MEMORIA, format!("paso el tope de RSS de node: {} MiB > {} MiB ({como})", pico >> 20, r.tope_rss >> 20)))
+    } else {
+        None
+    };
 
     let mut ctl = std::fs::read(&r.ctl).map(|b| decode_lossless(&b)).unwrap_or_default();
     let (stdout, stderr) = (decode_lossless(&stdout), decode_lossless(&stderr));
@@ -1164,13 +1210,17 @@ fn run_file(r: &Runner, script: &Path, start: Instant, timeout: Duration, opts: 
         ctl.push_str(SANDBOX);
         ctl.push('\n');
     }
-    Exec {
+    let e = Exec {
         status,
         stdout,
         stderr,
         flags: ctl_flags(&ctl),
         elapsed: start.elapsed(),
         ctl,
+    };
+    match excedida {
+        Some((causa, que)) => exceder(r, script, causa, que, e),
+        None => e,
     }
 }
 
@@ -1606,14 +1656,19 @@ fn drain(mut pipe: impl Read + Send + 'static, done: mpsc::Sender<()>, salida: A
 
 /// 11.5 (I3): desenrolla con `Excedido` (ver ahi). `script` es el archivo que corrio node (el
 /// programa, o el envoltorio observador que lo importa); el texto que se guarda es el del programa.
-fn exceder(r: &Runner, script: &Path, causa: &'static str, que: String) -> ! {
+/// 11.2b (A-H1): `parcial` es lo que se junto de la ejecucion (cortado), con status `Signal` y la
+/// causa como primera linea del canal (`Exec::tope`): lo usa quien sabe que la que se paso es B.
+fn exceder(r: &Runner, script: &Path, causa: &'static str, que: String, mut parcial: Exec) -> ! {
     // Sin la ruta: lleva el pid de difuzz y el worker.
     let de = if script == r.script { "del programa (programa.*)" } else { "del envoltorio observador que importa el programa (programa.*)" };
+    parcial.status = Status::Signal;
+    parcial.ctl.insert_str(0, &format!("{causa}\n"));
     std::panic::resume_unwind(Box::new(Excedido {
         causa,
         mensaje: format!("{causa}: la ejecucion de node {de} {que}"),
         programa: std::fs::read_to_string(&r.script).unwrap_or_default(),
         ext: r.kind.ext(),
+        parcial,
     }))
 }
 

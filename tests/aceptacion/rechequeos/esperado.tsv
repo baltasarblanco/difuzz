@@ -856,6 +856,24 @@
 26-b102b-l01-rama-elegida-por-bug	oxc-a-carril_a	known
 26-b102b-l01-rama-elegida-por-bug	oxc-b-core_defaults	known
 26-b102b-l01-rama-elegida-por-bug	oxc-b-carril_a	known
+# 11.2b (rev-b11b-A H1, rev-b11b-B H2): un tope de node que pasa B (con A terminado) o un re-chequeo no saca de
+# div/ una divergencia real. t01: solo B escribe 40 MiB (> 16): repetido con los topes mayores (64 MiB) termina y
+# diverge por stdout. t02: solo el re-chequeo de profundidad (A con mas pila) escribe 20 MiB: el paso queda
+# Inconcluso. t03: B en un bucle que imprime 200 MiB en lineas de 64 KiB: pasa el tope tambien con los mayores, divergencia
+# ExitStatus (lo mata difuzz; su salida cortada no se compara). Con 312ec1b los tres iban a recursos/; con 2ff4d90,
+# t01, t02 y t03 a div:Stdout (t03 juntando 200 MiB en memoria). MEDIDO con el binario de 11.2b.
+27-b11-t01-b-solo-salida	oxc-a-core_defaults	div:Stdout
+27-b11-t01-b-solo-salida	oxc-a-carril_a	div:Stdout
+27-b11-t01-b-solo-salida	oxc-b-core_defaults	div:Stdout
+27-b11-t01-b-solo-salida	oxc-b-carril_a	div:Stdout
+27-b11-t02-rechequeo-salida	oxc-a-core_defaults	div:Stdout
+27-b11-t02-rechequeo-salida	oxc-a-carril_a	div:Stdout
+27-b11-t02-rechequeo-salida	oxc-b-core_defaults	div:Stdout
+27-b11-t02-rechequeo-salida	oxc-b-carril_a	div:Stdout
+27-b11-t03-b-bucle-imprime	oxc-a-core_defaults	div:ExitStatus
+27-b11-t03-b-bucle-imprime	oxc-a-carril_a	div:ExitStatus
+27-b11-t03-b-bucle-imprime	oxc-b-core_defaults	div:ExitStatus
+27-b11-t03-b-bucle-imprime	oxc-b-carril_a	div:ExitStatus
 # 11.3 (I6 de rev-integral-1): el re-chequeo de nombres de core_defaults pide ademas que B difiera de A
 # solo en nombres de su texto. n01/n02: el bug E de oxc en un programa que nombra `.name` (div/ en las 4;
 # con el paso de nombres siempre Explica, la mutacion m1, iban a known/ en core_defaults). p01: solo el

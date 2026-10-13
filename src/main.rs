@@ -118,12 +118,13 @@ uso: difuzz <corpus_dir> [--out DIR] [--minifier M] [--config C] [--forma F] [--
                  256 MiB y 4 GiB). El hijo de analisis que se pasa es un fallo del analisis, no recursos/
   --mem-node MiB 11.5: tope de RSS de cada ejecucion de node (A, B, confirmaciones, re-chequeos), medido
                  mientras corre y en su pico al terminar (default: la misma cuenta que --mem-hijo sin
-                 el, MemTotal/2 / workers entre 256 MiB y 4 GiB; --mem-hijo no lo cambia). Una
-                 ejecucion que lo pasa muere y el caso (o la variante) va a recursos/ con causa
-                 node_memoria: lo que imprimio no se compara
+                 el, MemTotal/2 / workers entre 256 MiB y 4 GiB; --mem-hijo no lo cambia). La
+                 ejecucion que lo pasa muere y lo que imprimio no se compara. 11.2b: si fue el
+                 original, el caso (o la variante) va a recursos/ (causa node_memoria); si fue el
+                 minificado, se repite con topes mayores y, si los vuelve a pasar, div/ ExitStatus;
+                 si fue un re-chequeo o una confirmacion de A, ese paso queda Inconcluso
   --max-salida MiB 11.7: tope de lo que difuzz junta de cada ejecucion de node, stdout mas stderr
-                 (default: 16). La que lo pasa muere y el caso (o la variante) va a recursos/ con
-                 causa node_salida: una salida cortada no se compara
+                 (default: 16). Como --mem-node (causa node_salida): una salida cortada no se compara
 
   oraculo sin debug assertions (R1-H05): este binario lleva debug assertions (Cargo.toml) y el
   paquete npm del minifier no. Ante un panic, el caso se re-minifica con el mismo difuzz compilado
@@ -2003,6 +2004,18 @@ fn texto_del_caso(path: &Path, cli: &Cli) -> String {
     std::fs::read_to_string(path).map(|raw| cli.forma.apply(&raw)).unwrap_or_default()
 }
 
+/// 11.2b (A-H1/B-H2): B (el minificado) corrido por `runner`. Si pasa un tope de node, no se va el
+/// caso a `recursos/`: vuelve lo juntado, cortado, con status `Signal` (`Exec::tope`), y `confirm`
+/// lo trata como a un Timeout de B.
+fn correr_b(runner: &runner::Runner, minified: &str) -> runner::Exec {
+    correr_b_con(runner, |r| r.run(minified))
+}
+
+/// 11.2b: `correr_b` con otra forma de correrlo (el timeout largo de `confirm`).
+fn correr_b_con(runner: &runner::Runner, correr: impl FnOnce(&runner::Runner) -> runner::Exec) -> runner::Exec {
+    sin_pasar_topes(|| correr(runner)).unwrap_or_else(|x| x.parcial)
+}
+
 /// 11.5 (I3): `f` (que corre node) o el tope que paso una de sus ejecuciones. Cualquier otro panic
 /// sigue de largo.
 fn sin_pasar_topes<T>(f: impl FnOnce() -> T) -> Result<T, Box<runner::Excedido>> {
@@ -2313,7 +2326,7 @@ fn toca_sandbox(runner: &runner::Runner, a: &runner::Exec, minified: &str) -> To
     if !runner.toco_sandbox(a) {
         return TocaSandbox::No;
     }
-    let b = runner.run(minified);
+    let b = correr_b(runner, minified);
     if matches!(b.status, Status::Failed(_)) {
         TocaSandbox::SinB
     } else if runner.toco_sandbox(&b) {
@@ -2451,7 +2464,7 @@ fn compare_and_report(
         }
         return false;
     }
-    let b = b_previo.unwrap_or_else(|| runner.run(minified));
+    let b = b_previo.unwrap_or_else(|| correr_b(runner, minified));
     // I3 (revision-b456): el sensor cambia lo que el programa observa (V8 formatea el
     // stack al pausar: llama al toString del programa y congela `.stack`). Es simetrico
     // solo si A y B corrieron igual. Si alguno corrio sin el sensor (`sensor_caido`: se
@@ -2479,7 +2492,7 @@ fn compare_and_report(
                 a_cached = false;
             }
             if db != Some(runner::SENSOR_CAIDO) {
-                con_sensor_b = Some(std::mem::replace(&mut b, runner.run(minified)));
+                con_sensor_b = Some(std::mem::replace(&mut b, correr_b(runner, minified)));
             }
             let lado = |d: Option<&str>| match d {
                 Some(runner::SENSOR_CAIDO) => "sin el sensor (sensor_caido: senal o timeout con el)",
@@ -2500,7 +2513,12 @@ fn compare_and_report(
         return true;
     }
     let elapsed_a = a.elapsed;
-    let (mut a, mut b) = match confirm(ctx, runner, stats, rel, original, minified, a, a_cached, b) {
+    // 11.2b: lo que hizo la confirmacion con un tope de node (va a la traza de meta.txt).
+    let mut pasos_tope = Vec::new();
+    if let Some(c) = b.tope() {
+        pasos_tope.push(format!("B (el minificado) paso el tope de node ({c})"));
+    }
+    let (mut a, mut b) = match confirm(ctx, runner, stats, rel, original, minified, a, a_cached, b, &mut pasos_tope) {
         Confirmed::Same { corto: true } => return descarte_corto(ctx, stats, rel, elapsed_a),
         Confirmed::Same { corto: false } => return false,
         Confirmed::Nondeterministic => return true,
@@ -2571,6 +2589,10 @@ fn compare_and_report(
             if let Some(p) = paso_sensor {
                 traza.anteponer("sensor", p);
             }
+            // 11.2b: B o una confirmacion de A pasaron un tope de node.
+            if !pasos_tope.is_empty() {
+                traza.anteponer("tope_node", pasos_tope.join("; "));
+            }
             // 9.1: solo puede pasar con los nombres crudos (keep_names en la celda): con los
             // nombres borrados `compare` ya habria dado Same arriba.
             if oracle::solo_nombres_de_inspect(&a, &b) {
@@ -2640,6 +2662,7 @@ fn confirm(
     a: runner::Exec,
     a_cached: bool,
     b: runner::Exec,
+    pasos: &mut Vec<String>,
 ) -> Confirmed {
     let diverges = |a: &runner::Exec, b: &runner::Exec| matches!(oracle::compare(a, b), oracle::Verdict::Divergence(_));
     let (mut a, mut b) = (a, b);
@@ -2648,35 +2671,75 @@ fn confirm(
     }
     if b.status == Status::Timeout {
         let longer = (runner.timeout() * 4).max(a.elapsed * 20);
-        let b2 = runner.run_with_timeout(minified, longer);
-        if !matches!(b2.status, Status::Timeout | Status::Failed(_)) {
+        let b2 = correr_b_con(runner, |r| r.run_with_timeout(minified, longer));
+        if let Some(c) = b2.tope() {
+            // 11.2b: no termino en el timeout y con mas tiempo paso un tope (un bucle que imprime o
+            // que reserva): sigue el Timeout, que es lo que se vio dentro de los topes.
+            pasos.push(format!("B en Timeout, repetido con {longer:?}: paso el tope de node ({c}) antes de terminar; queda el Timeout"));
+        } else if !matches!(b2.status, Status::Timeout | Status::Failed(_)) {
             b = b2;
             if !diverges(&a, &b) {
                 return Confirmed::Same { corto: corto_por_sandbox(runner, &a, &b) };
             }
         }
     }
+    // 11.2b (A-H1/B-H2): B paso un tope de difuzz con A terminado. Como un Timeout de B: se repite
+    // con los topes mayores (`Runner::con_topes_mayores`); si ahora termina, se compara con eso; si
+    // se vuelve a pasar (o no termina a tiempo), la divergencia sigue con el B cortado (status
+    // `Signal`: `oracle::compare` da ExitStatus, sin mirar la salida cortada).
+    if let Some(c) = b.tope() {
+        let mayor = runner.con_topes_mayores();
+        let (rss, salida) = mayor.topes();
+        let b2 = correr_b(&mayor, minified);
+        let topes = format!("{} MiB de RSS, {} MiB de salida", rss >> 20, salida >> 20);
+        match b2.tope() {
+            Some(c2) => pasos.push(format!(
+                "B paso el tope de node ({c}) y A no; repetido con topes mayores ({topes}) lo vuelve a pasar ({c2}): B no termina dentro de los topes (lo mato difuzz) -> divergencia ExitStatus, su salida cortada no se compara"
+            )),
+            None if matches!(b2.status, Status::Timeout | Status::Failed(_)) => pasos.push(format!(
+                "B paso el tope de node ({c}) y A no; repetido con topes mayores ({topes}) no termino ({:?}): sigue la divergencia con el B cortado",
+                b2.status
+            )),
+            None => {
+                pasos.push(format!("B paso el tope de node ({c}) y A no; repetido con topes mayores ({topes}) termino y se compara con eso"));
+                b = b2;
+                if !diverges(&a, &b) {
+                    return Confirmed::Same { corto: corto_por_sandbox(runner, &a, &b) };
+                }
+            }
+        }
+    }
     let mut fresh_ok = false;
     if a_cached {
-        let a1 = runner.run(original);
-        if same_exec(&a1, &a) {
-            // M21: el A fresco (su elapsed es de esta corrida, no de la cacheada).
-            a = a1;
-            fresh_ok = true;
-        } else if !matches!(a1.status, Status::Failed(_)) {
-            ctx.cache.tombstone(runner, original);
-            a = a1;
-            if !diverges(&a, &b) {
-                return Confirmed::Same { corto: corto_por_sandbox(runner, &a, &b) };
+        // 11.2b (A-H1/B-H2): una confirmacion de A que pasa un tope no confirma ni descarta (como
+        // un Failed): queda en la traza y sigue el A que se tenia.
+        match sin_pasar_topes(|| runner.run(original)) {
+            Err(x) => pasos.push(format!("A fresco (confirmacion de la cache) paso un tope de node: inconcluso, sigue el A de la cache ({})", x.mensaje)),
+            Ok(a1) => {
+                if same_exec(&a1, &a) {
+                    // M21: el A fresco (su elapsed es de esta corrida, no de la cacheada).
+                    a = a1;
+                    fresh_ok = true;
+                } else if !matches!(a1.status, Status::Failed(_)) {
+                    ctx.cache.tombstone(runner, original);
+                    a = a1;
+                    if !diverges(&a, &b) {
+                        return Confirmed::Same { corto: corto_por_sandbox(runner, &a, &b) };
+                    }
+                }
             }
         }
     }
     if !fresh_ok {
-        let a2 = runner.run(original);
-        if !matches!(a2.status, Status::Failed(_)) && !same_exec(&a2, &a) {
-            stats.a_nondet += 1;
-            ctx.reporter.discard(rel, "no_determinista", a2.elapsed);
-            return Confirmed::Nondeterministic;
+        match sin_pasar_topes(|| runner.run(original)) {
+            Err(x) => pasos.push(format!("A otra vez (no determinismo) paso un tope de node: inconcluso, sigue la divergencia ({})", x.mensaje)),
+            Ok(a2) => {
+                if !matches!(a2.status, Status::Failed(_)) && !same_exec(&a2, &a) {
+                    stats.a_nondet += 1;
+                    ctx.reporter.discard(rel, "no_determinista", a2.elapsed);
+                    return Confirmed::Nondeterministic;
+                }
+            }
         }
     }
     Confirmed::Divergence(Box::new((a, b)))

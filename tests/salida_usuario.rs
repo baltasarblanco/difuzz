@@ -603,11 +603,13 @@ fn indice_con_escrituras_perdidas_no_se_publica() {
     std::fs::remove_dir_all(&b).unwrap();
 }
 
-/// 11.5 (I3): una ejecucion de node que pasa `--mem-node` manda el caso a recursos/ (causa
-/// `node_memoria`, con el programa que corrio), nunca a iguales ni a div/: el original que reserva
-/// de mas (`mem`) y el que solo reserva de mas minificado (`solo-b`: mide su propio texto; sin el
-/// tope da iguales). Una variante de `--mutaciones` que pasa el tope va a recursos/ ella sola (con
-/// su `variante.js`) y su base sigue en iguales. La identidad de `total=` cierra.
+/// 11.5 (I3): una ejecucion del original (A) que pasa `--mem-node` manda el caso a recursos/ (causa
+/// `node_memoria`, con el programa que corrio); nunca a iguales. 11.2b (rev-b11b-A H1, rev-b11b-B
+/// H2): el que solo reserva de mas minificado (`solo-b`: mide su propio texto) no va a recursos/: B
+/// se repite con los topes mayores, lo vuelve a pasar y es una divergencia (ExitStatus, con el paso
+/// `tope_node` en meta.txt). Un re-chequeo que pasa el tope (`d01`: el de profundidad reserva el doble)
+/// queda Inconcluso y el caso sigue en div/. Una variante de `--mutaciones` que pasa el tope va a
+/// recursos/ ella sola (con su `variante.js`) y su base sigue en iguales. La identidad de `total=` cierra.
 #[test]
 fn tope_de_memoria_de_node_va_a_recursos() {
     if !test_util::requiere_node() {
@@ -629,20 +631,34 @@ fn tope_de_memoria_de_node_va_a_recursos() {
     assert_eq!(rc(&o), Some(0), "{}", err(&o));
     let stdout = String::from_utf8_lossy(&o.stdout);
     let stats = stdout.lines().find(|l| l.starts_with("total=")).unwrap();
-    for (c, n) in [("total", 3), ("iguales", 1), ("DIVERGENCIAS", 0), ("RECURSOS", 2), ("node_memoria", 2), ("panics_del_fuzzer", 0)] {
+    for (c, n) in [("total", 3), ("iguales", 1), ("DIVERGENCIAS", 1), ("RECURSOS", 1), ("node_memoria", 1), ("panics_del_fuzzer", 0)] {
         assert_eq!(campo(stats, c), n, "{c}: {stats}");
     }
     assert!(err(&o).contains("topes de node: 256 MiB de RSS por ejecucion (--mem-node) y 16 MiB de salida"), "{}", err(&o));
     let celda = out.join("oxc+carril_a+tal_cual");
-    for (c, dice) in [("mem", "Buffer.alloc"), ("solo-b", "readFileSync")] {
-        let meta = std::fs::read_to_string(celda.join("recursos").join(c).join("meta.txt")).unwrap();
-        assert!(meta.contains("causa: node_memoria\n") && meta.contains("paso el tope de RSS de node") && meta.contains("> 256 MiB"), "{meta}");
-        assert!(std::fs::read_to_string(celda.join("recursos").join(c).join("programa.cjs")).unwrap().contains(dice));
-    }
-    // El de `solo-b` es el minificado (sin el relleno).
-    assert!(!std::fs::read_to_string(celda.join("recursos/solo-b/programa.cjs")).unwrap().contains("relleno"));
+    let meta = std::fs::read_to_string(celda.join("recursos/mem/meta.txt")).unwrap();
+    assert!(meta.contains("causa: node_memoria\n") && meta.contains("paso el tope de RSS de node") && meta.contains("> 256 MiB"), "{meta}");
+    assert!(std::fs::read_to_string(celda.join("recursos/mem/programa.cjs")).unwrap().contains("Buffer.alloc"));
+    let meta = std::fs::read_to_string(celda.join("div/solo-b/meta.txt")).unwrap();
+    assert!(meta.contains("kind: ExitStatus\n") && meta.contains("tope_node: B (el minificado) paso el tope de node (node_memoria)"), "{meta}");
+    assert!(meta.contains("repetido con topes mayores (512 MiB de RSS, 64 MiB de salida) lo vuelve a pasar"), "{meta}");
     let filas = std::fs::read_to_string(celda.join("descartes.tsv")).unwrap().lines().filter(|l| !l.starts_with('#')).count();
-    assert_eq!(campo(stats, "total"), campo(stats, "iguales") + campo(stats, "RECURSOS") + filas, "{stats}");
+    assert_eq!(campo(stats, "total"), campo(stats, "iguales") + campo(stats, "DIVERGENCIAS") + campo(stats, "RECURSOS") + filas, "{stats}");
+
+    // Un re-chequeo que pasa el tope: 24-f1-d01 de la aceptacion (bug F de oxc, div:Stdout) con una
+    // reserva proporcional a la profundidad de pila (rev-b11b-B, recheque-excede.sh): A y B ~240 MiB,
+    // la corrida honda del re-chequeo de profundidad el doble.
+    let corpus_r = b.join("corpus-r");
+    let d01 = "let d = 0; function r() { d++; r(); } try { r(); } catch {}\nconst reserva = Buffer.alloc(d * 16000, 1);\nlet a = [];\nfor (let i = 0; i < 7000; i++) a = [a];\nfunction h(v) {\n  const t = [\"\", \"abc\".substring(1, undefined)];\n  console.log(JSON.stringify(t[+(typeof v !== \"string\")]));\n}\nPromise.resolve(a).then(JSON.stringify).then(h, h);\n";
+    caso(&corpus_r, "d01", d01.as_bytes());
+    let out_r = b.join("out-r");
+    let o = difuzz(&b, &[corpus_r.to_str().unwrap(), "--out", out_r.to_str().unwrap(), "--mem-node", "320", "--no-cache", "--jobs", "1"]);
+    assert_eq!(rc(&o), Some(0), "{}", err(&o));
+    let stdout = String::from_utf8_lossy(&o.stdout);
+    let stats = stdout.lines().find(|l| l.starts_with("total=")).unwrap();
+    assert_eq!((campo(stats, "DIVERGENCIAS"), campo(stats, "RECURSOS")), (1, 0), "{stats}");
+    let meta = std::fs::read_to_string(out_r.join("oxc+carril_a+tal_cual/div/d01/meta.txt")).unwrap();
+    assert!(meta.contains("kind: Stdout\n") && meta.contains("profundidad: Inconcluso -> profundidad_inconcluso: una ejecucion del re-chequeo paso un tope de node"), "{meta}");
 
     // Una variante: `n` perturbado reserva (el base no). Las variantes son deterministas (semilla
     // del texto); con 30 + 10 alguna toca `n`.
@@ -669,11 +685,11 @@ fn tope_de_memoria_de_node_va_a_recursos() {
     std::fs::remove_dir_all(&b).unwrap();
 }
 
-/// 11.7 (I5): una ejecucion de node que escribe mas que `--max-salida` (stdout mas stderr) manda el
-/// caso a recursos/ (causa `node_salida`), nunca a iguales ni a div/: lo juntado esta cortado. El
-/// original que escribe de mas por stdout (`grande`) o por stderr (`err`), y el que solo escribe de
-/// mas minificado (`solo-b`; sin el tope, div/: no se compara un B cortado contra un A entero, se
-/// guarda para correrlo con un tope mayor). Lo que entra en el tope se compara como siempre (`entra`).
+/// 11.7 (I5): un original que escribe mas que `--max-salida` (stdout mas stderr) manda el caso a
+/// recursos/ (causa `node_salida`), nunca a iguales: lo juntado esta cortado. Por stdout (`grande`) o
+/// por stderr (`err`). 11.2b (rev-b11b-A H1): el que solo escribe de mas minificado (`solo-b`, 3 MiB
+/// contra 1 MiB de A) no va a recursos/: B se repite con el tope mayor (8 MiB), termina y diverge por
+/// stdout, como sin topes. Lo que entra en el tope se compara como siempre (`entra`).
 #[test]
 fn tope_de_salida_de_node_va_a_recursos() {
     if !test_util::requiere_node() {
@@ -700,17 +716,19 @@ fn tope_de_salida_de_node_va_a_recursos() {
     assert_eq!(rc(&o), Some(0), "{}", err(&o));
     let stdout = String::from_utf8_lossy(&o.stdout);
     let stats = stdout.lines().find(|l| l.starts_with("total=")).unwrap();
-    for (c, n) in [("total", 4), ("iguales", 1), ("DIVERGENCIAS", 0), ("RECURSOS", 3), ("node_salida", 3), ("node_memoria", 0), ("panics_del_fuzzer", 0)] {
+    for (c, n) in [("total", 4), ("iguales", 1), ("DIVERGENCIAS", 1), ("RECURSOS", 2), ("node_salida", 2), ("node_memoria", 0), ("panics_del_fuzzer", 0)] {
         assert_eq!(campo(stats, c), n, "{c}: {stats}");
     }
     assert!(err(&o).contains(" y 2 MiB de salida (--max-salida)"), "{}", err(&o));
     let celda = out.join("oxc+carril_a+tal_cual");
-    for c in ["grande", "err", "solo-b"] {
+    for c in ["grande", "err"] {
         let meta = std::fs::read_to_string(celda.join("recursos").join(c).join("meta.txt")).unwrap();
         assert!(meta.contains("causa: node_salida\n") && meta.contains("paso el tope de salida de 2 MiB"), "{meta}");
         assert!(celda.join("recursos").join(c).join("programa.cjs").is_file());
     }
+    let meta = std::fs::read_to_string(celda.join("div/solo-b/meta.txt")).unwrap();
+    assert!(meta.contains("kind: Stdout\n") && meta.contains("repetido con topes mayores") && meta.contains("8 MiB de salida) termino y se compara con eso"), "{meta}");
     let filas = std::fs::read_to_string(celda.join("descartes.tsv")).unwrap().lines().filter(|l| !l.starts_with('#')).count();
-    assert_eq!(campo(stats, "total"), campo(stats, "iguales") + campo(stats, "RECURSOS") + filas, "{stats}");
+    assert_eq!(campo(stats, "total"), campo(stats, "iguales") + campo(stats, "DIVERGENCIAS") + campo(stats, "RECURSOS") + filas, "{stats}");
     std::fs::remove_dir_all(&b).unwrap();
 }

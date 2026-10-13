@@ -165,8 +165,8 @@ Opciones principales (la lista completa, con defaults, está en `difuzz --help`)
 | `--indice DIR` | anotar cada hallazgo en `DIR/index-<celda>.tsv` | |
 | `--en-proceso` | minificar en el proceso de difuzz, sin hijo | |
 | `--mem-hijo MiB` | presupuesto de memoria de los hijos de cada worker | MemTotal/2 / workers |
-| `--mem-node MiB` | tope de RSS de cada ejecución de node; al pasarlo, el caso va a `recursos/` (ver [Topes de node](#topes-de-node)) | MemTotal/2 / workers (256 MiB a 4 GiB) |
-| `--max-salida MiB` | tope de la salida (stdout + stderr) que difuzz junta de cada ejecución de node; al pasarlo, el caso va a `recursos/` | 16 |
+| `--mem-node MiB` | tope de RSS de cada ejecución de node; si lo pasa el original, el caso va a `recursos/`; si lo pasa el minificado, se confirma como divergencia (ver [Topes de node](#topes-de-node)) | MemTotal/2 / workers (256 MiB a 4 GiB) |
+| `--max-salida MiB` | tope de la salida (stdout + stderr) que difuzz junta de cada ejecución de node; como `--mem-node` | 16 |
 | `--sandbox` | node con su modelo de permisos (ver [Sandbox](#sandbox)) | apagado |
 | `--sandbox-red` | `--sandbox` más namespaces de Linux: sin red (ver [Sandbox](#sandbox)) | apagado |
 | `--crudo` | además corre el texto crudo de cada caso y lo compara con el original impreso; lo que difiere va a `codegen/` (ver [El texto crudo](#el-texto-crudo---crudo)) | apagado |
@@ -958,14 +958,26 @@ reintento.
 
 Cada ejecución de node (el original, el minificado, las confirmaciones, los re-chequeos, las
 pasadas observadas, `--invocar`, las variantes y el crudo) corre bajo topes de difuzz. Lo que pasa
-un tope no es un resultado del programa: lo que imprimió no se compara con nada. El caso (o la
-variante) va a `recursos/` con la causa en `meta.txt`, el mensaje y el programa que corrió
-(`programa.cjs` o `.mjs`: el original, el minificado o el de un re-chequeo), nunca a iguales, a
-`div/`, a `known/` ni a `descartes.tsv`. En la línea de stats: `RECURSOS=N (timeout=… memoria=…
-node_memoria=… node_salida=…)` (las dos primeras son del minificador; las variantes de
-`--mutaciones` suman en el `RECURSOS=` de su línea). Si lo pasa una ejecución del chequeo de
-`--crudo`, el chequeo cuenta como `runner=` en su línea y el caso sigue. Al arrancar, difuzz
-imprime los dos topes (`topes de node: ...`).
+un tope no es un resultado del programa: su salida, cortada, no se compara con nada. Qué pasa con el
+caso depende de quién se pasó (11.2b):
+
+- **El original (A)**, en cualquier pasada (también la observada o la de `--invocar`) o en la
+  repetición sin el sensor: el caso (o la variante) va a `recursos/` con la causa en `meta.txt`, el
+  mensaje (qué ejecución, con qué argumentos de node) y el programa que corrió (`programa.cjs` o
+  `.mjs`). Nunca a iguales, a `div/`, a `known/` ni a `descartes.tsv`.
+- **El minificado (B)**, con A terminado: es una diferencia, como un Timeout de B. `confirm` lo
+  repite con topes mayores (el doble de RSS y cuatro veces la salida): si termina, se compara con
+  eso (`div/` con el kind de siempre, o iguales); si lo vuelve a pasar, `div/` con kind
+  `ExitStatus` (lo mató difuzz) y el paso `tope_node` en la clasificación de `meta.txt`. Un B en
+  Timeout que con el timeout largo pasa un tope queda en Timeout.
+- **Un re-chequeo** (profundidad, nombres, contenido, violaciones, `solo_sloppy`, …) o **una
+  confirmación de A**: ese paso queda Inconcluso (con la nota del tope) y el caso sigue: no sale de
+  `div/` por un límite de difuzz.
+
+En la línea de stats: `RECURSOS=N (timeout=… memoria=… node_memoria=… node_salida=…)` (las dos
+primeras son del minificador; las variantes de `--mutaciones` suman en el `RECURSOS=` de su línea).
+Si lo pasa una ejecución del chequeo de `--crudo`, el chequeo cuenta como `runner=` en su línea y el
+caso sigue. Al arrancar, difuzz imprime los dos topes (`topes de node: ...`).
 
 - **Memoria (`--mem-node MiB`, causa `node_memoria`).** difuzz lee el RSS de node cada ~10 ms
   mientras corre y, al cosecharlo, su pico (`ru_maxrss`): si pasa el tope, lo mata (a él y a su
@@ -986,8 +998,7 @@ imprime los dos topes (`topes de node: ...`).
   entera en la memoria de difuzz, unas 5 veces (512 MiB de stdout: 2,6 GB de RSS). La salida más
   grande de las cachés de A de las corridas del 7 al 12 de octubre (254 442 ejecuciones, con el
   corpus real) pesa 1,4 MiB con el programa incluido. Un minificado que escribe de más donde el
-  original no (una diferencia real) también va a `recursos/`, con el programa (el minificado) en
-  `programa.cjs`: se repite con un tope mayor.
+  original no es una divergencia (ver arriba).
 - **node no sobrevive a difuzz.** Cada node muere con SIGKILL si muere difuzz, también de golpe
   (SIGKILL, el OOM killer): `PR_SET_PDEATHSIG`, puesto con `setpriv --pdeathsig KILL` de
   util-linux si está en el `PATH` (si no, entre fork y exec, que cuesta más: +8 % de pared medido
