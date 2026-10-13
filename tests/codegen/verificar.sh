@@ -8,13 +8,22 @@
 #
 # uso: tests/codegen/verificar.sh [opciones] [BINARIO] [DIR_SALIDA]
 # Mismas opciones y defaults que tests/golden/verificar.sh (este script le pasa el corpus, el
-# esperado, las celdas y --difuzz "--crudo"; sin la comparacion de modos opt-in). Sale con 0 si
-# todo coincide.
+# esperado, las celdas y --difuzz "--crudo", que se suma a los --difuzz que se le pasen; sin la
+# comparacion de modos opt-in). Sale con 0 si todo coincide.
 set -u
 here=$(cd "$(dirname "$0")" && pwd)
 # 10.10 (B-H6 de la revision B de 10.1): la ayuda es la de este script (antes, la del golden).
+# 10.2b (B-H5, B-H6 de la revision B del bloque 10): solo la cabecera, y solo `-h`/`--help` como
+# opcion (no como valor de otra: `--corpus -h` es un error de uso, que da el golden con 2).
+prev=
 for a in "$@"; do
-  case $a in -h|--help) rg '^#( |$)' -N "$0"; exit 0;; esac
+  case $prev in --corpus|--esperado|--celdas|--difuzz|--jobs) prev=; continue;; esac
+  case $a in
+    -h|--help)
+      while IFS= read -r l; do case $l in '#!'*) ;; '#'*) printf '%s\n' "$l";; *) break;; esac; done < "$0"
+      exit 0;;
+  esac
+  prev=$a
 done
 exec "$here/../golden/verificar.sh" \
   --corpus "$here/corpus" \

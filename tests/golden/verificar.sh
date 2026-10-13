@@ -11,7 +11,8 @@
 #   --esperado TSV    default: esperado.tsv junto a este script
 #   --celdas "C..."   celdas <minifier>-<carril>-<preset> separadas por espacios (default: las 8)
 #   --sin-modos       no correr la comparacion de modos opt-in (--invocar, --stubs)
-#   --difuzz "ARGS"   argumentos extra para difuzz en cada celda y en los modos (p. ej. "--crudo", 10.1)
+#   --difuzz "ARGS"   argumentos extra para difuzz en cada celda y en los modos (p. ej. "--crudo", 10.1);
+#                     repetible: se acumulan
 #   --jobs N          workers de difuzz (default ${VERIFICAR_JOBS:-4})
 # Sale con 0 si todas las comparaciones coinciden (y con --help/-h), 1 si hay alguna diferencia,
 # 2 por argumentos.
@@ -30,9 +31,19 @@ celdas=()
 for m in swc oxc; do for k in a b; do for p in core_defaults carril_a; do celdas+=("$m-$k-$p"); done; done; done
 pos=()
 # 10.10 (B-H6 de la revision B de 10.1): una opcion sin valor es un error de uso (2), no el rc 1 de
-# `${2:?}`.
+# `${2:?}`. 10.2b (B-H6 de la revision B del bloque 10): tampoco otra opcion como valor (salvo en
+# --difuzz, cuyo valor son opciones de difuzz), y --jobs tiene que ser un entero positivo.
 valor() { # opcion valor
   [ -n "${2:-}" ] || { echo "$1 necesita valor" >&2; exit 2; }
+  [[ $1 == --difuzz || $2 != -* ]] || { echo "$1 necesita valor, no otra opcion: $2" >&2; exit 2; }
+}
+# 10.2b (B-H5): la ayuda es la cabecera de este archivo (los comentarios hasta la primera linea
+# que no lo es), sin los comentarios internos de mas abajo.
+ayuda() {
+  local l
+  while IFS= read -r l; do
+    case $l in '#!'*) ;; '#'*) printf '%s\n' "$l";; *) break;; esac
+  done < "$0"
 }
 while (($#)); do
   case $1 in
@@ -40,9 +51,10 @@ while (($#)); do
     --esperado) valor "$@"; esperado=$2; shift 2;;
     --celdas) valor "$@"; read -r -a celdas <<< "$2"; shift 2;;
     --sin-modos) modos=0; shift;;
-    --difuzz) valor "$@"; read -r -a extra <<< "$2"; shift 2;;
-    --jobs) valor "$@"; jobs=$2; shift 2;;
-    -h|--help) rg '^#( |$)' -N "$0" | rg -v '^#!'; exit 0;;
+    # 10.2b (B-H4): se acumulan (tests/codegen/verificar.sh pasa --crudo y el usuario puede sumar otros).
+    --difuzz) valor "$@"; read -r -a mas <<< "$2"; extra+=("${mas[@]}"); shift 2;;
+    --jobs) valor "$@"; [[ $2 =~ ^[1-9][0-9]*$ ]] || { echo "--jobs necesita un entero positivo: $2" >&2; exit 2; }; jobs=$2; shift 2;;
+    -h|--help) ayuda; exit 0;;
     --*) echo "opcion desconocida: $1" >&2; exit 2;;
     *) pos+=("$1"); shift;;
   esac
