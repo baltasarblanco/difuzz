@@ -1577,6 +1577,10 @@ mod tests {
     /// imprimir su pid antes del timeout de 500 ms ("sin pid del sleep: \"\""). Ese
     /// intento no mide nada: se repite con el doble de timeout, hasta 4 veces (8 s);
     /// no cuenta entre los 3.
+    /// 10.2b (B-H3 de la revision B del bloque 10): el `sleep` duraba 5 s fijos y con el timeout
+    /// escalado a 8 s terminaba solo antes del kill: con `kill_group` roto el test pasaba. Ahora
+    /// dura `6 x timeout + 5 s` (una corrida colgada puede tardar dos timeouts: la repeticion sin
+    /// el sensor) y el `sleep` se mira apenas termina la corrida que lo lanzo.
     #[test]
     fn timeout_mata_el_grupo_y_no_espera_al_hijo() {
         use super::{Preload, Runner, Status, READ_GRACE};
@@ -1596,21 +1600,24 @@ mod tests {
         };
         let vivo = |pid: i32| std::fs::read(format!("/proc/{pid}/cmdline")).is_ok_and(|c| c.starts_with(b"sleep\0"));
         let sin_hijo = "while(true){}\n";
-        let con_hijo = "const c = require('child_process').spawn('sleep',['5'],{stdio:'inherit'});\nconsole.log(c.pid);\nwhile(true){}\n";
+        let con_hijo = |timeout: Duration| {
+            let s = (timeout.as_secs_f64() * 6.0).ceil() as u64 + 5;
+            format!("const c = require('child_process').spawn('sleep',['{s}'],{{stdio:'inherit'}});\nconsole.log(c.pid);\nwhile(true){{}}\n")
+        };
         let mut tiempos = Vec::new();
         let (mut timeout, mut sin_pid) = (Duration::from_millis(500), Vec::new());
         while tiempos.len() < 3 {
             let runner = Runner::new(&preload, crate::test_util::id_runner(), timeout);
             let (_, antes) = medir(&runner, sin_hijo);
-            let (e, t) = medir(&runner, con_hijo);
-            let (_, despues) = medir(&runner, sin_hijo);
+            let (e, t) = medir(&runner, &con_hijo(timeout));
             let Ok(pid) = e.stdout.trim().parse::<i32>() else {
                 sin_pid.push((timeout, e.stdout));
                 assert!(sin_pid.len() <= 4, "node no llego a imprimir el pid del sleep antes del timeout: {sin_pid:?}");
                 timeout *= 2;
                 continue;
             };
-            assert!(!vivo(pid), "el sleep {pid} sigue vivo: el grupo no se mato");
+            assert!(!vivo(pid), "el sleep {pid} sigue vivo (timeout {timeout:?}): el grupo no se mato");
+            let (_, despues) = medir(&runner, sin_hijo);
             let base = (antes + despues) / 2;
             tiempos.push((t, base));
             if t < base + READ_GRACE / 2 {
