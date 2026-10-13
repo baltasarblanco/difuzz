@@ -134,6 +134,9 @@ pub const MAX_SALIDA_MIB: u64 = 16;
 /// 11.7 (I5): causa de `recursos/` de una ejecucion que escribio mas que el tope de salida.
 pub const NODE_SALIDA: &str = "node_salida";
 
+/// 11.2b (A-H2/B-H3): prefijo de la segunda linea del canal de un `Excedido::parcial`: el mensaje.
+const TOPE_MENSAJE: &str = "tope_mensaje ";
+
 /// 11.2b (A-H1): por cuanto se multiplican los topes al confirmar un B que paso uno
 /// (`Runner::con_topes_mayores`).
 pub const TOPE_MAYOR_RSS: u64 = 2;
@@ -222,6 +225,12 @@ impl Exec {
     pub fn tope(&self) -> Option<&'static str> {
         let primera = self.ctl.lines().next()?;
         [NODE_MEMORIA, NODE_SALIDA].into_iter().find(|c| *c == primera && self.status == Status::Signal)
+    }
+
+    /// 11.2b (A-H2/B-H3): el mensaje de `Excedido` (que tope, cuanto, con que argumentos) de un parcial.
+    pub fn tope_mensaje(&self) -> Option<&str> {
+        self.tope()?;
+        self.ctl.lines().nth(1)?.strip_prefix(TOPE_MENSAJE)
     }
 
     /// 7.4 (Fase R I3): `self` es el mismo programa repetido sin el sensor porque el sensor
@@ -1088,6 +1097,8 @@ fn run_file(r: &Runner, script: &Path, start: Instant, timeout: Duration, opts: 
     cmd.process_group(0);
     // R1-H19: mientras este node corre, la cosecha de otro worker no toca a sus huerfanos.
     let en_curso = crate::huerfanos::en_curso(&r.cwd);
+    // 11.2b (A-H2/B-H3): con que argumentos y entorno corrio, para el mensaje de un tope.
+    let linea = linea_de_repro(&cmd, r, script, timeout);
     let mut child = match cmd
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -1230,7 +1241,7 @@ fn run_file(r: &Runner, script: &Path, start: Instant, timeout: Duration, opts: 
         ctl,
     };
     match excedida {
-        Some((causa, que)) => exceder(r, script, causa, que, e),
+        Some((causa, que)) => exceder(r, script, causa, format!("{que}; corrio como: {linea}"), e),
         None => e,
     }
 }
@@ -1671,16 +1682,49 @@ fn drain(mut pipe: impl Read + Send + 'static, done: mpsc::Sender<()>, salida: A
 /// causa como primera linea del canal (`Exec::tope`): lo usa quien sabe que la que se paso es B.
 fn exceder(r: &Runner, script: &Path, causa: &'static str, que: String, mut parcial: Exec) -> ! {
     // Sin la ruta: lleva el pid de difuzz y el worker.
-    let de = if script == r.script { "del programa (programa.*)" } else { "del envoltorio observador que importa el programa (programa.*)" };
+    let de = if script == r.script { "del programa" } else { "del envoltorio observador que importa el programa" };
     parcial.status = Status::Signal;
-    parcial.ctl.insert_str(0, &format!("{causa}\n"));
+    let mensaje = format!("{causa}: la ejecucion de node {de} {que}").replace('\n', " ");
+    // 11.2b (A-H2/B-H3): el mensaje tambien en el canal del parcial (`Exec::tope_mensaje`), para la
+    // traza de un B que se paso.
+    parcial.ctl.insert_str(0, &format!("{causa}\n{TOPE_MENSAJE}{mensaje}\n"));
     std::panic::resume_unwind(Box::new(Excedido {
         causa,
-        mensaje: format!("{causa}: la ejecucion de node {de} {que}"),
+        mensaje,
         programa: std::fs::read_to_string(&r.script).unwrap_or_default(),
         ext: r.kind.ext(),
         parcial,
     }))
+}
+
+/// 11.2b (A-H2/B-H3): como corrio node, para repetirlo a mano: los argumentos (el preload como
+/// `preload.cjs`, el de la celda; el programa como `programa.<ext>`, el que guarda `recursos/`), el
+/// timeout y las variables `DIFUZZ_*` que cambian la ejecucion (sin las rutas del canal y los stubs).
+fn linea_de_repro(cmd: &Command, r: &Runner, script: &Path, timeout: Duration) -> String {
+    let ext = r.kind.ext();
+    let mut partes: Vec<String> = Vec::new();
+    for a in cmd.get_args() {
+        let a = Path::new(a);
+        partes.push(if a == r.preload {
+            "preload.cjs".into()
+        } else if a == r.script {
+            format!("programa.{ext}")
+        } else if a == script {
+            "<envoltorio observador de programa.mjs>".into()
+        } else {
+            a.to_string_lossy().into_owned()
+        });
+    }
+    let mut env: Vec<String> = cmd
+        .get_envs()
+        .filter_map(|(k, v)| {
+            let k = k.to_string_lossy();
+            (k.starts_with("DIFUZZ_") && k != "DIFUZZ_CTL" && k != "DIFUZZ_STUBS").then(|| format!("{k}={}", v.map(|v| v.to_string_lossy().into_owned()).unwrap_or_default()))
+        })
+        .collect();
+    env.sort();
+    let programa = cmd.get_program().to_string_lossy();
+    format!("{programa} {} (timeout {} ms; {})", partes.join(" "), timeout.as_millis(), if env.is_empty() { "sin DIFUZZ_*".into() } else { env.join(" ") })
 }
 
 /// 11.6 (I4): el `Command` de node, que muere con SIGKILL cuando muere el hilo de difuzz que lo

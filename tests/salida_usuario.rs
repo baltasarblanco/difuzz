@@ -638,6 +638,8 @@ fn tope_de_memoria_de_node_va_a_recursos() {
     let celda = out.join("oxc+carril_a+tal_cual");
     let meta = std::fs::read_to_string(celda.join("recursos/mem/meta.txt")).unwrap();
     assert!(meta.contains("causa: node_memoria\n") && meta.contains("paso el tope de RSS de node") && meta.contains("> 256 MiB"), "{meta}");
+    // 11.2b (A-H2/B-H3): que ejecucion fue y con que argumentos.
+    assert!(meta.contains("ejecucion: el original (A) del caso") && meta.contains("corrio como: ") && meta.contains(" --require preload.cjs programa.cjs (timeout 5000 ms;"), "{meta}");
     assert!(std::fs::read_to_string(celda.join("recursos/mem/programa.cjs")).unwrap().contains("Buffer.alloc"));
     let meta = std::fs::read_to_string(celda.join("div/solo-b/meta.txt")).unwrap();
     assert!(meta.contains("kind: ExitStatus\n") && meta.contains("tope_node: B (el minificado) paso el tope de node (node_memoria)"), "{meta}");
@@ -659,6 +661,8 @@ fn tope_de_memoria_de_node_va_a_recursos() {
     assert_eq!((campo(stats, "DIVERGENCIAS"), campo(stats, "RECURSOS")), (1, 0), "{stats}");
     let meta = std::fs::read_to_string(out_r.join("oxc+carril_a+tal_cual/div/d01/meta.txt")).unwrap();
     assert!(meta.contains("kind: Stdout\n") && meta.contains("profundidad: Inconcluso -> profundidad_inconcluso: una ejecucion del re-chequeo paso un tope de node"), "{meta}");
+    // 11.2b (A-H2): la del re-chequeo de profundidad, con --stack-size.
+    assert!(meta.contains("--stack-size=1968"), "{meta}");
 
     // Una variante: `n` perturbado reserva (el base no). Las variantes son deterministas (semilla
     // del texto); con 30 + 10 alguna toca `n`.

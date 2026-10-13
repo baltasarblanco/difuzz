@@ -197,7 +197,7 @@ pub fn clasificar<'a>(
     let mut notes: Vec<String> = Vec::new();
     if flags.iter().any(|f| CONTENT_FLAGS.contains(f)) {
         // 11.2b: un re-chequeo que pasa un tope de node queda Inconcluso (`sin_tope`).
-        match sin_tope(|| paso_contenido(runner, ctx.medido, recheck::Lados::Minificado, original, minified, a, b), |n| {
+        match sin_tope((original, minified), || paso_contenido(runner, ctx.medido, recheck::Lados::Minificado, original, minified, a, b), |n| {
             PasoContenido::Rechequeo(recheck::Recheck::Inconcluso(n), None)
         }) {
             PasoContenido::Irrelevante => {
@@ -245,7 +245,7 @@ pub fn clasificar<'a>(
     // b1-b (R2-H02): solo un M16 concluyente pone el flag (depth_recheck).
     let par = ("profundidad_irrelevante", "profundidad_inconcluso");
     let mut salado = None;
-    let r = sin_tope(|| {
+    let r = sin_tope((original, minified), || {
     let deep = runner.run_with_args(original, &[runner::DEEP_STACK]);
     let a_otra_vez = || runner.run(original);
     // b7-1 (r04: B todavia llega al limite de la pila y corre el catch con el bug): B con la
@@ -306,7 +306,7 @@ pub fn clasificar<'a>(
             traza.paso("nombres", "no aplica (la salida no puede mostrar nombres)");
         } else {
             // 11.2b + 11.3 (merge): todas las ejecuciones del paso (keep_names y sin mangle) dentro del tope.
-            match sin_tope(|| names_only(runner, c, (original, minified), a, b, ctx.medido), |n| (recheck::Recheck::Inconcluso(n), "")) {
+            match sin_tope((original, minified), || names_only(runner, c, (original, minified), a, b, ctx.medido), |n| (recheck::Recheck::Inconcluso(n), "")) {
                 (recheck::Recheck::Explica, detalle) => {
                     traza.paso("nombres", format!("Explica (con los nombres preservados la divergencia desaparece{detalle})"));
                     flags.push("nombres");
@@ -329,7 +329,7 @@ pub fn clasificar<'a>(
     if let Some(m) = ctx.medido.filter(|m| m.rechequea(Rechequeo::MensajeNombre)) {
         if recheck::mensaje_con_nombre_localizado(a, b) {
             flags.push("mensaje_nombre");
-            let r = sin_tope(|| recheck::mensaje_nombre_matters(runner, (m.minifier, m.preset, m.kind), original, minified, a, b), recheck::Recheck::Inconcluso);
+            let r = sin_tope((original, minified), || recheck::mensaje_nombre_matters(runner, (m.minifier, m.preset, m.kind), original, minified, a, b), recheck::Recheck::Inconcluso);
             rechequear(&mut flags, &mut notes, &mut traza, "mensaje_nombre", ("mensaje_nombre_irrelevante", "mensaje_nombre_inconcluso"), r);
         }
     }
@@ -338,7 +338,7 @@ pub fn clasificar<'a>(
     let rc = ctx.medido.filter(|m| m.rechequea(Rechequeo::Extends));
     if flags.contains(&"extends") {
         if let Some(rc) = rc {
-            let r = sin_tope(|| extends_matters(runner, rc, original, a, b, || recheck::camino_de_b(runner, i3_con, minified, b, Some(&["extends"]))), recheck::Recheck::Inconcluso);
+            let r = sin_tope((original, minified), || extends_matters(runner, rc, original, a, b, || recheck::camino_de_b(runner, i3_con, minified, b, Some(&["extends"]))), recheck::Recheck::Inconcluso);
             rechequear(&mut flags, &mut notes, &mut traza, "extends", ("extends_irrelevante", "extends_inconcluso"), r);
         }
     }
@@ -346,7 +346,7 @@ pub fn clasificar<'a>(
     // re-chequean (recheck.rs), como `extends`.
     if let Some(rc) = ctx.medido {
         if flags.contains(&"global_conocido") && rc.rechequea(Rechequeo::GlobalConocido) {
-            let r = sin_tope(|| recheck::globals_matter(runner, rc.kind, original, minified, a, b), recheck::Recheck::Inconcluso);
+            let r = sin_tope((original, minified), || recheck::globals_matter(runner, rc.kind, original, minified, a, b), recheck::Recheck::Inconcluso);
             rechequear(
                 &mut flags,
                 &mut notes,
@@ -357,7 +357,7 @@ pub fn clasificar<'a>(
             );
         }
         if flags.contains(&"with") && rc.rechequea(Rechequeo::With) {
-            let r = sin_tope(|| recheck::with_matters(runner, (rc.minifier, rc.preset, rc.kind), original, minified, a, b), recheck::Recheck::Inconcluso);
+            let r = sin_tope((original, minified), || recheck::with_matters(runner, (rc.minifier, rc.preset, rc.kind), original, minified, a, b), recheck::Recheck::Inconcluso);
             rechequear(&mut flags, &mut notes, &mut traza, "with", ("with_irrelevante", "with_inconcluso"), r);
         }
         // b4-a (R1-H04 / C3): un re-chequeo para todas las violaciones ubicadas; su
@@ -365,7 +365,7 @@ pub fn clasificar<'a>(
         let nombres: Vec<&'static str> =
             recheck::FLAGS_VIOLACION.iter().map(|(f, _)| *f).filter(|f| flags.contains(f)).collect();
         if !nombres.is_empty() && rc.rechequea(Rechequeo::Violaciones) {
-            let r = sin_tope(|| recheck::violaciones_matter(runner, (rc.minifier, rc.preset, rc.kind), original, minified, a, b, i3_con), recheck::Recheck::Inconcluso);
+            let r = sin_tope((original, minified), || recheck::violaciones_matter(runner, (rc.minifier, rc.preset, rc.kind), original, minified, a, b, i3_con), recheck::Recheck::Inconcluso);
             let t = match &r {
                 recheck::Recheck::Explica => format!("Explica (quedan {})", nombres.join(", ")),
                 recheck::Recheck::NoExplica => format!("NoExplica -> {}_irrelevante", nombres.join("_irrelevante, ")),
@@ -395,11 +395,11 @@ pub fn clasificar<'a>(
         // t-principio: `builtins` y `coercion` iban a known/ sin re-chequeo (a01, a02,
         // a08: un bug ajeno al lado).
         if flags.contains(&"builtins") && rc.rechequea(Rechequeo::Builtins) {
-            let r = sin_tope(|| recheck::builtins_matter(runner, original, minified, a, b), recheck::Recheck::Inconcluso);
+            let r = sin_tope((original, minified), || recheck::builtins_matter(runner, original, minified, a, b), recheck::Recheck::Inconcluso);
             rechequear(&mut flags, &mut notes, &mut traza, "builtins", ("builtins_irrelevante", "builtins_inconcluso"), r);
         }
         if flags.contains(&"coercion") && rc.rechequea(Rechequeo::Coercion) {
-            let r = sin_tope(|| recheck::coercion_matters(runner, (rc.minifier, rc.preset, rc.kind), original, minified, a, b), recheck::Recheck::Inconcluso);
+            let r = sin_tope((original, minified), || recheck::coercion_matters(runner, (rc.minifier, rc.preset, rc.kind), original, minified, a, b), recheck::Recheck::Inconcluso);
             rechequear(&mut flags, &mut notes, &mut traza, "coercion", ("coercion_irrelevante", "coercion_inconcluso"), r);
         }
     }
@@ -414,7 +414,7 @@ pub fn clasificar<'a>(
         // Explica por el estricto (`Si`, `SiRenombrando`) se confirma con los literales salados.
         // 9.2 (M1): la traza dice si la sal confirmo o si no habia literales que salar.
         let mut salado = None;
-        let s = sin_tope(|| match sloppy_only(runner, (m.minifier, m.preset), original, minified, a, b) {
+        let s = sin_tope((original, minified), || match sloppy_only(runner, (m.minifier, m.preset), original, minified, a, b) {
             Ok(si @ (Sloppy::Si | Sloppy::SiRenombrando)) => {
                 let r = recheck::con_literales_salados(runner, (m.minifier, m.preset, m.kind), original, recheck::Sal::Dato, |o2, m2, a2, b2| {
                     match sloppy_only(runner, (m.minifier, m.preset), o2, m2, a2, b2) {
@@ -525,10 +525,21 @@ pub fn clasificar<'a>(
 /// 11.2b (A-H1/B-H2): `f` (un re-chequeo, que corre node) o, si una de sus ejecuciones paso un tope
 /// de node (`runner::Excedido`), `inconcluso` con la nota: ese paso no concluye y el caso sigue (a
 /// `div/`, salvo que otro paso lo explique), en vez de ir entero a `recursos/`.
-fn sin_tope<T>(f: impl FnOnce() -> T, inconcluso: impl FnOnce(String) -> T) -> T {
+/// 11.2b (A-H2): `textos` (original, minificado) para decir que programa corrio (los dos se guardan en
+/// `div/`; una variante del re-chequeo no).
+fn sin_tope<T>(textos: (&str, &str), f: impl FnOnce() -> T, inconcluso: impl FnOnce(String) -> T) -> T {
     match crate::sin_pasar_topes(f) {
         Ok(t) => t,
-        Err(x) => inconcluso(format!("una ejecucion del re-chequeo paso un tope de node ({})", x.mensaje)),
+        Err(x) => {
+            let cual = if x.programa == textos.0 {
+                "el original (original.*)"
+            } else if x.programa == textos.1 {
+                "el minificado (minified.*)"
+            } else {
+                "una variante del re-chequeo (el texto no se guarda)"
+            };
+            inconcluso(format!("una ejecucion del re-chequeo paso un tope de node; programa: {cual} ({})", x.mensaje))
+        }
     }
 }
 

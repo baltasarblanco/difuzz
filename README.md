@@ -974,6 +974,11 @@ caso depende de quién se pasó (11.2b):
   confirmación de A**: ese paso queda Inconcluso (con la nota del tope) y el caso sigue: no sale de
   `div/` por un límite de difuzz.
 
+Cada mensaje de un tope (en `recursos/<caso>/meta.txt`, en el paso `tope_node` o en la nota del
+re-chequeo inconcluso) dice qué ejecución fue (A, B, qué re-chequeo; en un re-chequeo, si corrió el
+original, el minificado o una variante suya) y cómo corrió node (`corrio como:`, con sus argumentos,
+el timeout y las variables `DIFUZZ_*`), para repetirla a mano con el `preload.cjs` de la celda.
+
 En la línea de stats: `RECURSOS=N (timeout=… memoria=… node_memoria=… node_salida=…)` (las dos
 primeras son del minificador; las variantes de `--mutaciones` suman en el `RECURSOS=` de su línea).
 Si lo pasa una ejecución del chequeo de `--crudo`, el chequeo cuenta como `runner=` en su línea y el

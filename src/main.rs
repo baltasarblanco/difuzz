@@ -1988,14 +1988,21 @@ fn recurso_de_node(ctx: &Ctx, stats: &mut Stats, rel: &Path, src: &str, x: &runn
     } else {
         stats.recursos_node_memoria += 1;
     }
-    reportar_excedido(ctx, rel, src, x);
+    // 11.2b: B, las confirmaciones y los re-chequeos no llegan aca (`correr_b`, `confirm`,
+    // `clasificar::sin_tope`): el que se paso es el original.
+    reportar_excedido(ctx, rel, src, x, QUIEN_A);
 }
 
+/// 11.2b (A-H2/B-H3): que ejecucion paso el tope, en el meta.txt de `recursos/`.
+const QUIEN_A: &str = "el original (A) del caso: la pasada cruda, una observada (epilogo, bloques, --invocar, envoltorio de modulos) o su repeticion sin el sensor";
+
 /// 11.5 (I3): `recursos/<caso>` de una ejecucion de node que paso un tope (caso o variante).
-fn reportar_excedido(ctx: &Ctx, rel: &Path, src: &str, x: &runner::Excedido) {
+/// 11.2b: `quien` dice que ejecucion fue (va primero en el mensaje).
+fn reportar_excedido(ctx: &Ctx, rel: &Path, src: &str, x: &runner::Excedido, quien: &str) {
     eprintln!("RECURSOS {}: {}", x.causa, rel.display());
     let archivo = format!("programa.{}", x.ext);
-    ctx.reporter.recurso(rel, src, x.causa, &x.mensaje, &[(archivo.as_str(), x.programa.as_str())]);
+    let mensaje = format!("ejecucion: {quien}\n{}", x.mensaje);
+    ctx.reporter.recurso(rel, src, x.causa, &mensaje, &[(archivo.as_str(), x.programa.as_str())]);
 }
 
 /// 11.5 (I3): el texto del caso como lo minifica `process_case` (para `recursos/`, cuando el caso
@@ -2516,7 +2523,7 @@ fn compare_and_report(
     // 11.2b: lo que hizo la confirmacion con un tope de node (va a la traza de meta.txt).
     let mut pasos_tope = Vec::new();
     if let Some(c) = b.tope() {
-        pasos_tope.push(format!("B (el minificado) paso el tope de node ({c})"));
+        pasos_tope.push(format!("B (el minificado) paso el tope de node ({c}): {}", b.tope_mensaje().unwrap_or_default()));
     }
     let (mut a, mut b) = match confirm(ctx, runner, stats, rel, original, minified, a, a_cached, b, &mut pasos_tope) {
         Confirmed::Same { corto: true } => return descarte_corto(ctx, stats, rel, elapsed_a),
@@ -2694,7 +2701,8 @@ fn confirm(
         let topes = format!("{} MiB de RSS, {} MiB de salida", rss >> 20, salida >> 20);
         match b2.tope() {
             Some(c2) => pasos.push(format!(
-                "B paso el tope de node ({c}) y A no; repetido con topes mayores ({topes}) lo vuelve a pasar ({c2}): B no termina dentro de los topes (lo mato difuzz) -> divergencia ExitStatus, su salida cortada no se compara"
+                "B paso el tope de node ({c}) y A no; repetido con topes mayores ({topes}) lo vuelve a pasar ({c2}): B no termina dentro de los topes (lo mato difuzz) -> divergencia ExitStatus, su salida cortada no se compara ({})",
+                b2.tope_mensaje().unwrap_or_default()
             )),
             None if matches!(b2.status, Status::Timeout | Status::Failed(_)) => pasos.push(format!(
                 "B paso el tope de node ({c}) y A no; repetido con topes mayores ({topes}) no termino ({:?}): sigue la divergencia con el B cortado",
@@ -2949,7 +2957,7 @@ fn process_mutants(
         // (antes de contarla en otro lado: cada paso que corre node va por `sin_pasar_topes`).
         let al_recurso = |m: &mut MutStats, x: Box<runner::Excedido>| {
             m.recursos += 1;
-            reportar_excedido(ctx, &rel, &src, &x);
+            reportar_excedido(ctx, &rel, &src, &x, "el original (A) de la variante");
             ctx.reporter.attach(&rel, &files);
         };
         let a = match sin_pasar_topes(|| runner.run(&original)) {
