@@ -1,6 +1,7 @@
 {
   "name": "difuzz-probe",
   "private": true,
+  "license": "MIT OR Apache-2.0",
   "description": "Probe de difuzz contra @swc/core publicado, con opciones por defecto",
   "dependencies": {
     "@swc/core": "1.16.2",

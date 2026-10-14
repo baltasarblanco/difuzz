@@ -3,6 +3,8 @@ name = "difuzz"
 version = "0.1.0"
 edition = "2021"
 publish = false
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/baltasarblanco/difuzz"
 description = "Fuzzer diferencial de minifiers de JavaScript: corre cada caso original y minificado bajo node y compara las salidas. Backends: oxc (por defecto) y swc."
 
 # Crates publicados, versiones fijas. El Cargo.lock va commiteado (delta v1.2 §4.5).
