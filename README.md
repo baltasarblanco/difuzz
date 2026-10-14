@@ -1003,7 +1003,10 @@ caso sigue. Al arrancar, difuzz imprime los dos topes (`topes de node: ...`).
   el límite una reserva grande es un `RangeError` que el programa ve (y A y B darían iguales con
   otro programa); `--max-old-space-size` solo cubre el heap de V8 (no los `Buffer`).
 - **Salida (`--max-salida MiB`, causa `node_salida`; default 16 MiB).** Lo que difuzz junta de
-  stdout y stderr, sumados. Lo que pasa el tope ya no se guarda (se sigue leyendo y se tira) y node
+  stdout y stderr, sumados. En la práctica es el stdout: desde 11.1, lo que el programa escribe a
+  stderr (`process.stderr.write`, `fs.writeSync(2, …)`, `console.error`, …) llega por stdout con su
+  prefijo (`[stderr] `, `[error] `, que también cuentan); en el stderr real queda lo que escribe node
+  y las vías que el preload no cubre (ver Límites). Lo que pasa el tope ya no se guarda (se sigue leyendo y se tira) y node
   muere: una salida cortada no se compara como si estuviera entera. Antes la salida se juntaba
   entera en la memoria de difuzz, unas 5 veces (512 MiB de stdout: 2,6 GB de RSS). La salida más
   grande de las cachés de A de las corridas del 7 al 12 de octubre (254 442 ejecuciones, con el
