@@ -643,7 +643,7 @@ fn tope_de_memoria_de_node_va_a_recursos() {
     assert!(std::fs::read_to_string(celda.join("recursos/mem/programa.cjs")).unwrap().contains("Buffer.alloc"));
     let meta = std::fs::read_to_string(celda.join("div/solo-b/meta.txt")).unwrap();
     assert!(meta.contains("kind: ExitStatus\n") && meta.contains("tope_node: B (el minificado) paso el tope de node (node_memoria)"), "{meta}");
-    assert!(meta.contains("repetido con topes mayores (512 MiB de RSS, 64 MiB de salida, timeout ") && meta.contains(" ms) lo vuelve a pasar"), "{meta}");
+    assert!(meta.contains("repetido con topes mayores (512 MiB de RSS, 64 MiB de salida, sin el sensor, timeout ") && meta.contains(" ms) lo vuelve a pasar"), "{meta}");
     let filas = std::fs::read_to_string(celda.join("descartes.tsv")).unwrap().lines().filter(|l| !l.starts_with('#')).count();
     assert_eq!(campo(stats, "total"), campo(stats, "iguales") + campo(stats, "DIVERGENCIAS") + campo(stats, "RECURSOS") + filas, "{stats}");
 
@@ -731,7 +731,7 @@ fn tope_de_salida_de_node_va_a_recursos() {
         assert!(celda.join("recursos").join(c).join("programa.cjs").is_file());
     }
     let meta = std::fs::read_to_string(celda.join("div/solo-b/meta.txt")).unwrap();
-    assert!(meta.contains("kind: Stdout\n") && meta.contains("repetido con topes mayores") && meta.contains("8 MiB de salida, timeout ") && meta.contains(" ms) termino y se compara con eso"), "{meta}");
+    assert!(meta.contains("kind: Stdout\n") && meta.contains("repetido con topes mayores") && meta.contains("8 MiB de salida, sin el sensor, timeout ") && meta.contains(" ms) termino y se compara con eso"), "{meta}");
     let filas = std::fs::read_to_string(celda.join("descartes.tsv")).unwrap().lines().filter(|l| !l.starts_with('#')).count();
     assert_eq!(campo(stats, "total"), campo(stats, "iguales") + campo(stats, "DIVERGENCIAS") + campo(stats, "RECURSOS") + filas, "{stats}");
     std::fs::remove_dir_all(&b).unwrap();
@@ -780,12 +780,24 @@ fn confirmacion_de_b_con_timeout_largo() {
         "c03",
         solo_b(&format!("const keep = [];\nfor (let i = 0; i < 8; i++) keep.push(Buffer.alloc(50 << 20, 1));\n{}", esperar(1300)), &esperar(300), "console.log(\"listo\");").as_bytes(),
     );
+    // 11.2e (rev-b11-final-A vuelta 2, V2-H1): s01, sin bug. Solo B reserva 300 MiB (pasa el tope de
+    // 300, no el mayor) y atrapa 300 excepciones a 1000 marcos de profundidad: con el sensor tarda
+    // segundos (MEDIDO por la revision: 6,5 s), sin el, 0,2 s. La repeticion con los topes mayores corre
+    // sin el sensor: iguales (con 705d3c5, con el sensor y sin reintento, div/ ExitStatus).
+    let lento_con_sensor = "function r(n) {\n  if (n === 0) {\n    let c = 0;\n    for (let i = 0; i < 300; i++) {\n      try { null.x; } catch (e) { c++; }\n    }\n    return c;\n  }\n  return r(n - 1) + 0;\n}\nconst keep = [];\nfor (let i = 0; i < 6; i++) keep.push(Buffer.alloc(50 << 20, 1));\nr(1000);";
+    caso(&corpus, "s01", solo_b(lento_con_sensor, "", "console.log(\"listo\");").as_bytes());
+    // 11.2e: s03, sin bug, un programa que nota el sensor (cuenta las llamadas a `prepareStackTrace`,
+    // que el sensor dispara al pausar, como 23-i02 de la aceptacion) y en el que solo B pasa el tope.
+    // La repeticion de B corre sin el sensor y da otra cuenta que A con el sensor; contra A sin el
+    // sensor da lo mismo: iguales.
+    let cuenta = "var calls = 0;\nError.prepareStackTrace = function () { calls++; return \"\"; };\ntry { null.x; } catch (e) {}";
+    caso(&corpus, "s03", solo_b(&format!("{cuenta}\nconst keep = [];\nfor (let i = 0; i < 6; i++) keep.push(Buffer.alloc(50 << 20, 1));"), cuenta, "console.log(\"llamadas\", calls);").as_bytes());
     let out = b.join("out");
     let o = difuzz(&b, &[corpus.to_str().unwrap(), "--out", out.to_str().unwrap(), "--timeout-ms", "1000", "--mem-node", "300", "--max-salida", "1", "--no-cache", "--jobs", "1"]);
     assert_eq!(rc(&o), Some(0), "{}", err(&o));
     let stdout = String::from_utf8_lossy(&o.stdout);
     let stats = stdout.lines().find(|l| l.starts_with("total=")).unwrap();
-    for (c, n) in [("total", 4), ("iguales", 2), ("DIVERGENCIAS", 2), ("RECURSOS", 0), ("panics_del_fuzzer", 0)] {
+    for (c, n) in [("total", 6), ("iguales", 4), ("DIVERGENCIAS", 2), ("RECURSOS", 0), ("panics_del_fuzzer", 0)] {
         assert_eq!(campo(stats, c), n, "{c}: {stats}\n{}", err(&o));
     }
     let celda = out.join("oxc+carril_a+tal_cual");
@@ -793,6 +805,11 @@ fn confirmacion_de_b_con_timeout_largo() {
     assert!(meta.contains("kind: Timeout\n") && meta.contains("antes de terminar; queda el Timeout"), "{meta}");
     let meta = std::fs::read_to_string(celda.join("div/mayor-gira/meta.txt")).unwrap();
     assert!(meta.contains("kind: ExitStatus\n") && meta.contains("no termino (Timeout): sigue la divergencia con el B cortado"), "{meta}");
+    // 11.2e (V2-H1 y B-F2): la repeticion que no termina ocupa el turno un solo timeout largo (con el
+    // reintento sin el sensor adentro del turno, el doble).
+    let num = |tras: &str| -> u128 { meta.split(tras).nth(1).and_then(|s| s.split(' ').next()).and_then(|n| n.parse().ok()).unwrap_or_else(|| panic!("sin `{tras}`: {meta}")) };
+    let (largo, turno) = (num("sin el sensor, timeout "), num("; turno "));
+    assert!(turno < largo + 1500, "turno {turno} ms con un timeout largo de {largo} ms");
     // 11.2c (rev-b11-2b-B N2): el B cortado que se guarda es un prefijo con la marca.
     let b_out = std::fs::read_to_string(celda.join("div/mayor-gira/b.stdout")).unwrap();
     assert!(b_out.len() < 70 * 1024 && b_out.contains("[... difuzz recorto "), "{}", b_out.len());

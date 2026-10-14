@@ -2012,6 +2012,7 @@ const QUIEN_A_BLOQUES: &str = "el original (A) del caso, en la pasada de los bin
 const QUIEN_A_INVOCAR: &str = "el original (A) del caso, en la pasada de --invocar";
 const QUIEN_A_MODULOS: &str = "el original (A) del caso, por el envoltorio de modulos (carril B, programa mudo)";
 const QUIEN_A_SIN_SENSOR: &str = "el original (A) del caso, repetido sin el sensor (I3)";
+const QUIEN_A_SIN_SENSOR_MAYOR: &str = "el original (A) del caso, sin el sensor, para comparar con la repeticion de B con topes mayores";
 
 /// 11.5 (I3): `recursos/<caso>` de una ejecucion de node que paso un tope (caso o variante).
 /// 11.2b: `quien` dice que ejecucion fue (va primero en el mensaje).
@@ -2730,9 +2731,16 @@ fn confirm(
     // iguales o menores (`CacheA::run` no sirve otra entrada); se confirma en fresco abajo.
     let a_no = if a_cached { "y A no (A de la cache, grabado con topes iguales o menores; se confirma en fresco abajo)" } else { "y A no" };
     if let Some(c) = b.tope() {
-        let mayor = runner.con_topes_mayores(subproceso::techo_topes_mayores());
+        // 11.2e (rev-b11-final-A vuelta 2, V2-H1): la repeticion corre SIN el sensor, una sola vez. Con
+        // el sensor y sin reintento (11.2d), un B sin bug que pasa el tope y solo es lento con el
+        // sensor (o al que el sensor tumba: SIGSEGV de V8) iba a un falso div/ ExitStatus; con el
+        // reintento sin el sensor bajo el turno, el turno duraba dos timeouts largos (F2); y fuera del
+        // turno, ese reintento corria con los topes mayores sin turno (el techo de C4 no valia).
+        // 26c5239 ya comparaba un B `sensor_caido` contra el A con el sensor. Si termina y diverge, se
+        // compara tambien contra A sin el sensor (abajo), como en I3.
+        let mayor = runner.con_topes_mayores(subproceso::techo_topes_mayores()).sin_sensor();
         let (rss, salida) = mayor.topes();
-        let topes = format!("{} MiB de RSS, {} MiB de salida, timeout {} ms", rss >> 20, salida >> 20, longer.as_millis());
+        let topes = format!("{} MiB de RSS, {} MiB de salida, sin el sensor, timeout {} ms", rss >> 20, salida >> 20, longer.as_millis());
         // 11.2c (rev-b11-2b-B N1 = A-H6): una sola repeticion con los topes mayores a la vez en todo
         // difuzz (`TOPES_MAYORES`): lo que corre junto queda en (workers - 1) x tope + el mayor. Antes
         // cada worker podia estar en la suya: workers x 2 x tope (con el default, toda la RAM). Y con el
@@ -2744,13 +2752,17 @@ fn confirm(
         if CANCEL.load(Ordering::SeqCst) {
             return Confirmed::Abandonado;
         }
-        let b2 = {
+        let (b2, en_turno) = {
             let _turno = TOPES_MAYORES.lock().unwrap_or_else(|e| e.into_inner());
             if CANCEL.load(Ordering::SeqCst) {
                 return Confirmed::Abandonado;
             }
-            correr_b_con(&mayor, |r| r.run_sin_reintento(minified, longer))
+            let t0 = std::time::Instant::now();
+            let b2 = correr_b_con(&mayor, |r| r.run_sin_reintento(minified, longer));
+            (b2, t0.elapsed())
         };
+        // 11.2e: cuanto ocupo el turno (a lo sumo el timeout largo; lo mide un test).
+        let topes = format!("{topes}; turno {} ms", en_turno.as_millis());
         match b2.tope() {
             Some(c2) => pasos.push(format!(
                 "B paso el tope de node ({c}) {a_no}; repetido con topes mayores ({topes}) lo vuelve a pasar ({c2}): B no termina dentro de los topes (lo mato difuzz) -> divergencia ExitStatus, su salida cortada no se compara ({})",
@@ -2765,6 +2777,17 @@ fn confirm(
                 b = b2;
                 if !diverges(&a, &b) {
                     return Confirmed::Same { corto: corto_por_sandbox(runner, &a, &b) };
+                }
+                // 11.2e: B corrio sin el sensor y A con el: si el programa nota el sensor (I3), la
+                // diferencia puede ser solo esa. A sin el sensor (fuera del turno, con los topes de
+                // siempre; si los pasa, `recursos/`, como cualquier A) y, si da lo mismo que B, iguales.
+                if runner.con_sensor() {
+                    let sin = runner.sin_sensor();
+                    let a_sin = como_a(QUIEN_A_SIN_SENSOR_MAYOR, || sin.run(original));
+                    if !diverges(&a_sin, &b) {
+                        pasos.push("A sin el sensor da lo mismo que esa repeticion de B (sin el sensor): la diferencia era el sensor -> iguales".into());
+                        return Confirmed::Same { corto: corto_por_sandbox(runner, &a_sin, &b) };
+                    }
                 }
             }
         }

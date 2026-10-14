@@ -1068,8 +1068,10 @@ Límites que quedan (11.2b, de las revisiones de 11b):
 - (11.2c) Las repeticiones con topes mayores van de a una: si muchos B de una corrida pasan el
   tope a la vez (una familia de casos), esperan su turno; cada una dura a lo sumo el timeout largo
   (11.2d: es una sola ejecución; antes, si no terminaba con el sensor, se repetía sin él y el turno
-  duraba el doble). Costo: un B que con el sensor no termina en el timeout largo y sin él sí queda
-  en `div/` sin esa segunda oportunidad. Con la primera SIGINT/SIGTERM, la repetición en curso
+  duraba el doble). 11.2e: esa repetición corre sin el sensor (un B que solo es lento con el sensor,
+  o al que el sensor tumba, ya no va a un falso `div/`); si termina y difiere de A, se compara además
+  con A sin el sensor (fuera del turno, con los topes de siempre), y si da lo mismo, iguales: la
+  diferencia era el sensor. Con la primera SIGINT/SIGTERM, la repetición en curso
   termina y los que esperaban no toman el turno: van a `descartes.tsv` con causa `interrumpido`
   (nota `interrumpidos:` en `CORRIDA.txt`), sin destino (MEDIDO: 2,6 s para salir con 8 B en
   cola, antes 62,6 s). Una variante de `--mutaciones` interrumpida así no cuenta en su línea.
@@ -1085,6 +1087,12 @@ Límites que quedan (11.2b, de las revisiones de 11b):
 - El `b.stdout` de un B cortado guarda los primeros 64 KiB (retrocediendo al borde de un carácter):
   si B diverge después, ahí no se ve dónde. La clasificación no cambia (kind `ExitStatus`) y
   `a.stdout` está entero.
+- (11.2e) Con los pipes bloqueantes, `process.stdout.write` nunca devuelve `false`: un programa
+  cuyo bucle sigue mientras no haya contrapresión (`while (process.stdout.write(x))`) escribe hasta
+  el tope de salida y va a `recursos/` (`node_salida`). Igual en A y en B: no da un falso `div/`.
+- `interrumpido` sale solo de una SIGINT/SIGTERM a difuzz. Sin `--sandbox`, un programa puede
+  mandársela (leyendo el pid real de su padre en `/proc`); eso ya cortaba la corrida antes de 11.2d.
+  Con `--sandbox`, el filtro de señales lo impide.
 - La caché de A se regraba con los topes de la última corrida que midió A: como el tope por defecto
   depende de los workers, subir `--jobs` (tope menor) hace miss en todo y regraba; volver a bajarlo
   usa esas entradas. Es rendimiento, no corrección.
