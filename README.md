@@ -604,7 +604,13 @@ Principios:
     largo en A y mangleado o ausente en B cambia el corte) se compara la salida entera sin blancos,
     token por token en la misma posición, sin los nombres que preceden a un `{` (el prefijo de una
     instancia): lo distinto tiene que ser nombres, y un token de más (una línea repetida) o un
-    cambio solo de saltos de línea no pasa. Si no, en oxc, alcanza con que el minificado sin mangle dé
+    cambio solo de saltos de línea no pasa. Los saltos de primer nivel (fuera de `{`, `[` y `(`)
+    cuentan como token, porque util.inspect solo corta adentro (A `handler\n1` contra B `e 1` no
+    pasa), y B no puede imprimir más prefijos de instancia que A (minificar deja anónima una clase,
+    no le pone nombre a un objeto plano: `{ x: 1 }` contra `t { x: 1 }` no pasa). En la misma
+    cantidad de líneas, cada línea se alinea por LCS y B no puede tener más tokens distintos que A:
+    un nombre de más en B (A `Object`, B `Object Object`) no pasa; uno que falta (`Foo { x: 7 }`
+    contra `{ x: 7 }`) sí. Si no, en oxc, alcanza con que el minificado sin mangle dé
     lo mismo que A y B sea un renombre de él (la misma prueba de `mensaje_nombre`, abajo): así
     pasa un valor que sale de un nombre (`inferred.name === 'inferred' ? f : null`, un paquete
     del corpus real). keep_names también apaga pasadas de oxc (el inlining de una función

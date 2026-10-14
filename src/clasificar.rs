@@ -701,7 +701,31 @@ pub(crate) fn difiere_solo_en_nombres(a: &runner::Exec, b: &runner::Exec, origin
         // posicion (sin alinear: un token de mas o de menos, como una linea repetida, no pasa), y
         // cada par distinto tiene que ser un nombre de cada lado. Un cambio solo de espacios o de
         // saltos no pasa.
-        let sin_blancos = |s: &str| tokens_js(s).into_iter().filter(|t| !t.trim().is_empty()).collect::<Vec<_>>();
+        // H4 de rev-b11a-A vuelta 2 (integracion del bloque 11): util.inspect corta DENTRO de una
+        // instancia (o de un arreglo, de un Map, ...), nunca entre dos valores de primer nivel. Los
+        // saltos de linea fuera de `{`/`[`/`(` se conservan como token: un `join("\n")` contra un
+        // `join(" ")` (A `handler\n1`, B `e 1`) ya no pasa por el nombre que cambia al lado. Con
+        // llaves desparejas en la salida (un string que imprime `{`), lo que queda despues cuenta como
+        // de adentro: no es mas permisivo que antes.
+        let sin_blancos = |s: &str| {
+            let mut prof = 0usize;
+            let mut v = Vec::new();
+            for t in tokens_js(s) {
+                match t.as_str() {
+                    "{" | "[" | "(" => prof += 1,
+                    "}" | "]" | ")" => prof = prof.saturating_sub(1),
+                    "\n" if prof == 0 => {
+                        v.push(t);
+                        continue;
+                    }
+                    _ => {}
+                }
+                if !t.trim().is_empty() {
+                    v.push(t);
+                }
+            }
+            v
+        };
         let (mut tx, mut ty) = (sin_blancos(&na), sin_blancos(&nb));
         let donde = format!("con otra cantidad de lineas (A {}, B {})", la.len(), lb.len());
         let ca = ids(original)?;
@@ -713,14 +737,24 @@ pub(crate) fn difiere_solo_en_nombres(a: &runner::Exec, b: &runner::Exec, origin
             // contra `ConfiguracionDelServidorPrincipal { ... }`, caso c14): sin los nombres que
             // preceden a un `{` (el prefijo de util.inspect), de los dos lados. Solo prefijos que son
             // nombres de su texto; cualquier otro token de mas sigue sin pasar.
-            let sin_prefijos = |t: &[String], c: &std::collections::HashSet<String>| -> Vec<String> {
-                t.iter()
+            let sin_prefijos = |t: &[String], c: &std::collections::HashSet<String>| -> (Vec<String>, usize) {
+                let v: Vec<String> = t
+                    .iter()
                     .enumerate()
                     .filter(|(i, x)| !(t.get(i + 1).is_some_and(|s| s == "{") && nombre(x, c)))
                     .map(|(_, x)| x.clone())
-                    .collect()
+                    .collect();
+                let quitados = t.len() - v.len();
+                (v, quitados)
             };
-            (tx, ty) = (sin_prefijos(&tx, &ca), sin_prefijos(&ty, &cb));
+            let ((px, qa), (py, qb)) = (sin_prefijos(&tx, &ca), sin_prefijos(&ty, &cb));
+            // H4 (D5/D7 de rev-b11a-A vuelta 2): minificar puede dejar anonima una clase (c14), no
+            // darle nombre a un objeto plano. B con mas prefijos que A (`{ x: 1 }` contra
+            // `t { x: 1 }`, o `console {}`) no pasa.
+            if qb > qa {
+                return Err(format!("{donde}, B imprime {qb} prefijos de instancia (`X {{`) contra {qa} de A"));
+            }
+            (tx, ty) = (px, py);
         }
         if tx.len() != ty.len() {
             return Err(format!("{donde}, A y B imprimen otra cantidad de tokens ({} contra {})", tx.len(), ty.len()));
@@ -745,6 +779,15 @@ pub(crate) fn difiere_solo_en_nombres(a: &runner::Exec, b: &runner::Exec, origin
         // Los espacios que cambian no cuentan (`Foo { x: 7 }` contra `{ x: 7 }`: util.inspect no
         // pone el prefijo ni su espacio de una instancia sin nombre), pero una linea en que solo
         // cambian espacios no difiere en un nombre.
+        // H5 de rev-b11a-A vuelta 2 (integracion del bloque 11): la LCS deja pasar un token de B sin
+        // par en A (A `Object`, B `Object Object`). Lo que B cambia tiene que reemplazar algo de A o
+        // faltar (`Foo { x: 7 }` contra `{ x: 7 }`, `name: handler` contra `name: `): B con mas
+        // tokens cambiados que A en la linea no pasa.
+        let cambiados = |toks: &[String], c: &[bool]| toks.iter().zip(c).filter(|(t, c)| **c && !t.trim().is_empty()).count();
+        let (na_c, nb_c) = (cambiados(&tx, &cx), cambiados(&ty, &cy));
+        if nb_c > na_c {
+            return Err(format!("{donde} B imprime {nb_c} tokens distintos contra {na_c} de A (un token de mas)"));
+        }
         let mut algun_nombre = false;
         for (lado, toks, cambiados, texto, cache) in [("A", &tx, &cx, original, &mut ids_a), ("B", &ty, &cy, minified, &mut ids_b)] {
             let conocidos: &std::collections::HashSet<String> = match cache {
@@ -1131,6 +1174,18 @@ mod tests {
         assert!(solo(&ok(largo), &ok("t { puerto: 8081, anfitrion: 'localhost' }\n"), o3, m3).is_err(), "el corte y un valor");
         assert!(solo(&ok("t {\n  puerto: 8080\n}\n"), &ok("t { puerto: 8080 }\n"), o3, m3).is_err(), "solo saltos");
         assert!(solo(&ok("handler\n"), &ok("handler\nhandler\n"), o, m).is_err(), "una linea repetida");
+        // H4 de rev-b11a-A vuelta 2: con otra cantidad de lineas, un salto de primer nivel que pasa
+        // a espacio (D1) o un prefijo que B pierde con un salto (D3) no pasan por el nombre de al
+        // lado; B que gana un prefijo de instancia (D5, `t {`; D7, `console {`) tampoco.
+        assert!(solo(&ok("handler\n1\n"), &ok("e 1\n"), o, m).is_err(), "D1");
+        assert!(solo(&ok("Foo { x: 1 }\nhandler\n"), &ok("{ x: 1 } e\n"), o, m).is_err(), "D3");
+        assert!(solo(&ok("{ x: 1 }\nhandler\n"), &ok("t { x: 1 } e\n"), o, m).is_err(), "D5");
+        assert!(solo(&ok("{}\nhandler\n"), &ok("console {} e\n"), o, m).is_err(), "D7");
+        assert!(solo(&ok("{\n  puerto: 8080\n}\n"), &ok("t { puerto: 8080 }\n"), o3, m3).is_err(), "B gana el prefijo");
+        // H5 de rev-b11a-A vuelta 2: en la misma linea, un nombre de mas en B (D6) no pasa; uno
+        // reemplazado o uno que falta en B, si (arriba).
+        assert!(solo(&ok("Object\n"), &ok("Object Object\n"), o, m).is_err(), "D6");
+        assert!(solo(&ok("handler Object\n"), &ok("e e Object\n"), o, m).is_err(), "D6 con un reemplazo");
         // Las palabras de un string no son nombres del codigo: un bug que imprime FAIL en vez de
         // PASS en un programa que nombra `.name` no pasa (los identificadores salen de SWC).
         let (o2, m2) = ("console.log(f.name, ok ? 'PASS' : 'FAIL');", "console.log(f.name,ok?'PASS':'FAIL');");
