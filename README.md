@@ -1066,7 +1066,13 @@ Límites que quedan (11.2b, de las revisiones de 11b):
 - Un caso en `recursos/` por memoria no se reproduce corriéndolo suelto con los defaults (el tope
   depende de los workers): hay que pasar el `--mem-node` que dice su `meta.txt`.
 - (11.2c) Las repeticiones con topes mayores van de a una: si muchos B de una corrida pasan el
-  tope a la vez (una familia de casos), esperan su turno; cada una dura a lo sumo el timeout largo.
+  tope a la vez (una familia de casos), esperan su turno; cada una dura a lo sumo el timeout largo
+  (11.2d: es una sola ejecución; antes, si no terminaba con el sensor, se repetía sin él y el turno
+  duraba el doble). Costo: un B que con el sensor no termina en el timeout largo y sin él sí queda
+  en `div/` sin esa segunda oportunidad. Con la primera SIGINT/SIGTERM, la repetición en curso
+  termina y los que esperaban no toman el turno: van a `descartes.tsv` con causa `interrumpido`
+  (nota `interrumpidos:` en `CORRIDA.txt`), sin destino (MEDIDO: 2,6 s para salir con 8 B en
+  cola, antes 62,6 s). Una variante de `--mutaciones` interrumpida así no cuenta en su línea.
   En una máquina chica (con un solo worker y MemTotal ≤ 8 GiB, el tope ya es MemTotal/2) el techo
   deja el mayor igual al tope: un B que reserva un poco más que A va a `div/` ExitStatus en vez de
   iguales.

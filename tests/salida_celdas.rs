@@ -273,3 +273,42 @@ fn segunda_senal_y_sigkill_no_dejan_node() {
     }
     std::fs::remove_dir_all(&b).unwrap();
 }
+
+/// 11.2d (rev-b11-final B-F2): cuatro B (bug F de oxc) que pasan el tope de 300 MiB y despues giran
+/// esperan, de a uno, su repeticion con los topes mayores (4 s cada una: el timeout largo, sin la
+/// repeticion sin el sensor). Un SIGINT con la cola armada no la espera entera: la repeticion en curso
+/// termina y los que esperaban quedan en descartes.tsv como `interrumpido`, sin destino inventado.
+/// Antes (26c5239), unos 2 x 4 s por caso en cola (MEDIDO con c-cola de la revision B: 62,6 s).
+#[test]
+fn sigint_con_la_cola_de_topes_mayores_sale_enseguida() {
+    if !test_util::requiere_node() {
+        return;
+    }
+    let b = base("cola-sigint");
+    let (corpus, out) = (b.join("corpus"), b.join("out"));
+    for i in 0..4 {
+        caso(
+            &corpus,
+            &format!("b-{i}"),
+            &format!("const n = \"abc\".substring(1, undefined).length;\nlet z = 0;\nif (n === 0) {{ const b = []; for (let i = 0; i < 22; i++) b.push(Buffer.alloc(16 << 20, 1)); for (;;) z++; }}\nconsole.log(\"fin\", n, z, {i});\n"),
+        );
+    }
+    let args = [corpus.to_str().unwrap(), "--out", out.to_str().unwrap(), "--no-cache", "--jobs", "4", "--mem-node", "300", "--timeout-ms", "1000"];
+    let marca = out.join("oxc+carril_a+tal_cual/CORRIDA.txt");
+    let hijo = difuzz(&b, &args).spawn().unwrap();
+    esperar_marca(&marca);
+    // Los B mueren por el tope en menos de 1 s; a los 3 s la cola esta armada (16 s de repeticiones).
+    std::thread::sleep(Duration::from_secs(3));
+    let t0 = Instant::now();
+    // SAFETY: kill a un pid propio (hijo vivo, no esperado todavia).
+    assert_eq!(unsafe { libc::kill(hijo.id() as libc::pid_t, libc::SIGINT) }, 0);
+    let o = hijo.wait_with_output().unwrap();
+    let tardo = t0.elapsed();
+    assert_eq!(o.status.code(), Some(130), "{}", String::from_utf8_lossy(&o.stderr));
+    assert!(tardo < Duration::from_secs(8), "tardo {tardo:?} en salir");
+    let descartes = leer(&out.join("oxc+carril_a+tal_cual/descartes.tsv"));
+    let n = descartes.lines().filter(|l| l.contains("\tinterrumpido\t")).count();
+    assert!(n >= 1, "{descartes}");
+    assert!(leer(&marca).contains(&format!("\ninterrumpidos: {n} ")), "{}", leer(&marca));
+    std::fs::remove_dir_all(&b).unwrap();
+}

@@ -761,6 +761,14 @@ impl Runner {
         self.run_inner(js, Opts { timeout: Some(timeout), ..Opts::default() })
     }
 
+    /// 11.2c/11.2d (rev-b11-final B-F2): `run_with_timeout` de una sola ejecucion: si con el sensor
+    /// da senal o Timeout, no se repite sin el. Para la repeticion de B con los topes mayores
+    /// (`main::confirm`), que corre bajo un turno global: con la repeticion, el turno duraba dos
+    /// timeouts largos.
+    pub fn run_sin_reintento(&self, js: &str, timeout: Duration) -> Exec {
+        self.run_inner(js, Opts { timeout: Some(timeout), sin_reintento: true, ..Opts::default() })
+    }
+
     /// M16: igual que `run` con argumentos extra para node (p. ej. `--stack-size`).
     pub fn run_with_args(&self, js: &str, node_args: &[&str]) -> Exec {
         self.run_inner(js, Opts { node_args, ..Opts::default() })
@@ -847,7 +855,7 @@ impl Runner {
         let opts = Opts { sin_sensor: opts.sin_sensor || !self.sensor, ..opts };
         let opts = Opts { perezoso: !opts.sin_sensor && !self.entero && !puede_atrapar(js), ..opts };
         let e = self.run_once(js, opts);
-        if !matches!(e.status, Status::Signal | Status::Timeout) || opts.sin_sensor {
+        if !matches!(e.status, Status::Signal | Status::Timeout) || opts.sin_sensor || opts.sin_reintento {
             return e;
         }
         let mut e = self.run_once(js, Opts { sin_sensor: true, ..opts });
@@ -924,6 +932,9 @@ struct Opts<'a> {
     perezoso: bool,
     /// b7-1: con la cobertura de bloques del preload (`run_con_cobertura`).
     cobertura: bool,
+    /// 11.2d (rev-b11-final B-F2): sin la repeticion sin el sensor de `run_inner` ante senal o
+    /// timeout (`run_sin_reintento`).
+    sin_reintento: bool,
 }
 
 /// t-sensor: si el programa puede atrapar una excepcion, directa o indirectamente,
@@ -2757,6 +2768,30 @@ mod tests {
         // con el fd 2 no bloqueante, 1 MiB daba EAGAIN y el programa moria (MEDIDO con node solo).
         let e = r.run("const fs = require(\"fs\");\nprocess.stderr;\nfs.writeFileSync(2, \"q\".repeat(1 << 20));\nconsole.log(\"ok\");\n");
         assert_eq!((e.status, e.stdout.as_str(), e.stderr.len()), (Status::Exited(0), "ok\n", 1 << 20));
+    }
+
+    /// 11.2d (rev-b11-final B-F2): `run_sin_reintento` corre una sola vez: un Timeout con el sensor no
+    /// se repite sin el (con `run_with_timeout` dura dos timeouts y lleva `sensor_caido`).
+    #[test]
+    fn sin_reintento_corre_una_vez() {
+        use super::{Preload, Runner, Status, SENSOR_CAIDO};
+        use std::time::{Duration, Instant};
+        if !crate::test_util::requiere_node() {
+            return;
+        }
+        let preload = Preload::write_tagged("sin-reintento").unwrap();
+        let base = Runner::new(&preload, crate::test_util::id_runner(), Duration::from_secs(60));
+        let r = base.sensor_entero();
+        let js = "try { null.x; } catch (e) {}\nfor (;;) {}\n";
+        let t0 = Instant::now();
+        let e = r.run_sin_reintento(js, Duration::from_millis(1500));
+        let una = t0.elapsed();
+        assert_eq!(e.status, Status::Timeout);
+        assert!(!e.ctl.lines().any(|l| l == SENSOR_CAIDO), "{}", e.ctl);
+        let t0 = Instant::now();
+        let e = r.run_with_timeout(js, Duration::from_millis(1500));
+        assert!(e.ctl.lines().any(|l| l == SENSOR_CAIDO), "con reintento: {}", e.ctl);
+        assert!(t0.elapsed() > una + Duration::from_millis(1000), "{una:?} {:?}", t0.elapsed());
     }
 
     /// 11.2c (rev-b11-2b-B N6): el archivo de un marco lo puede elegir el programa (`//# sourceURL=` de

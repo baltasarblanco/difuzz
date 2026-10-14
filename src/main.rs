@@ -598,6 +598,10 @@ struct Stats {
     /// M3: divergencia que no se confirma: A corrido otra vez en fresco da otra
     /// salida. No se reporta; cuenta dentro de `original=`.
     a_nondet: usize,
+    /// 11.2d (rev-b11-final B-F2): casos (y variantes) que se dejaron sin clasificar por una
+    /// SIGINT/SIGTERM mientras esperaban la repeticion de B con los topes mayores (descarte
+    /// `interrumpido`; nota en CORRIDA.txt).
+    interrumpidos: usize,
     /// M18: kind de la ultima divergencia (reportada o conocida) del caso; la
     /// usa process_mutants para el dedup. No se suma en `merge`.
     last_div: Option<oracle::Kind>,
@@ -745,6 +749,7 @@ impl Stats {
         self.parse_script += o.parse_script;
         self.a_link += o.a_link;
         self.a_nondet += o.a_nondet;
+        self.interrumpidos += o.interrumpidos;
         self.invocar_retry += o.invocar_retry;
         self.sensor_repetidos += o.sensor_repetidos;
         self.sensor_omitidos += o.sensor_omitidos;
@@ -1261,6 +1266,10 @@ fn main() {
     // R2-H05: solo una corrida entera (todos los casos contados: un worker
     // muerto pierde los suyos) y sin escrituras perdidas es `completa`.
     let mut notas = vec![format!("procesados: {} de {total}", stats.total), format!("stats: {}", stats.line())];
+    // 11.2d: los que la senal dejo sin clasificar (estan en descartes.tsv como `interrumpido`).
+    if stats.interrumpidos > 0 {
+        notas.push(format!("interrumpidos: {} (sin la repeticion de B con topes mayores; descartes.tsv, causa interrumpido)", stats.interrumpidos));
+    }
     notas.extend(linea_sandbox);
     notas.extend(linea_crudo);
     if lost > 0 {
@@ -2537,6 +2546,12 @@ fn compare_and_report(
         Confirmed::Same { corto: true } => return descarte_corto(ctx, stats, rel, elapsed_a),
         Confirmed::Same { corto: false } => return false,
         Confirmed::Nondeterministic => return true,
+        Confirmed::Abandonado => {
+            stats.interrumpidos += 1;
+            eprintln!("INTERRUMPIDO (sin la repeticion de B con topes mayores): {}", rel.display());
+            ctx.reporter.discard(rel, "interrumpido", elapsed_a);
+            return true;
+        }
         Confirmed::Divergence(ab) => *ab,
     };
     // 7.4 (Fase R I3): un positivo que atrapa mas de MAX_PAUSAS excepciones iba a div/: sin
@@ -2654,6 +2669,9 @@ enum Confirmed {
     /// La divergencia sigue con este A y este B. 11.2c: y que paso con la cache de A (`a_cache:` de
     /// meta.txt).
     Divergence(Box<(runner::Exec, runner::Exec, &'static str)>),
+    /// 11.2d (rev-b11-final B-F2): difuzz se esta cerrando (primera SIGINT/SIGTERM) y faltaba la
+    /// repeticion de B con los topes mayores: el caso no se clasifica (descarte `interrumpido`).
+    Abandonado,
 }
 
 /// A y A' dicen lo mismo para el oraculo (status y stdout normalizado).
@@ -2719,9 +2737,19 @@ fn confirm(
         // difuzz (`TOPES_MAYORES`): lo que corre junto queda en (workers - 1) x tope + el mayor. Antes
         // cada worker podia estar en la suya: workers x 2 x tope (con el default, toda la RAM). Y con el
         // timeout largo (rev-b11-2b-A H2): un B mas lento y mas pesado que A no es un hallazgo.
+        // 11.2d (rev-b11-final B-F2): una sola ejecucion (sin la repeticion sin el sensor de
+        // `run_inner`, que duplicaba lo que dura el turno), y con un SIGINT ya recibido no se toma ni
+        // se usa el turno: el caso queda sin resultado (`Abandonado`) en vez de esperar la cola o
+        // inventar un destino.
+        if CANCEL.load(Ordering::SeqCst) {
+            return Confirmed::Abandonado;
+        }
         let b2 = {
             let _turno = TOPES_MAYORES.lock().unwrap_or_else(|e| e.into_inner());
-            correr_b_con(&mayor, |r| r.run_with_timeout(minified, longer))
+            if CANCEL.load(Ordering::SeqCst) {
+                return Confirmed::Abandonado;
+            }
+            correr_b_con(&mayor, |r| r.run_sin_reintento(minified, longer))
         };
         match b2.tope() {
             Some(c2) => pasos.push(format!(
@@ -3090,6 +3118,11 @@ fn original_no_compila(runner: &runner::Runner, a: &runner::Exec, original: &str
 /// cuenta como comparada ni como igual: es un descarte con causa.
 /// 8.2: tampoco la que murio igual que su minificado por el sandbox (`sandbox_corto`).
 fn contar_variante(m: &mut MutStats, s: &Stats) -> bool {
+    // 11.2d: una variante que la senal dejo sin clasificar no cuenta en ningun lado (la corrida queda
+    // interrumpida; la variante esta en descartes.tsv como `interrumpido`).
+    if s.interrumpidos > 0 {
+        return false;
+    }
     if s.a_nondet > 0 {
         m.no_determinista += 1;
         return false;
