@@ -967,18 +967,22 @@ pasadas observadas, `--invocar`, las variantes y el crudo) corre bajo topes de d
 un tope no es un resultado del programa: su salida, cortada, no se compara con nada. Qué pasa con el
 caso depende de quién se pasó (11.2b):
 
-- **El original (A)**, en cualquier pasada (también la observada o la de `--invocar`) o en la
-  repetición sin el sensor: el caso (o la variante) va a `recursos/` con la causa en `meta.txt`, el
-  mensaje (qué ejecución, con qué argumentos de node) y el programa que corrió (`programa.cjs` o
-  `.mjs`). Nunca a iguales, a `div/`, a `known/` ni a `descartes.tsv`.
+- **El original (A)**, en cualquier pasada (también la observada o la de `--invocar`), en la
+  repetición sin el sensor o al confirmar una divergencia (11.2c: el A fresco que confirma el de la
+  caché y el "A otra vez" del no determinismo): el caso (o la variante) va a `recursos/` con la
+  causa en `meta.txt`, el mensaje (qué ejecución, con qué argumentos de node) y el programa que
+  corrió (`programa.cjs` o `.mjs`). Nunca a iguales, a `div/`, a `known/` ni a `descartes.tsv`.
 - **El minificado (B)**, con A terminado: es una diferencia, como un Timeout de B. `confirm` lo
-  repite con topes mayores (el doble de RSS y cuatro veces la salida): si termina, se compara con
-  eso (`div/` con el kind de siempre, o iguales); si lo vuelve a pasar, `div/` con kind
-  `ExitStatus` (lo mató difuzz) y el paso `tope_node` en la clasificación de `meta.txt`. Un B en
-  Timeout que con el timeout largo pasa un tope queda en Timeout.
-- **Un re-chequeo** (profundidad, nombres, contenido, violaciones, `solo_sloppy`, …) o **una
-  confirmación de A**: ese paso queda Inconcluso (con la nota del tope) y el caso sigue: no sale de
-  `div/` por un límite de difuzz.
+  repite con topes mayores (el doble de RSS y cuatro veces la salida) y con el timeout largo de un
+  Timeout de B (11.2c; antes, con el normal: un B más lento y más pesado que A iba a `div/`): si
+  termina, se compara con eso (`div/` con el kind de siempre, o iguales); si lo vuelve a pasar, o
+  no termina, `div/` con kind `ExitStatus` (lo mató difuzz) y el paso `tope_node` en la
+  clasificación de `meta.txt`. Un B en Timeout que con el timeout largo pasa un tope queda en
+  Timeout. La salida del B cortado que se guarda en `div/` (`b.stdout`) es un prefijo de 64 KiB con
+  la marca `[... difuzz recorto N de los M bytes que junto ...]` (11.2c).
+- **Un re-chequeo** (profundidad, nombres, contenido, violaciones, `solo_sloppy`, …): ese paso
+  queda Inconcluso (con la nota del tope) y el caso sigue: no sale de `div/` por un límite de
+  difuzz.
 
 Cada mensaje de un tope (en `recursos/<caso>/meta.txt`, en el paso `tope_node` o en la nota del
 re-chequeo inconcluso) dice qué ejecución fue (A, B, qué re-chequeo; en un re-chequeo, si corrió el
@@ -996,8 +1000,12 @@ caso sigue. Al arrancar, difuzz imprime los dos topes (`topes de node: ...`).
   el final, no (11.2b: antes se sumaba el `ru_maxrss` de `wait4`, que cuenta a los hijos del
   programa que node ya esperó). El default es la misma cuenta que el presupuesto de los hijos minificadores (MemTotal/2
   repartido entre los workers, entre 256 MiB y 4 GiB; `--mem-hijo` no lo cambia): cada worker
-  hace una cosa a la vez, así que `--jobs` × tope acota lo que corre junto y la otra mitad queda
-  para difuzz y el resto de la máquina. Con 32 workers y 31 GiB son 496 MiB; con un solo caso,
+  hace una cosa a la vez, y la repetición de un B con los topes mayores (el doble del tope, con
+  techo MemTotal/2) corre de a una en todo difuzz (11.2c), así que lo que corre junto queda en
+  (`--jobs` − 1) × tope + el mayor. Con el default son a lo sumo MemTotal/2 + un tope (con un solo
+  worker, MemTotal/2); antes cada worker podía estar en su repetición: `--jobs` × 2 × tope, toda la
+  memoria (medido con `--jobs 4 --mem-node 300`: 2,2 GB de node contra 1,2 prometidos). El resto
+  queda para difuzz y la máquina. Con 32 workers y 31 GiB son 496 MiB; con un solo caso,
   un solo worker y 4 GiB. Un caso legítimo que necesita más va a `recursos/`: se repite con
   `--mem-node` más alto o menos `--jobs`. Lo que un programa reserva y toca entre dos lecturas
   pasa el tope antes de que lo maten (medido: 267 MiB con un tope de 256, reservando de a
@@ -1021,9 +1029,15 @@ caso sigue. Al arrancar, difuzz imprime los dos topes (`topes de node: ...`).
   tope: el mensaje y el stack de un throw sin atrapar (la línea `exc`, que no se compara y va a
   `a.exc`/`b.exc`) se recortan a 64 Ki caracteres, y un canal que pesa más que `--max-salida` no se
   lee y cuenta como pasarse de salida (antes, `throw new Error("x".repeat(256 << 20))` llevaba a
-  difuzz a 790 MB). Una entrada de la caché de A que pesa más que `--max-salida` (grabada por un binario sin
-  tope o con un tope mayor) no se lee: A corre en fresco con los topes de esta corrida (11.2b; si
-  no, un A cacheado más grande que el tope se compararía con un B que sí lo pasa).
+  difuzz a 790 MB). Los nombres de archivo de los marcos (`marco` en el canal) de más de 4096
+  caracteres no se anotan (11.2c: un `//# sourceURL=` de 20 MiB mandaba a `recursos/` un A que
+  imprimía una línea); los marcos de ese archivo conservan la posición. Una entrada de la caché de A
+  guarda los topes de node (RSS y salida) con que corrió A y solo sirve si los de la corrida no son
+  menores (11.2c, caché v3; las entradas v2 se vuelven a grabar): si no, A corre en fresco con los
+  topes de esta corrida. Antes (11.2b) solo se miraba el peso de la entrada contra `--max-salida`, con
+  un margen, y un A grabado con `--mem-node 2048` se usaba con 300: un B que pasaba el tope se
+  comparaba con un A que nunca se había medido contra él (falso `div/` ExitStatus). El peso sigue
+  como guarda de memoria (una entrada que no puede servir no se lee entera).
 - **node no sobrevive a difuzz.** Cada node muere con SIGKILL si muere difuzz, también de golpe
   (SIGKILL, el OOM killer): `PR_SET_PDEATHSIG`, puesto con `setpriv --pdeathsig KILL` de
   util-linux si está en el `PATH` (si no, entre fork y exec, que cuesta más: +8 % de pared medido
@@ -1045,6 +1059,11 @@ Límites que quedan (11.2b, de las revisiones de 11b):
   muere, node no recibe la señal.
 - Un caso en `recursos/` por memoria no se reproduce corriéndolo suelto con los defaults (el tope
   depende de los workers): hay que pasar el `--mem-node` que dice su `meta.txt`.
+- (11.2c) Las repeticiones con topes mayores van de a una: si muchos B de una corrida pasan el
+  tope a la vez (una familia de casos), esperan su turno; cada una dura a lo sumo el timeout largo.
+  En una máquina chica (con un solo worker y MemTotal ≤ 8 GiB, el tope ya es MemTotal/2) el techo
+  deja el mayor igual al tope: un B que reserva un poco más que A va a `div/` ExitStatus en vez de
+  iguales.
 
 ## Códigos de salida
 
