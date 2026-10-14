@@ -2643,16 +2643,22 @@ mod tests {
         }
         let preload = Preload::write_tagged("tope-salida").unwrap();
         let r = Runner::new(&preload, crate::test_util::id_runner(), Duration::from_secs(60)).con_tope_salida(1 << 20).with_sensor(false);
-        // Exactamente 1 MiB (512 KiB por cada pipe): entra.
-        let justo = "const s = \"x\".repeat(512 * 1024 - 1) + \"\\n\";\nprocess.stdout.write(s);\nprocess.stderr.write(s);\n";
+        // Exactamente 1 MiB: entra. Con 11.1 lo que el programa escribe a stderr llega por stdout
+        // con el prefijo `[stderr] ` (9 bytes, que cuentan): 512 KiB + 9 + (512 KiB - 9).
+        let justo = "const s = \"x\".repeat(512 * 1024 - 1) + \"\\n\";\nprocess.stdout.write(s);\nprocess.stderr.write(s.slice(9));\n";
         let e = r.run(justo);
-        assert_eq!((e.status, e.stdout.len(), e.stderr.len()), (Status::Exited(0), 512 * 1024, 512 * 1024));
+        assert_eq!((e.status, e.stdout.len()), (Status::Exited(0), 1 << 20), "{}", e.stderr);
+        assert!(e.stdout[512 * 1024..].starts_with("[stderr] xx"));
         for (que, js) in [
             ("stdout", "const s = \"x\".repeat(1 << 20) + \"\\n\";\nfor (let i = 0; i < 1024; i++) process.stdout.write(s);\n"),
             ("stdout y stderr", "const s = \"x\".repeat(700 * 1024) + \"\\n\";\nprocess.stdout.write(s);\nprocess.stderr.write(s);\n"),
             // `fs.writeSync`: `process.stderr.write` de 2 MiB a un pipe deja la mayor parte en la cola
-            // de node, que el bucle no deja vaciar (MEDIDO: timeout, sin pasar el tope).
-            ("stderr, mientras gira", "const fs = require(\"fs\");\nfor (let i = 0; i < 32; i++) fs.writeSync(2, \"x\".repeat(64 * 1024));\nwhile (true) {}\n"),
+            // de node, que el bucle no deja vaciar (MEDIDO: timeout, sin pasar el tope). Integracion
+            // con 11.1: `fs.writeSync(2, ...)` va al fd 1 del preload, que es no bloqueante (EAGAIN si
+            // difuzz no vacio el pipe; MEDIDO): reintenta. El stderr real (el pipe de node, sin el
+            // preload en el medio) se escribe abriendo `/dev/stderr` (bloqueante).
+            ("stderr del programa, mientras gira", "const fs = require(\"fs\");\nfor (let i = 0; i < 32; i++) for (;;) { try { fs.writeSync(2, \"x\".repeat(64 * 1024)); break; } catch (e) { if (e.code !== \"EAGAIN\") throw e; } }\nwhile (true) {}\n"),
+            ("stderr real, mientras gira", "const fs = require(\"fs\");\nconst fd = fs.openSync(\"/dev/stderr\", \"w\");\nfor (let i = 0; i < 32; i++) fs.writeSync(fd, \"x\".repeat(64 * 1024));\nwhile (true) {}\n"),
         ] {
             let t0 = Instant::now();
             let Err(p) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| r.run(js))) else {
