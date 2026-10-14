@@ -215,6 +215,21 @@
 
   // Se captura antes de que el programa pueda pisar console.log o process.stdout.write.
   const write = process.stdout.write.bind(process.stdout);
+  // 11.2d (rev-b11-final A-N1 = B-F1): al tocar `process.stdout` (y `process.stderr`, abajo) node
+  // deja el pipe en O_NONBLOCK. Entonces un `fs.writeSync(1 o 2, ...)` del programa (11.1 manda el 2
+  // al 1) da EAGAIN o un write parcial segun cuan rapido vacia difuzz el pipe, se adelanta a lo que
+  // `process.stdout.write` dejo encolado, y lo encolado se pierde si el programa sale con
+  // `process.exit` o un throw (MEDIDO: 64 KiB de 1 MiB). A y B salian distinto por algo de difuzz
+  // (falsos div/ y no_determinista). Bloqueante, como un fd 2 que nadie toco: cada escritura sale
+  // entera y en orden. difuzz siempre vacia los pipes (y pasado el tope de salida lee y tira), asi
+  // que node no queda trabado escribiendo.
+  const bloquear = (s) => {
+    try {
+      const h = s && s._handle;
+      if (h && typeof h.setBlocking === 'function') h.setBlocking(true);
+    } catch {}
+  };
+  bloquear(process.stdout);
 
   // M10: canal de control propio (archivo DIFUZZ_CTL que el runner trunca antes de
   // cada ejecucion), fuera de stdout/stderr/exit code, que el programa tambien puede
@@ -937,6 +952,9 @@
     try {
       stderr = process.stderr;
     } catch {}
+    // 11.2d: tocarlo deja el fd 2 no bloqueante (MEDIDO: `fs.writeSync(2, 1 MiB)` escribe 64 KiB);
+    // lo que todavia llega al stderr real (node, `fs.writeFileSync(2, ...)`) tiene que salir entero.
+    bloquear(stderr);
     if (stderr) {
       envolver(stderr, 'write', {
         write(chunk, encoding, cb) {

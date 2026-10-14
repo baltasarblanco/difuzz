@@ -896,3 +896,12 @@
 # es un renombre puro): div/ en core_defaults (costo declarado, fixture 12306 de SWC); con m1b, known/.
 27-b113-n03-valor-de-un-nombre-borrado	oxc-a-core_defaults	div:Stdout
 27-b113-n03-valor-de-un-nombre-borrado	oxc-b-core_defaults	div:Stdout
+# 11.2d (rev-b11-final A-N1 = B-F1): el preload deja bloqueantes los pipes de stdout y stderr. w06: el bug F
+# de oxc por console.log y 2 MiB por fs.writeSync(2, ...): div/ en las 4 (con 26c5239, no_determinista o
+# ThrowLost, MEDIDO 8 de 8). e01, e02 y e03 (sin bug: fs.writeSync(2) intercalado con mas de 64 KiB de
+# stdout, sin atrapar, y process.exit tras 2 MiB encolados): igual en las 4, sin fila (con 26c5239, e01 y
+# e02 daban div:Stdout o no_determinista a veces). MEDIDO 2 corridas de cada binario.
+28-b112d-w06-bug-y-writesync2	oxc-a-core_defaults	div:Stdout
+28-b112d-w06-bug-y-writesync2	oxc-a-carril_a	div:Stdout
+28-b112d-w06-bug-y-writesync2	oxc-b-core_defaults	div:Stdout
+28-b112d-w06-bug-y-writesync2	oxc-b-carril_a	div:Stdout

@@ -30,7 +30,13 @@ difieren, el minifier cambió el comportamiento del programa: es un candidato a 
    - manda `console.error`/`warn`/`trace` a stdout (`[error] ...`, `[warn] ...`, `[trace] ...`),
      y también lo que el programa escribe directo a stderr con `process.stderr.write`,
      `fs.writeSync(2, ...)` o `process._rawDebug` (`[stderr] ...`, una vez por escritura); al
-     salir, imprime los globals que el programa creó. El stderr real de node no se compara (trae
+     salir, imprime los globals que el programa creó. Deja bloqueantes los pipes de stdout y
+     stderr (11.2d): node los pone en `O_NONBLOCK` al tocar `process.stdout`/`process.stderr`, y
+     entonces un `fs.writeSync(1 o 2, ...)` daba EAGAIN o un write parcial, se adelantaba a lo que
+     `process.stdout.write` había encolado, y lo encolado se perdía si el programa salía con
+     `process.exit` o un throw, todo según cuán rápido vaciaba difuzz el pipe (falsos `div/` y bugs
+     reales en `no_determinista`). Bloqueante, cada escritura sale entera y en orden; difuzz siempre
+     vacía los pipes (también pasado el tope de salida), así que node no queda trabado. El stderr real de node no se compara (trae
      rutas y pids); tampoco lo que llega al fd 2 por otras vías: `process.stderr.end(dato)`,
      `fs.write(2, ...)`, `fs.writeFileSync(2)` o `'/dev/stderr'`, un stream nuevo sobre el fd 2 y
      los procesos hijos que heredan el stderr. Una escritura que lanza (un `chunk` inválido) deja

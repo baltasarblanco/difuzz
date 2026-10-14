@@ -2728,6 +2728,37 @@ mod tests {
         assert_eq!(e.stdout.len(), 200 * 1024 + 1);
     }
 
+    /// 11.2d (rev-b11-final A-N1 = B-F1): con los pipes bloqueantes, lo que el programa escribe por
+    /// `process.stdout.write` (4 MiB, mas de lo que entra en el pipe) y despues por `fs.writeSync(2)`
+    /// sale entero y en ese orden, el `fs.writeSync(2)` devuelve lo que escribio, y nada se pierde si
+    /// el programa sale enseguida (`process.exit`, un throw o `exitCode`). Con 26c5239 (fd 1 no
+    /// bloqueante) el `fs.writeSync(2)` daba EAGAIN o se adelantaba, y `process.exit` perdia lo encolado.
+    /// Y `fs.writeSync(2)` con un Buffer y offset/length, con encoding y con un objeto de opciones.
+    #[test]
+    fn escrituras_enteras_y_en_orden_aunque_salga_enseguida() {
+        use super::{Preload, Runner, Status};
+        use std::time::Duration;
+        if !crate::test_util::requiere_node() {
+            return;
+        }
+        let preload = Preload::write_tagged("bloqueante").unwrap();
+        let r = Runner::new(&preload, crate::test_util::id_runner(), Duration::from_secs(60)).with_sensor(false);
+        let grande = "a".repeat(4 << 20);
+        let cuerpo = "const fs = require(\"fs\");\nprocess.stdout.write(\"a\".repeat(4 << 20));\nconst n = fs.writeSync(2, \"E\\n\");\nconsole.log(\"n\", n);\n";
+        for (fin, status) in [("process.exit(0);\n", Status::Exited(0)), ("process.exitCode = 3;\n", Status::Exited(3)), ("throw new Error(\"x\");\n", Status::Exited(super::THROW_EXIT))] {
+            let e = r.run(&format!("{cuerpo}{fin}"));
+            assert_eq!(e.status, status, "{fin}: {}", e.stderr);
+            assert!(e.stdout.starts_with(&format!("{grande}[stderr] E\nn 2\n")), "{fin}: {} bytes, cola {:?}", e.stdout.len(), &e.stdout[e.stdout.len().saturating_sub(40)..]);
+        }
+        let js = "const fs = require(\"fs\");\nconst a = fs.writeSync(2, Buffer.from(\"xyz\"), 1, 1);\nconst b = fs.writeSync(2, \"68656c6c6f0a\", null, \"hex\");\nconst c = fs.writeSync(2, Buffer.from(\"abcd\"), { offset: 2 });\nconsole.log(a, b, c);\n";
+        let e = r.run(js);
+        assert_eq!((e.status, e.stdout.as_str()), (Status::Exited(0), "[stderr] y[stderr] hello\n[stderr] cd1 6 2\n"), "{}", e.stderr);
+        // El stderr real (lo que no pasa por el preload: `fs.writeFileSync(2, ...)`) tambien bloqueante:
+        // con el fd 2 no bloqueante, 1 MiB daba EAGAIN y el programa moria (MEDIDO con node solo).
+        let e = r.run("const fs = require(\"fs\");\nprocess.stderr;\nfs.writeFileSync(2, \"q\".repeat(1 << 20));\nconsole.log(\"ok\");\n");
+        assert_eq!((e.status, e.stdout.as_str(), e.stderr.len()), (Status::Exited(0), "ok\n", 1 << 20));
+    }
+
     /// 11.2c (rev-b11-2b-B N6): el archivo de un marco lo puede elegir el programa (`//# sourceURL=` de
     /// un eval). Uno de 1 MiB no va al canal (`marco`): antes el canal pasaba un tope de salida de
     /// 512 KiB y el programa, que imprime una linea, iba a recursos/. Uno corto si va.
