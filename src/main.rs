@@ -2730,6 +2730,8 @@ fn confirm(
     // 11.2c (rev-b11-2b-A H1): con A de la cache, "A no" es que no los paso al grabarse, con topes
     // iguales o menores (`CacheA::run` no sirve otra entrada); se confirma en fresco abajo.
     let a_no = if a_cached { "y A no (A de la cache, grabado con topes iguales o menores; se confirma en fresco abajo)" } else { "y A no" };
+    // 11.2e: B es la repeticion con topes mayores, que corrio sin el sensor (ver abajo y al final).
+    let mut b_mayor_sin_sensor = false;
     if let Some(c) = b.tope() {
         // 11.2e (rev-b11-final-A vuelta 2, V2-H1): la repeticion corre SIN el sensor, una sola vez. Con
         // el sensor y sin reintento (11.2d), un B sin bug que pasa el tope y solo es lento con el
@@ -2775,19 +2777,9 @@ fn confirm(
             None => {
                 pasos.push(format!("B paso el tope de node ({c}) {a_no}; repetido con topes mayores ({topes}) termino y se compara con eso"));
                 b = b2;
+                b_mayor_sin_sensor = true;
                 if !diverges(&a, &b) {
                     return Confirmed::Same { corto: corto_por_sandbox(runner, &a, &b) };
-                }
-                // 11.2e: B corrio sin el sensor y A con el: si el programa nota el sensor (I3), la
-                // diferencia puede ser solo esa. A sin el sensor (fuera del turno, con los topes de
-                // siempre; si los pasa, `recursos/`, como cualquier A) y, si da lo mismo que B, iguales.
-                if runner.con_sensor() {
-                    let sin = runner.sin_sensor();
-                    let a_sin = como_a(QUIEN_A_SIN_SENSOR_MAYOR, || sin.run(original));
-                    if !diverges(&a_sin, &b) {
-                        pasos.push("A sin el sensor da lo mismo que esa repeticion de B (sin el sensor): la diferencia era el sensor -> iguales".into());
-                        return Confirmed::Same { corto: corto_por_sandbox(runner, &a_sin, &b) };
-                    }
                 }
             }
         }
@@ -2822,6 +2814,18 @@ fn confirm(
             stats.a_nondet += 1;
             ctx.reporter.discard(rel, "no_determinista", a2.elapsed);
             return Confirmed::Nondeterministic;
+        }
+    }
+    // 11.2e (V2-H1): B es la repeticion con topes mayores, que corrio sin el sensor, y A corrio con el.
+    // Si el programa nota el sensor (I3), la diferencia puede ser solo esa: con A ya confirmado, A sin
+    // el sensor (fuera del turno, con los topes de siempre; si los pasa, `recursos/`, como cualquier
+    // A) y, si da lo mismo que B, iguales.
+    if b_mayor_sin_sensor && runner.con_sensor() {
+        let sin = runner.sin_sensor();
+        let a_sin = como_a(QUIEN_A_SIN_SENSOR_MAYOR, || sin.run(original));
+        if !diverges(&a_sin, &b) {
+            pasos.push("A sin el sensor da lo mismo que la repeticion de B (sin el sensor): la diferencia era el sensor -> iguales".into());
+            return Confirmed::Same { corto: corto_por_sandbox(runner, &a_sin, &b) };
         }
     }
     Confirmed::Divergence(Box::new((a, b, a_cache)))
