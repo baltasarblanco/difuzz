@@ -874,3 +874,7 @@
 # mangle da lo mismo que A y B es un renombre de el), igual en carril_a.
 27-b113-p02-valor-de-un-nombre	oxc-a-core_defaults	known
 27-b113-p02-valor-de-un-nombre	oxc-b-core_defaults	known
+# 11.2a (B-H3): n03 fuerza el camino nuevo de I6 (keep_names lo arregla pero B no difiere en un nombre ni
+# es un renombre puro): div/ en core_defaults (costo declarado, fixture 12306 de SWC); con m1b, known/.
+27-b113-n03-valor-de-un-nombre-borrado	oxc-a-core_defaults	div:Stdout
+27-b113-n03-valor-de-un-nombre-borrado	oxc-b-core_defaults	div:Stdout

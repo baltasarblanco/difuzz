@@ -590,11 +590,15 @@ Principios:
     la divergencia la explica ligar `arguments`, válido solo en sloppy.
   - los nombres (minificar preservándolos, solo en core_defaults y si la salida puede mostrar
     un nombre: el original lee `.name` o A imprime una instancia `X {`), en los dos: que la
-    divergencia desaparezca y (11.3) que B difiera de A solo en nombres: misma cantidad de
-    líneas, mismo estado y, en cada línea distinta, lo que cambia (salvo espacios) son
-    identificadores del código de ese lado (el original para A, el minificado para B; los saca
-    el parser de SWC, no las palabras de un string) que no son un valor (`NaN`, `undefined`,
-    `true`, lo que da `typeof`, ...). Si no, en oxc, alcanza con que el minificado sin mangle dé
+    divergencia desaparezca y (11.3) que B difiera de A solo en nombres: mismo estado y, en cada
+    línea distinta, lo que cambia (salvo espacios) son identificadores del código de ese lado (el
+    original para A, el minificado para B; los saca el parser de SWC, no las palabras de un
+    string) que no son un valor (`NaN`, `undefined`, `true`, lo que da `typeof`, ...). Con otra
+    cantidad de líneas (`util.inspect` corta una instancia según el largo del texto, y el nombre
+    largo en A y mangleado o ausente en B cambia el corte) se compara la salida entera sin blancos,
+    token por token en la misma posición, sin los nombres que preceden a un `{` (el prefijo de una
+    instancia): lo distinto tiene que ser nombres, y un token de más (una línea repetida) o un
+    cambio solo de saltos de línea no pasa. Si no, en oxc, alcanza con que el minificado sin mangle dé
     lo mismo que A y B sea un renombre de él (la misma prueba de `mensaje_nombre`, abajo): así
     pasa un valor que sale de un nombre (`inferred.name === 'inferred' ? f : null`, un paquete
     del corpus real). keep_names también apaga pasadas de oxc (el inlining de una función
@@ -973,9 +977,9 @@ Sin `node` en el `PATH`, los tests que lo necesitan fallan con un mensaje claro.
 
 - **Golden de detección** (`tests/golden/`): 19 casos (18 con bugs conocidos de oxc y swc y una prueba del oráculo), en 8
   celdas, más `--invocar` y `--stubs`; la clase esperada de cada caso está en `esperado.tsv`.
-- **Aceptación de los re-chequeos** (`tests/aceptacion/rechequeos/`): 180 casos que combinan un
+- **Aceptación de los re-chequeos** (`tests/aceptacion/rechequeos/`): 181 casos que combinan un
   bug real de oxc con un flag de asunción (o con la forma en que se imprime), en las 4 celdas de oxc
-  (720 comparaciones).
+  (724 comparaciones).
 - **Corpus de codegen** (`tests/codegen/`, 10.1): 142 formas propias cuya semántica depende de la
   sintaxis exacta (paréntesis, comas, directivas, ASI, claves computadas, escapes), con `--crudo`
   en 8 celdas (1136 comparaciones). Las 9 del bug de los paréntesis de oxc van a `codegen/`; los

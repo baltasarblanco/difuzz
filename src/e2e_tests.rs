@@ -145,6 +145,10 @@ const TRAZA_SENAL: &str = "\nclasificacion:\n  sensor: A con el sensor, B sin el
 /// 11.3: las trazas del re-chequeo de nombres de core_defaults (oxc de verdad).
 const TRAZA_NOMBRES_EXPLICA: &str = "\nclasificacion:\n  profundidad: no aplica (A con mas pila da lo mismo, o la corrida honda fallo)\n  nombres: Explica (con los nombres preservados la divergencia desaparece)\n  asunciones: sensor, asuncion: oxc: No Reliance on Function.prototype.name (keep_names apagado en core_defaults)\n  minificado_invalido: no (node --check acepta el minificado)\n  sintoma: el de known-sintomas.tsv (o primero registrado)\n  decision: known/ (sensor, asuncion: oxc: No Reliance on Function.prototype.name (keep_names apagado en core_defaults))\n";
 const TRAZA_NOMBRES_RENOMBRE: &str = "\nclasificacion:\n  profundidad: no aplica (A con mas pila da lo mismo, o la corrida honda fallo)\n  nombres: Explica (con los nombres preservados la divergencia desaparece; B es un renombre del minificado sin mangle, que da lo mismo que A)\n  asunciones: sensor, asuncion: oxc: No Reliance on Function.prototype.name (keep_names apagado en core_defaults)\n  minificado_invalido: no (node --check acepta el minificado)\n  sintoma: el de known-sintomas.tsv (o primero registrado)\n  decision: known/ (sensor, asuncion: oxc: No Reliance on Function.prototype.name (keep_names apagado en core_defaults))\n";
+const TRAZA_NOMBRES_VALOR_BORRADO: &str = "\nclasificacion:\n  profundidad: no aplica (A con mas pila da lo mismo, o la corrida honda fallo)\n  nombres: Inconcluso -> nombres_inconcluso: con los nombres preservados la divergencia desaparece, pero B difiere de A en algo que no es un nombre (en la linea 1 A imprime `true`, que no es un nombre de su texto) y no se pudo ver que B sea un renombre de algo que se comporta como A (el minificado sin mangle tampoco da lo mismo que A): keep_names tambien apaga pasadas del minifier y el bug puede estar en una de ellas\n  asunciones: ninguna (ni flag de la tabla, ni ruta, ni backlog)\n  solo_sloppy: NoExplica (con \"use strict\" sigue)\n  decision: div/\n";
+/// La tabla de asunciones del e2e es la de oxc (`Known::load(.., Minifier::Oxc)`), tambien en esta
+/// fila de swc.
+const TRAZA_NOMBRES_CORTE: &str = TRAZA_NOMBRES_EXPLICA;
 const TRAZA_NOMBRES_NO_EXPLICA: &str = "\nclasificacion:\n  profundidad: no aplica (A con mas pila da lo mismo, o la corrida honda fallo)\n  nombres: NoExplica (con los nombres preservados sigue)\n  asunciones: ninguna (ni flag de la tabla, ni ruta, ni backlog)\n  solo_sloppy: NoExplica (con \"use strict\" sigue)\n  decision: div/\n";
 
 fn tabla() -> Vec<Fila> {
@@ -271,6 +275,27 @@ fn tabla() -> Vec<Fila> {
             args: &["--minifier", "oxc", "--config", "core_defaults"],
             destino: Destino::Known,
             meta: &["kind: Stdout\n", TRAZA_NOMBRES_RENOMBRE],
+        },
+        // 11.2a (B-H3 de rev-b11a-B): el camino nuevo de I6 por el destino. 12306 de SWC: keep_names
+        // arregla la divergencia, pero `true` contra `false` no es un nombre y el minificado sin mangle
+        // tampoco da lo mismo que A: div/ (costo declarado). Con m1b iria a known/.
+        Fila {
+            caso: "div-nombres-valor-borrado",
+            programa: "var f = function g() {\n    return 1;\n};\nconsole.log(f.name === \"g\");\n",
+            back: Back::Celda,
+            args: &["--minifier", "oxc", "--config", "core_defaults"],
+            destino: Destino::Div,
+            meta: &["kind: Stdout\n", "\nknown: no\n", "\nflags_a: nombres_inconcluso\n", TRAZA_NOMBRES_VALOR_BORRADO],
+        },
+        // 11.2a (A-H1 de rev-b11a-A, c14): swc core_defaults deja la clase anonima y util.inspect corta
+        // la instancia en otra cantidad de lineas; lo unico distinto es el nombre: known/.
+        Fila {
+            caso: "known-nombres-corte",
+            programa: "(function () {\n  class ConfiguracionDelServidorPrincipal {\n    constructor() {\n      this.puerto = 8080;\n      this.anfitrion = \"localhost\";\n      this.reintentos = 3;\n    }\n  }\n  console.log(new ConfiguracionDelServidorPrincipal());\n})();\n",
+            back: Back::Celda,
+            args: &["--minifier", "swc", "--config", "core_defaults"],
+            destino: Destino::Known,
+            meta: &["kind: Stdout\n", TRAZA_NOMBRES_CORTE],
         },
         Fila {
             caso: "div-nombres-cbrt",

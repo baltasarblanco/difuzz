@@ -637,21 +637,19 @@ fn solo_renombre(runner: &runner::Runner, m: Medido, original: &str, minified: &
 const NO_SON_NOMBRES: [&str; 13] =
     ["NaN", "Infinity", "undefined", "null", "true", "false", "number", "string", "object", "function", "boolean", "symbol", "bigint"];
 
-/// 11.3: A y B (normalizados como en `oracle::compare`) terminan igual, imprimen la misma
-/// cantidad de lineas y, en cada linea en que difieren, lo que cambia (por tokens de JS:
-/// identificadores, numeros y signos sueltos, alineados con `recheck::lcs_cambiados`) son
-/// nombres: identificadores que aparecen como identificador en el texto que corrio de ese lado
-/// (`original` para A, `minified` para B) y que no son un valor (`NO_SON_NOMBRES`). Un numero, un
-/// signo o una palabra de valor que cambia no es un nombre. `Err` con la razon.
+/// 11.3: A y B (normalizados como en `oracle::compare`) terminan igual y, en cada linea en que
+/// difieren, lo que cambia (por tokens de JS: identificadores, numeros y signos sueltos, alineados
+/// con `recheck::lcs_cambiados`; los espacios no cuentan) son nombres: identificadores del codigo
+/// que corrio de ese lado (`original` para A, `minified` para B) que no son un valor
+/// (`NO_SON_NOMBRES`). Un numero, un signo o una palabra de valor que cambia no es un nombre.
+/// 11.2a: con otra cantidad de lineas, la salida entera sin blancos, token por token (abajo).
+/// `Err` con la razon.
 pub(crate) fn difiere_solo_en_nombres(a: &runner::Exec, b: &runner::Exec, original: &str, minified: &str, kind: minify::SourceKind) -> Result<(), String> {
     if a.status != b.status || a.threw() != b.threw() {
         return Err(format!("A y B no terminan igual: {:?} contra {:?}", a.status, b.status));
     }
     let (na, nb) = oracle::normalizadas(a, b);
     let (la, lb): (Vec<&str>, Vec<&str>) = (na.lines().collect(), nb.lines().collect());
-    if la.len() != lb.len() {
-        return Err(format!("A imprime {} lineas y B {}", la.len(), lb.len()));
-    }
     // Los identificadores del codigo (SWC, en el hijo de analisis), no las palabras de un string:
     // con `"PASS"`/`"FAIL"` en el fuente, un bug que imprime FAIL no pasa por un nombre.
     let ids = |s: &str| -> Result<std::collections::HashSet<String>, String> {
@@ -665,10 +663,55 @@ pub(crate) fn difiere_solo_en_nombres(a: &runner::Exec, b: &runner::Exec, origin
         }
     };
     let (mut ids_a, mut ids_b) = (None, None);
-    for (i, (x, y)) in la.iter().zip(&lb).enumerate().filter(|(_, (x, y))| x != y) {
+    let nombre = |t: &str, conocidos: &std::collections::HashSet<String>| es_identificador(t) && !NO_SON_NOMBRES.contains(&t) && conocidos.contains(t);
+    if la.len() != lb.len() {
+        // 11.2a (A-H1 de rev-b11a-A): util.inspect corta una instancia en varias lineas segun el
+        // largo del texto, y un nombre largo en A y mangleado en B cambia el corte
+        // (`ConfiguracionDelServidorPrincipal {` en 5 lineas contra `t {` en una). Con otra cantidad
+        // de lineas se compara la salida entera sin espacios ni saltos, token por token en la misma
+        // posicion (sin alinear: un token de mas o de menos, como una linea repetida, no pasa), y
+        // cada par distinto tiene que ser un nombre de cada lado. Un cambio solo de espacios o de
+        // saltos no pasa.
+        let sin_blancos = |s: &str| tokens_js(s).into_iter().filter(|t| !t.trim().is_empty()).collect::<Vec<_>>();
+        let (mut tx, mut ty) = (sin_blancos(&na), sin_blancos(&nb));
+        let donde = format!("con otra cantidad de lineas (A {}, B {})", la.len(), lb.len());
+        let ca = ids(original)?;
+        let cb = ids(minified)?;
+        let mut quito_prefijos = false;
+        if tx.len() != ty.len() {
+            quito_prefijos = true;
+            // Una instancia de una clase que en un lado queda anonima (swc core_defaults: `{ ... }`
+            // contra `ConfiguracionDelServidorPrincipal { ... }`, caso c14): sin los nombres que
+            // preceden a un `{` (el prefijo de util.inspect), de los dos lados. Solo prefijos que son
+            // nombres de su texto; cualquier otro token de mas sigue sin pasar.
+            let sin_prefijos = |t: &[String], c: &std::collections::HashSet<String>| -> Vec<String> {
+                t.iter()
+                    .enumerate()
+                    .filter(|(i, x)| !(t.get(i + 1).is_some_and(|s| s == "{") && nombre(x, c)))
+                    .map(|(_, x)| x.clone())
+                    .collect()
+            };
+            (tx, ty) = (sin_prefijos(&tx, &ca), sin_prefijos(&ty, &cb));
+        }
+        if tx.len() != ty.len() {
+            return Err(format!("{donde}, A y B imprimen otra cantidad de tokens ({} contra {})", tx.len(), ty.len()));
+        }
+        let pares: Vec<(&String, &String)> = tx.iter().zip(&ty).filter(|(x, y)| x != y).collect();
+        // Sin pares distintos ni prefijos quitados, solo cambian blancos.
+        if pares.is_empty() && !quito_prefijos {
+            return Err(format!("{donde} solo cambian espacios o saltos de linea"));
+        }
+        if let Some((x, y)) = pares.into_iter().find(|(x, y)| !nombre(x, &ca) || !nombre(y, &cb)) {
+            return Err(format!("{donde}, A imprime `{x}` donde B imprime `{y}`: no son nombres de sus textos"));
+        }
+        return Ok(());
+    }
+    let tramos = la.iter().zip(&lb).enumerate().filter(|(_, (x, y))| x != y);
+    for (i, (x, y)) in tramos {
+        let donde = format!("en la linea {}", i + 1);
         let (tx, ty) = (tokens_js(x), tokens_js(y));
         let (Some(cx), Some(cy)) = (recheck::lcs_cambiados(&ty, &tx), recheck::lcs_cambiados(&tx, &ty)) else {
-            return Err(format!("la linea {} es demasiado larga para alinear", i + 1));
+            return Err(format!("{donde}: demasiado larga para alinear"));
         };
         // Los espacios que cambian no cuentan (`Foo { x: 7 }` contra `{ x: 7 }`: util.inspect no
         // pone el prefijo ni su espacio de una instancia sin nombre), pero una linea en que solo
@@ -681,12 +724,12 @@ pub(crate) fn difiere_solo_en_nombres(a: &runner::Exec, b: &runner::Exec, origin
             };
             let mut distintos = toks.iter().zip(cambiados).filter(|(t, c)| **c && !t.trim().is_empty()).map(|(t, _)| t).peekable();
             algun_nombre |= distintos.peek().is_some();
-            if let Some(t) = distintos.find(|t| !es_identificador(t) || NO_SON_NOMBRES.contains(&t.as_str()) || !conocidos.contains(t.as_str())) {
-                return Err(format!("en la linea {} {lado} imprime `{t}`, que no es un nombre de su texto", i + 1));
+            if let Some(t) = distintos.find(|t| !nombre(t, conocidos)) {
+                return Err(format!("{donde} {lado} imprime `{t}`, que no es un nombre de su texto"));
             }
         }
         if !algun_nombre {
-            return Err(format!("en la linea {} solo cambian espacios", i + 1));
+            return Err(format!("{donde} solo cambian espacios"));
         }
     }
     Ok(())
@@ -1043,6 +1086,22 @@ mod tests {
         assert!(solo(&ok("handler\n"), &ok("otro\n"), o, m).is_err(), "`otro` no esta en el minificado");
         assert!(solo(&ok("handler\n"), &ok("e\nhandler\n"), o, m).is_err(), "otra cantidad de lineas");
         assert!(solo(&ok("handler\n"), &ex(Status::Exited(1), "e\n"), o, m).is_err(), "otro estado");
+        // 11.2a (A-H1 de rev-b11a-A, caso c14): util.inspect corta en otro lugar porque el nombre
+        // cambia de largo. Con otra cantidad de lineas se comparan los tokens sin blancos, en la
+        // misma posicion: pasa si lo distinto son nombres; no pasa si solo cambian saltos, si hay
+        // un token de mas (una linea repetida) o si ademas cambia un valor.
+        let (o3, m3) = (
+            "(function () { class ConfiguracionDelServidorPrincipal { constructor() { this.puerto = 8080; } } console.log(new ConfiguracionDelServidorPrincipal()); })();",
+            "(function(){class t{constructor(){this.puerto=8080}}console.log(new t)})();",
+        );
+        let largo = "ConfiguracionDelServidorPrincipal {\n  puerto: 8080,\n  anfitrion: 'localhost'\n}\n";
+        assert_eq!(solo(&ok(largo), &ok("t { puerto: 8080, anfitrion: 'localhost' }\n"), o3, m3), Ok(()));
+        // swc core_defaults deja la clase anonima: B sin prefijo (c14 de la revision A).
+        assert_eq!(solo(&ok(largo), &ok("{ puerto: 8080, anfitrion: 'localhost' }\n"), o3, m3), Ok(()));
+        assert!(solo(&ok(largo), &ok("{ puerto: 8081, anfitrion: 'localhost' }\n"), o3, m3).is_err(), "sin prefijo y un valor");
+        assert!(solo(&ok(largo), &ok("t { puerto: 8081, anfitrion: 'localhost' }\n"), o3, m3).is_err(), "el corte y un valor");
+        assert!(solo(&ok("t {\n  puerto: 8080\n}\n"), &ok("t { puerto: 8080 }\n"), o3, m3).is_err(), "solo saltos");
+        assert!(solo(&ok("handler\n"), &ok("handler\nhandler\n"), o, m).is_err(), "una linea repetida");
         // Las palabras de un string no son nombres del codigo: un bug que imprime FAIL en vez de
         // PASS en un programa que nombra `.name` no pasa (los identificadores salen de SWC).
         let (o2, m2) = ("console.log(f.name, ok ? 'PASS' : 'FAIL');", "console.log(f.name,ok?'PASS':'FAIL');");
