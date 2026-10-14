@@ -12,7 +12,7 @@ is in Spanish.
   `DIFUZZ_SIN_USERNS=1` skips them.
 - For the scripts in `tests/` and `scripts/`: bash, `rg` and `fd`; `scripts/comparar-binarios.sh`
   and `scripts/subir-oxc.sh` also need `eza` and `sd` (>= 1.0), `scripts/medir-serie.sh` and
-  `scripts/subir-oxc.sh` need `git`, and `scripts/armar-corpus-real.py` needs `python3`. Most
+  `scripts/subir-oxc.sh` need `git`, and `scripts/armar-corpus-real.py` needs `python3`. Some
   scripts list their tools in a `Dependencias:` or `Herramientas:` line of their header; not
   all do.
 - Only for the C1 audit of `tests/muestra/`: `npm ci` in `probe/`.

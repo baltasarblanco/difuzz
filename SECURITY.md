@@ -30,7 +30,8 @@ and most local services, but access to your files is enforced only by the Node p
 model, which is not a barrier against hostile code, and with the default backend almost every
 run also allows the inspector (see Known limits). For a corpus you do not trust, run difuzz
 inside a disposable VM or container that holds nothing you need to protect, and use
-`--sandbox-red` inside it as well.
+`--sandbox-red` inside it as well (it needs unprivileged user namespaces; where it cannot create
+them, difuzz exits with 1 before running anything, and `--sandbox` is the fallback).
 
 ## Known limits
 
@@ -55,6 +56,11 @@ inside a disposable VM or container that holds nothing you need to protect, and 
 - `node --check` (difuzz uses it to ask whether node accepts a source) and `node --version` run
   outside the sandbox, without a timeout and with difuzz's environment. `node --check` only
   checks the syntax; it does not run the case.
+- By design, a case runs in the same Node process as difuzz's preload, which records the case's
+  results through difuzz's control channel, and with `--sandbox` the case is allowed to write to
+  that channel. So a hostile case can forge its own results: difuzz's findings on a hostile
+  corpus are not trustworthy, even when the sandbox holds. (Inferred from the code; no exploit
+  has been tried.)
 - The `repro_original:` / `repro_minificado:` commands written to `meta.txt` do not include the
   sandbox flags: running them by hand runs the case without the sandbox.
 
@@ -63,7 +69,8 @@ The Sandbox section of `README.md` (in Spanish) has the full details and measure
 ## Reporting a vulnerability
 
 If you find a vulnerability in difuzz itself (for example, a way for a corpus case to affect
-difuzz's own process or its output, or a sandbox flag that does less than this file says),
+difuzz's own process or files outside the case's working directory, or a sandbox flag that does
+less than this file says),
 please report it privately through GitHub's private vulnerability reporting ("Report a
 vulnerability" in the repository's Security tab) instead of opening a public issue.
 <!-- VERIFICAR: private vulnerability reporting can only be enabled on a public repository (Settings > Security); enable it right after publishing. -->
