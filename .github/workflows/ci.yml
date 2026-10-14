@@ -1,0 +1,74 @@
+# CI minima (F2, P9): clippy, cargo test, los dos binarios, golden y aceptacion de los re-chequeos.
+# La misma secuencia se puede correr a mano en el mismo orden (ver CONTRIBUTING.md).
+# Las verificaciones de punta a punta corren node con timeout y son sensibles a la carga: van con
+# --jobs 2. No hace falta npm ci en probe/ (solo lo usa C1, que es #[ignore]) ni eza/sd (los usan
+# scripts/comparar-binarios.sh y scripts/subir-oxc.sh, que la CI no corre).
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-24.04 # VERIFICAR: etiqueta del runner
+    timeout-minutes: 90
+    env:
+      CARGO_TERM_COLOR: always
+    steps:
+      - uses: actions/checkout@v4 # VERIFICAR: version de la accion
+
+      # Sin rust-toolchain ni rust-version en el repo: se fija la version verificada (rustc 1.98.0).
+      - uses: dtolnay/rust-toolchain@master # VERIFICAR: ref y entradas de la accion
+        with:
+          toolchain: "1.98.0"
+          components: clippy
+
+      - uses: actions/setup-node@v4 # VERIFICAR: version de la accion
+        with:
+          node-version: "24"
+
+      # tests/golden/verificar.sh usa rg y fd. En Ubuntu el binario de fd-find se llama fdfind.
+      - name: rg y fd
+        run: |
+          sudo apt-get update # VERIFICAR: nombres de los paquetes de apt
+          sudo apt-get install -y ripgrep fd-find
+          mkdir -p "$HOME/.local/bin"
+          ln -sf "$(command -v fdfind)" "$HOME/.local/bin/fd"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      # Los tests de --sandbox-red (src/sandbox_tests.rs) necesitan user namespaces sin root; si la
+      # maquina no los arma, fallan (DIFUZZ_SIN_USERNS=1 los saltea).
+      - name: user namespaces sin root
+        run: |
+          # VERIFICAR: que el runner restrinja los user namespaces por AppArmor con este sysctl
+          if [ -e /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]; then
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          fi
+
+      - name: versiones
+        run: |
+          rustc --version
+          cargo --version
+          node --version
+          rg --version
+          fd --version
+
+      - name: clippy
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: cargo test
+        run: cargo test
+
+      - name: binarios (release y oraculo)
+        run: cargo build --release && cargo build --profile oraculo
+
+      - name: golden
+        run: tests/golden/verificar.sh --jobs 2
+
+      - name: aceptacion de los re-chequeos
+        run: tests/aceptacion/rechequeos/verificar.sh --jobs 2
