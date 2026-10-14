@@ -47,6 +47,15 @@ Por qué cada clase esperada:
   (la mutación m3 de la revisión) daba igual.
 - `control-limpio`: igual en todas.
 
+## Origen y licencia
+
+`corpus/oxc-n6422-2-fixture/input.js` es una copia sin modificar (mismo sha256) de
+`crates/swc_ecma_minifier/tests/fixture/issues/6422/2/input.js` de SWC (https://github.com/swc-project/swc), en
+el mismo commit que la muestra fija (`42e4f7e98b2c78d708a5b85c7e29365fdce2b213`). Está bajo la licencia Apache 2.0
+de SWC, "Copyright 2024 SWC contributors"; el texto completo está en
+[`tests/muestra/LICENSE-SWC`](../muestra/LICENSE-SWC). Ningún otro `input.js` de `corpus/` coincide (sha256) con
+un `.js` de esa carpeta de SWC.
+
 ## Historia
 
 - 2026-10-07 (binario de `9f100ab`): 120/120 en las celdas base. Fallaba 1 comparación de modo:

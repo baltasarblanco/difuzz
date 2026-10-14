@@ -17,6 +17,19 @@ de SWC.
   byte a byte, bajo `casos/<ruta relativa a crates/swc_ecma_minifier/tests>/`.
   No se modifico ninguno. difuzz no lee `config.json` (`src/` no lo nombra); se
   conserva para no separar el caso de su configuracion original.
+- Los 44 casos de `casos/terser/` vienen, a traves de SWC, de la suite de
+  tests de compresion de terser (https://github.com/terser/terser): SWC los
+  declara "Tests ported from terser." (`tests/compress.rs`, sobre
+  `tests/terser/compress/**/input.js`) y los genera con
+  `scripts/x/terser/compress.js`, una version del runner de tests de terser que
+  escribe cada test de `test/compress/<archivo>.js` en
+  `<archivo>/<test>/{input.js,output.js,config.json}` (el `input.js` es la
+  entrada del test impresa por terser). Terser se distribuye bajo la licencia
+  BSD de 2 clausulas (BSD-2-Clause), "Copyright 2012-2018 (c) Mihai Bazon
+  <mihai.bazon@gmail.com>". El texto completo esta en `LICENSE-TERSER` (copia
+  del `LICENSE` del paquete npm `terser` 5.51.2; el de 5.17.6 dice lo mismo
+  con una linea de encabezado mas). SWC no agrega un `NOTICE` ni un `LICENSE`
+  propio para esos casos en el commit de arriba.
 
 ## Criterio de seleccion (v1)
 
