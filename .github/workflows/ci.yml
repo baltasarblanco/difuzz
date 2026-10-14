@@ -1,55 +1,66 @@
-# CI minima (F2, P9): clippy, cargo test, los dos binarios, golden y aceptacion de los re-chequeos.
-# La misma secuencia se puede correr a mano en el mismo orden (ver CONTRIBUTING.md).
-# Las verificaciones de punta a punta corren node con timeout y son sensibles a la carga: van con
-# --jobs 2. No hace falta npm ci en probe/ (solo lo usa C1, que es #[ignore]) ni eza/sd (los usan
-# scripts/comparar-binarios.sh y scripts/subir-oxc.sh, que la CI no corre).
+# CI: clippy, cargo test, los dos binarios, golden y aceptacion de los re-chequeos.
+# Es un subconjunto de las verificaciones de CONTRIBUTING.md: sin tests/codegen/ ni C1 de la
+# muestra, con clippy antes de cargo test y con --jobs 2 (las verificaciones de punta a punta
+# corren node con timeout y son sensibles a la carga). No hace falta npm ci en probe/ (solo lo usa
+# C1, que es #[ignore]) ni eza/sd (los usan scripts/comparar-binarios.sh y scripts/subir-oxc.sh,
+# que la CI no corre). Las acciones van fijadas a un SHA de commit, con su tag en el comentario.
 name: CI
 
 on:
   push:
     branches: [master]
   pull_request:
+  workflow_dispatch:
 
 permissions:
   contents: read
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   test:
-    runs-on: ubuntu-24.04 # VERIFICAR: etiqueta del runner
+    runs-on: ubuntu-24.04
     timeout-minutes: 90
     env:
       CARGO_TERM_COLOR: always
     steps:
-      - uses: actions/checkout@v4 # VERIFICAR: version de la accion
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       # Sin rust-toolchain ni rust-version en el repo: se fija la version verificada (rustc 1.98.0).
-      - uses: dtolnay/rust-toolchain@master # VERIFICAR: ref y entradas de la accion
+      - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # master (= tag v1)
         with:
           toolchain: "1.98.0"
           components: clippy
 
-      - uses: actions/setup-node@v4 # VERIFICAR: version de la accion
+      # Node fijo: lo esperado se midio con 24.14.1, y hay casos de la aceptacion que dependen del
+      # limite de pila de ese node (tests/README.md: 24-f1-p01 y 25-b92-p01).
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
-          node-version: "24"
+          node-version: "24.14.1"
 
       # tests/golden/verificar.sh usa rg y fd. En Ubuntu el binario de fd-find se llama fdfind.
       - name: rg y fd
         run: |
-          sudo apt-get update # VERIFICAR: nombres de los paquetes de apt
+          sudo apt-get update
           sudo apt-get install -y ripgrep fd-find
           mkdir -p "$HOME/.local/bin"
           ln -sf "$(command -v fdfind)" "$HOME/.local/bin/fd"
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
       # Los tests de --sandbox-red (src/sandbox_tests.rs) necesitan user namespaces sin root; si la
-      # maquina no los arma, fallan (DIFUZZ_SIN_USERNS=1 los saltea).
+      # maquina no los arma, fallan (DIFUZZ_SIN_USERNS=1 los saltea). En Ubuntu 24.04 AppArmor los
+      # restringe; este sysctl apaga esa restriccion.
       - name: user namespaces sin root
         run: |
-          # VERIFICAR: que el runner restrinja los user namespaces por AppArmor con este sysctl
           if [ -e /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]; then
             sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
           fi
 
+      # Corta si las versiones no son las verificadas.
       - name: versiones
         run: |
           rustc --version
@@ -57,15 +68,23 @@ jobs:
           node --version
           rg --version
           fd --version
+          case "$(rustc --version)" in
+            "rustc 1.98.0 "*) ;;
+            *) echo "::error::se esperaba rustc 1.98.0"; exit 1 ;;
+          esac
+          if [ "$(node --version)" != v24.14.1 ]; then
+            echo "::error::se esperaba node v24.14.1"
+            exit 1
+          fi
 
       - name: clippy
-        run: cargo clippy --all-targets -- -D warnings
+        run: cargo clippy --locked --all-targets -- -D warnings
 
       - name: cargo test
-        run: cargo test
+        run: cargo test --locked
 
       - name: binarios (release y oraculo)
-        run: cargo build --release && cargo build --profile oraculo
+        run: cargo build --locked --release && cargo build --locked --profile oraculo
 
       - name: golden
         run: tests/golden/verificar.sh --jobs 2
