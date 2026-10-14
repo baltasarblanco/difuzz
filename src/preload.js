@@ -453,6 +453,7 @@
   // SIGSEGV 12 y 12 con el preload de fe0cd86 y con solo guardar; 5 y 5 escribiendo el canal
   // adentro; 6 y 4 recorriendo adentro sin escribir).
   const MAX_ARCHIVOS_MARCO = 256;
+  const MAX_LARGO_MARCO = 4096;
   const MAX_STACKS_MARCO = 1024;
   const stacksDeMarco = [];
   let nStacksDeMarco = 0;
@@ -471,6 +472,15 @@
       if (j === k + 1 || !(j === f.length || f[j] === ')' || f[j] === ',')) continue;
       let ini = i;
       while (ini > desde && f[ini - 1] !== ' ' && f[ini - 1] !== '(') ini--;
+      // 11.2c (rev-b11-2b-B N6): un archivo de mas de MAX_LARGO_MARCO caracteres (lo elige el
+      // programa: `//# sourceURL=` de un eval) no va al canal; antes un nombre de 20 MiB pasaba el
+      // tope de salida por el canal y mandaba a recursos/ un A cuyo stdout era una linea. Sus marcos
+      // conservan la posicion (como los de un archivo que no es del programa).
+      if (i - ini > MAX_LARGO_MARCO) {
+        desde = j;
+        i = j - 1;
+        continue;
+      }
       let a = '';
       for (let p = ini; p < i; p++) a += f[p];
       if (a !== '' && archivosDeMarco[a] !== true && nArchivosDeMarco < MAX_ARCHIVOS_MARCO) {

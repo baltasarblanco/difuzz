@@ -46,7 +46,9 @@ use crate::runner::{Exec, Runner, Status};
 const MARGEN_ENTRADA: u64 = 256 << 10;
 
 /// M10: v2 guarda tambien el canal de control (`Exec::ctl`).
-const MAGIC: &str = "difuzz-cache-a v2";
+/// 11.2c (rev-b11-2b-A H1 = B-N3): v3 guarda los topes de node con que se grabo (`topes`). Las
+/// entradas v2 no dicen con que topes corrio A: son un miss (A corre en fresco y se graba en v3).
+const MAGIC: &str = "difuzz-cache-a v3";
 
 /// M3: tercera linea de una entrada envenenada (ver `CacheA::tombstone`).
 /// `decode` no la reconoce como `status`: es un miss.
@@ -99,18 +101,24 @@ impl CacheA {
     /// 11.2b (rev-b11b-B H4): una entrada que pesa mas que el tope de salida del runner (mas el texto
     /// y `MARGEN_ENTRADA`) no se lee: es un miss y A corre en fresco, con los topes de esta corrida.
     /// Antes una entrada grabada sin tope (o con un `--max-salida` mayor) se cargaba entera.
+    /// 11.2c (rev-b11-2b-A H1 = B-N3, A-H4): la entrada lleva los topes de node con que corrio A
+    /// (RSS y salida) y solo sirve si los de esta corrida no son menores (`topes_alcanzan`): un A
+    /// grabado con `--mem-node 2048` nunca se midio contra 300, y con la entrada se comparaba un B que
+    /// pasa el tope contra un A que tambien lo pasaria (falso `div/`). El peso de arriba queda como
+    /// guarda de memoria (no leer entera una entrada que no puede servir).
     pub fn run(&self, runner: &Runner, js: &str, hits: &mut usize) -> (Exec, bool) {
         let tag = runner.cache_tag();
-        let limite = match runner.topes().1 {
+        let topes = runner.topes();
+        let limite = match topes.1 {
             0 => None,
             t => Some(t.saturating_add(js.len() as u64).saturating_add(MARGEN_ENTRADA)),
         };
-        if let Some(a) = self.get_tagged(tag, js, limite) {
+        if let Some(a) = self.get_tagged(tag, js, limite, topes) {
             *hits += 1;
             return (a, true);
         }
         let a = runner.run(js);
-        self.put_tagged(tag, js, &a);
+        self.put_tagged(tag, js, &a, topes);
         (a, false)
     }
 
@@ -161,25 +169,29 @@ impl CacheA {
 
     #[cfg(test)]
     pub fn get(&self, js: &str) -> Option<Exec> {
-        self.get_tagged("", js, None)
+        self.get_tagged("", js, None, (0, 0))
     }
 
     /// 11.2b: `limite`, el tamano maximo de entrada que se lee (bytes); mas grande es un miss.
-    fn get_tagged(&self, tag: &str, js: &str, limite: Option<u64>) -> Option<Exec> {
+    /// 11.2c: `topes` (RSS, salida) los de esta corrida; una entrada grabada con topes mayores en
+    /// alguno de los dos es un miss (`topes_alcanzan`).
+    fn get_tagged(&self, tag: &str, js: &str, limite: Option<u64>, topes: (u64, u64)) -> Option<Exec> {
         let path = self.entry(tag, js)?;
         if limite.is_some_and(|l| std::fs::metadata(&path).is_ok_and(|m| m.len() > l)) {
             return None;
         }
         let text = std::fs::read_to_string(path).ok()?;
-        decode(&text, &self.oracle_for(tag), js)
+        let (a, grabados) = decode(&text, &self.oracle_for(tag), js)?;
+        topes_alcanzan(topes, grabados).then_some(a)
     }
 
     #[cfg(test)]
     pub fn put(&self, js: &str, a: &Exec) {
-        self.put_tagged("", js, a)
+        self.put_tagged("", js, a, (0, 0))
     }
 
-    fn put_tagged(&self, tag: &str, js: &str, a: &Exec) {
+    /// 11.2c: `topes`, los del runner que corrio `a` (van en la entrada).
+    fn put_tagged(&self, tag: &str, js: &str, a: &Exec, topes: (u64, u64)) {
         let Some(path) = self.entry(tag, js) else {
             return;
         };
@@ -195,12 +207,20 @@ impl CacheA {
             std::process::id(),
             self.tmp_seq.fetch_add(1, Ordering::Relaxed)
         ));
-        let ok = std::fs::write(&tmp, encode(&self.oracle_for(tag), js, a)).is_ok()
+        let ok = std::fs::write(&tmp, encode(&self.oracle_for(tag), js, a, topes)).is_ok()
             && std::fs::rename(&tmp, &path).is_ok();
         if !ok {
             let _ = std::fs::remove_file(&tmp);
         }
     }
+}
+
+/// 11.2c (rev-b11-2b-A H1 = B-N3): una entrada grabada con los topes `grabados` (RSS, salida; 0 = sin
+/// tope) sirve con los `actuales` si ninguno de los actuales es menor: A no paso los grabados, asi que
+/// tampoco pasa unos iguales o mayores. Con uno menor, A tiene que medirse en fresco.
+fn topes_alcanzan(actuales: (u64, u64), grabados: (u64, u64)) -> bool {
+    let sin_cero = |t: u64| if t == 0 { u64::MAX } else { t };
+    sin_cero(actuales.0) >= sin_cero(grabados.0) && sin_cero(actuales.1) >= sin_cero(grabados.1)
 }
 
 pub fn node_version() -> String {
@@ -213,22 +233,26 @@ pub fn node_version() -> String {
 }
 
 /// ```text
-/// difuzz-cache-a v2
+/// difuzz-cache-a v3
 /// oraculo 1f0c...
+/// topes 314572800 16777216
 /// status 0
 /// elapsed_us 41230
 /// flags stack,proxy
 /// len 12 0 9 345
 /// <stdout><stderr><ctl><js>
 /// ```
+/// `topes`: los de node (RSS y salida, bytes; 0 = sin tope) con que corrio A (11.2c).
 /// `len`: bytes de stdout, stderr, ctl y js, en ese orden, pegados tras el encabezado.
-fn encode(oracle: &str, js: &str, a: &Exec) -> String {
+fn encode(oracle: &str, js: &str, a: &Exec, topes: (u64, u64)) -> String {
     let code = match a.status {
         Status::Exited(c) => c,
         _ => unreachable!("put solo guarda Exited"),
     };
     format!(
-        "{MAGIC}\noraculo {oracle}\nstatus {code}\nelapsed_us {}\nflags {}\nlen {} {} {} {}\n{}{}{}{js}",
+        "{MAGIC}\noraculo {oracle}\ntopes {} {}\nstatus {code}\nelapsed_us {}\nflags {}\nlen {} {} {} {}\n{}{}{}{js}",
+        topes.0,
+        topes.1,
         a.elapsed.as_micros(),
         a.flags.join(","),
         a.stdout.len(),
@@ -241,7 +265,8 @@ fn encode(oracle: &str, js: &str, a: &Exec) -> String {
     )
 }
 
-fn decode(text: &str, oracle: &str, js: &str) -> Option<Exec> {
+/// 11.2c: A y los topes con que se grabo (RSS, salida).
+fn decode(text: &str, oracle: &str, js: &str) -> Option<(Exec, (u64, u64))> {
     let mut rest = text;
     let mut line = || {
         let (l, r) = rest.split_once('\n')?;
@@ -251,6 +276,8 @@ fn decode(text: &str, oracle: &str, js: &str) -> Option<Exec> {
     if line()? != MAGIC || line()?.strip_prefix("oraculo ")? != oracle {
         return None;
     }
+    let (rss, salida) = line()?.strip_prefix("topes ")?.split_once(' ')?;
+    let topes: (u64, u64) = (rss.parse().ok()?, salida.parse().ok()?);
     let code: i32 = line()?.strip_prefix("status ")?.parse().ok()?;
     let micros: u64 = line()?.strip_prefix("elapsed_us ")?.parse().ok()?;
     let flags: Vec<String> = line()?
@@ -276,14 +303,15 @@ fn decode(text: &str, oracle: &str, js: &str) -> Option<Exec> {
     if rest.get(lo + le + lc..)? != js {
         return None;
     }
-    Some(Exec {
+    let a = Exec {
         status: Status::Exited(code),
         stdout: stdout.to_string(),
         stderr: stderr.to_string(),
         flags,
         elapsed: Duration::from_micros(micros),
         ctl: ctl.to_string(),
-    })
+    };
+    Some((a, topes))
 }
 
 #[cfg(test)]
@@ -370,10 +398,39 @@ mod tests {
         let mut hits = 0;
         let (a, cacheado) = c.run(&runner(1 << 20), js, &mut hits);
         assert_eq!((cacheado, hits, a.stdout.as_str()), (false, 0, "1\n"));
-        // La corrida fresca (que entra en el tope) reemplaza la entrada.
-        c.put(js, &exec(&"x".repeat(2 << 20)));
-        let (a, cacheado) = c.run(&runner(16 << 20), js, &mut hits);
+        // La corrida fresca (que entra en el tope) reemplaza la entrada. Grabada con los topes del
+        // runner de 16 MiB, con ese runner es un hit.
+        let r16 = runner(16 << 20);
+        c.put_tagged("", js, &exec(&"x".repeat(2 << 20)), r16.topes());
+        let (a, cacheado) = c.run(&r16, js, &mut hits);
         assert_eq!((cacheado, hits, a.stdout.len()), (true, 1, 2 << 20));
+        std::fs::remove_dir_all(&d).unwrap();
+    }
+
+    /// 11.2c (rev-b11-2b-A H1 = B-N3, A-H4): la entrada solo sirve si los topes de la corrida no son
+    /// menores que los con que se grabo. Un A grabado con `--mem-node 2048` no se usa con 300 (corre en
+    /// fresco y se mide contra 300); grabado con 300, sirve con 2048. Lo mismo con la salida (c06 de
+    /// rev-b11-2b-A: 1,1 MiB grabados con el tope de 16 no sirven con 1). 0 es sin tope.
+    #[test]
+    fn la_entrada_lleva_los_topes_con_que_se_grabo() {
+        assert!(topes_alcanzan((300 << 20, 16 << 20), (300 << 20, 16 << 20)));
+        assert!(topes_alcanzan((2048 << 20, 16 << 20), (300 << 20, 16 << 20)));
+        assert!(!topes_alcanzan((300 << 20, 16 << 20), (2048 << 20, 16 << 20)), "RSS menor");
+        assert!(!topes_alcanzan((300 << 20, 1 << 20), (300 << 20, 16 << 20)), "salida menor");
+        assert!(!topes_alcanzan((300 << 20, 16 << 20), (0, 16 << 20)), "grabado sin tope de RSS");
+        assert!(topes_alcanzan((0, 0), (300 << 20, 16 << 20)), "corrida sin topes");
+        let d = tmp("topes");
+        let c = CacheA::with_oracle(Some(d.clone()), "o".into());
+        c.put_tagged("", "js", &exec("1\n"), (2048 << 20, 16 << 20));
+        assert!(c.get_tagged("", "js", None, (300 << 20, 16 << 20)).is_none());
+        assert!(c.get_tagged("", "js", None, (2048 << 20, 16 << 20)).is_some());
+        // Una entrada v2 (sin topes): miss.
+        let path = c.entry("", "js").unwrap();
+        let v3 = std::fs::read_to_string(&path).unwrap();
+        let v2 = v3.replacen("difuzz-cache-a v3\n", "difuzz-cache-a v2\n", 1).replacen(&format!("topes {} {}\n", 2048u64 << 20, 16u64 << 20), "", 1);
+        assert_ne!(v2, v3);
+        std::fs::write(&path, v2).unwrap();
+        assert!(c.get_tagged("", "js", None, (0, 0)).is_none());
         std::fs::remove_dir_all(&d).unwrap();
     }
 

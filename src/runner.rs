@@ -171,8 +171,18 @@ pub struct Excedido {
     pub ext: &'static str,
     /// 11.2b: lo que se junto (cortado), con status `Signal` y la causa en el canal (`Exec::tope`).
     /// Nunca se compara su salida: solo dice que la ejecucion no termino dentro de los topes.
+    /// 11.2c (rev-b11-2b-B N2): stdout y stderr recortados a `PREFIJO_PARCIAL` bytes, con una marca.
     pub parcial: Exec,
+    /// 11.2c (rev-b11-2b-A H5): que ejecucion del original fue, si quien la corrio lo sabe (la pasada
+    /// cruda, la observada, `--invocar`, la confirmacion de `confirm`, ...). `None`: lo pone `main`.
+    pub quien: Option<String>,
 }
+
+/// 11.2c (rev-b11-2b-B N2): cuanto de stdout y de stderr se guarda de una ejecucion que paso un tope
+/// (`Excedido::parcial`). Esa salida no se compara (status `Signal`): solo se guarda en `div/` para
+/// ver donde empezo a divergir. Antes se decodificaba entera (hasta 64 MiB con los topes mayores, y
+/// `decode_lossless` hace 5 bytes de cada byte invalido: 496 MB de difuzz con un B que escribe 0xff).
+pub const PREFIJO_PARCIAL: usize = 64 << 10;
 
 impl std::fmt::Debug for Excedido {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -565,9 +575,13 @@ impl Runner {
     /// 11.2b (A-H1): el mismo runner (mismos archivos) con los topes mayores con que se confirma un B
     /// que paso uno (`main::confirm`, como el timeout largo de un B en Timeout): el doble de RSS y
     /// cuatro veces la salida. Un tope en 0 (sin tope) queda en 0.
-    pub fn con_topes_mayores(&self) -> Runner {
+    /// 11.2c (rev-b11-2b-B N1 = A-H6): el de RSS, con techo `techo_rss` (`main` pasa MemTotal/2: el
+    /// presupuesto entero de node), salvo que el tope solo ya lo pase (entonces queda el tope).
+    pub fn con_topes_mayores(&self, techo_rss: u64) -> Runner {
         let mut r = self.prestar();
-        r.tope_rss = r.tope_rss.saturating_mul(TOPE_MAYOR_RSS);
+        if r.tope_rss > 0 {
+            r.tope_rss = r.tope_rss.saturating_mul(TOPE_MAYOR_RSS).min(techo_rss.max(r.tope_rss));
+        }
         r.tope_salida = r.tope_salida.saturating_mul(TOPE_MAYOR_SALIDA);
         r
     }
@@ -1219,13 +1233,26 @@ fn run_file(r: &Runner, script: &Path, start: Instant, timeout: Duration, opts: 
             format!("escribio por stdout y stderr {} MiB o mas: paso el tope de salida de {} MiB (lo de mas no se junto; matada al verlo)", n >> 20, r.tope_salida >> 20),
         ))
     } else if por_memoria {
-        Some((NODE_MEMORIA, format!("paso el tope de RSS de node: {} MiB > {} MiB (pico de node solo, VmHWM; matada al pasarlo)", pico >> 20, r.tope_rss >> 20)))
+        // 11.2c (rev-b11-2b-B N5): el pico redondeado hacia arriba (con `>> 20` decia "300 MiB > 300 MiB").
+        Some((NODE_MEMORIA, format!("paso el tope de RSS de node: {} MiB > {} MiB (pico de node solo, VmHWM; matada al pasarlo)", pico.div_ceil(1 << 20), r.tope_rss >> 20)))
     } else {
         None
     };
 
     let mut ctl = if ctl_excedido { String::new() } else { std::fs::read(&r.ctl).map(|b| decode_lossless(&b)).unwrap_or_default() };
-    let (stdout, stderr) = (decode_lossless(&stdout), decode_lossless(&stderr));
+    // 11.2c (rev-b11-2b-B N2): lo crudo se suelta apenas se decodifica (antes seguia vivo, sombreado,
+    // hasta el final). Si la ejecucion paso un tope, su salida no se compara: se decodifica solo un
+    // prefijo, con una marca de cuanto se recorto.
+    let decodificar = |v: Vec<u8>| {
+        if excedida.is_none() || v.len() <= PREFIJO_PARCIAL {
+            return decode_lossless(&v);
+        }
+        let mut s = decode_lossless(&v[..PREFIJO_PARCIAL]);
+        s.push_str(&format!("\n[... difuzz recorto {} de los {} bytes que junto: la ejecucion paso un tope de node]\n", v.len() - PREFIJO_PARCIAL, v.len()));
+        s
+    };
+    let stdout = decodificar(stdout);
+    let stderr = decodificar(stderr);
     // n-sandbox: lo que el preload no ve (un permiso denegado que el programa atrapo e
     // imprimio, el mensaje del throw en la linea `exc`) se reconoce en la salida.
     if r.sandbox.activo() && [&stdout, &stderr, &ctl].iter().any(|s| marca_sandbox(s, r.sandbox)) {
@@ -1694,6 +1721,7 @@ fn exceder(r: &Runner, script: &Path, causa: &'static str, que: String, mut parc
         programa: std::fs::read_to_string(&r.script).unwrap_or_default(),
         ext: r.kind.ext(),
         parcial,
+        quien: None,
     }))
 }
 
@@ -2628,6 +2656,8 @@ mod tests {
             // El pico que vio difuzz: lejos de los 3 GiB pedidos (la mato a tiempo).
             let pico: u64 = x.mensaje.split("RSS de node: ").nth(1).and_then(|s| s.split(' ').next()).and_then(|n| n.parse().ok()).unwrap();
             assert!(pico < 1024, "pico {pico} MiB: {}", x.mensaje);
+            // 11.2c (rev-b11-2b-B N5): redondeado hacia arriba, nunca "256 MiB > 256 MiB".
+            assert!(pico > 256, "pico {pico} MiB: {}", x.mensaje);
         }
     }
 
@@ -2670,6 +2700,68 @@ mod tests {
             // Cortado al pasarlo, no al terminar (1 GiB, o el bucle, que solo corta el timeout).
             assert!(t0.elapsed() < Duration::from_secs(30), "{que}: {:?}", t0.elapsed());
         }
+    }
+
+    /// 11.2c (rev-b11-2b-B N2): el parcial de una ejecucion que paso el tope de salida guarda un
+    /// prefijo de `PREFIJO_PARCIAL` bytes con una marca, no todo lo juntado decodificado (un B que
+    /// escribe 0xff sin fin dejaba 5 bytes por cada uno: 80 MiB en `b.stdout` y 496 MB de difuzz).
+    /// Lo que entra en el tope no se recorta.
+    #[test]
+    fn parcial_de_un_tope_recortado() {
+        use super::{Excedido, Preload, Runner, PREFIJO_PARCIAL};
+        use std::time::Duration;
+        if !crate::test_util::requiere_node() {
+            return;
+        }
+        let preload = Preload::write_tagged("parcial").unwrap();
+        let r = Runner::new(&preload, crate::test_util::id_runner(), Duration::from_secs(60)).with_sensor(false).con_tope_salida(4 << 20);
+        let js = "const fs = require(\"fs\");\nconst s = Buffer.alloc(1 << 16, 0xff);\nfor (;;) { try { fs.writeSync(1, s); } catch {} }\n";
+        let Err(p) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| r.run(js))) else {
+            panic!("tenia que pasar el tope");
+        };
+        let x = p.downcast::<Excedido>().unwrap();
+        let out = &x.parcial.stdout;
+        // 64 KiB de 0xff decodificados son 5 x 64 KiB; mas la marca.
+        assert!(out.len() <= 5 * PREFIJO_PARCIAL + 200, "{}", out.len());
+        assert!(out.starts_with("\u{FFFD}ff") && out.contains("[... difuzz recorto ") && out.contains("la ejecucion paso un tope de node]"), "{}", &out[out.len() - 200..]);
+        let e = r.run("console.log(\"x\".repeat(200 * 1024));\n");
+        assert_eq!(e.stdout.len(), 200 * 1024 + 1);
+    }
+
+    /// 11.2c (rev-b11-2b-B N6): el archivo de un marco lo puede elegir el programa (`//# sourceURL=` de
+    /// un eval). Uno de 1 MiB no va al canal (`marco`): antes el canal pasaba un tope de salida de
+    /// 512 KiB y el programa, que imprime una linea, iba a recursos/. Uno corto si va.
+    #[test]
+    fn marco_con_archivo_enorme_no_va_al_canal() {
+        use super::{Preload, Runner, Status};
+        use std::time::Duration;
+        if !crate::test_util::requiere_node() {
+            return;
+        }
+        let preload = Preload::write_tagged("marco-largo").unwrap();
+        let r = Runner::new(&preload, crate::test_util::id_runner(), Duration::from_secs(60)).with_sensor(false).con_tope_salida(512 << 10);
+        let js = |largo: usize| format!("console.log(\"antes\");\ntry {{ eval(\"throw new Error('x')\\n//# sourceURL=\" + \"f\".repeat({largo})); }} catch (e) {{ String(e.stack); }}\n");
+        let e = r.run(&js(1 << 20));
+        assert_eq!((e.status, e.stdout.as_str()), (Status::Exited(0), "antes\n"), "{}", e.stderr);
+        assert!(e.ctl.len() < 64 << 10 && !e.ctl.lines().any(|l| l.starts_with("marco f")), "{}", e.ctl.len());
+        let e = r.run(&js(10));
+        assert!(e.ctl.lines().any(|l| l == "marco ffffffffff"), "{}", e.ctl);
+    }
+
+    /// 11.2c (rev-b11-2b-B N1 = A-H6): los topes mayores (×2 de RSS, ×4 de salida) con techo de RSS: el
+    /// doble del tope si entra en el techo; si no, el techo; si el tope solo ya lo pasa, el tope. Sin
+    /// tope (0), sin tope.
+    #[test]
+    fn topes_mayores_con_techo() {
+        use super::{Preload, Runner};
+        use std::time::Duration;
+        let preload = Preload::write_tagged("techo").unwrap();
+        let r = |rss: u64| Runner::new(&preload, crate::test_util::id_runner(), Duration::from_secs(1)).con_tope_rss(rss).con_tope_salida(16 << 20);
+        assert_eq!(r(300 << 20).con_topes_mayores(u64::MAX).topes(), (600 << 20, 64 << 20));
+        assert_eq!(r(300 << 20).con_topes_mayores(1000 << 20).topes(), (600 << 20, 64 << 20));
+        assert_eq!(r(300 << 20).con_topes_mayores(500 << 20).topes(), (500 << 20, 64 << 20));
+        assert_eq!(r(300 << 20).con_topes_mayores(100 << 20).topes(), (300 << 20, 64 << 20));
+        assert_eq!(r(0).con_topes_mayores(100 << 20).topes(), (0, 64 << 20));
     }
 
     /// N1 de rev-b11a-B vuelta 2 (integracion del bloque 11): una escritura vacia a stderr no deja un

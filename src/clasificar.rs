@@ -1777,6 +1777,69 @@ mod tests {
         std::fs::remove_dir_all(&d).unwrap();
     }
 
+    /// 11.2c (rev-b11-2b-A H3, MUT-e): cada re-chequeo que corre node (salvo profundidad, que prueba
+    /// `salida_usuario::tope_de_memoria_de_node_va_a_recursos`) y pasa un tope de node queda
+    /// Inconcluso, con la nota del tope, y el caso sigue en div/: el `Excedido` no sale de `clasificar`
+    /// (si saliera, el caso iria entero a recursos/ y el test paniquea con ese payload). Los casos son
+    /// los "adentro" de `flags_sin_rechequeo_de_punta_a_punta` (el bug E de oxc en la rama de la
+    /// violacion), con 3 MiB de salida (tope: 1 MiB) en la rama que toma solo la variante del
+    /// re-chequeo (sin la violacion). `nombres` y `mensaje_nombre`: la variante es un minificado que
+    /// conserva el nombre (keep_names o sin mangle), y el programa se reconoce minificado (sin saltos).
+    #[test]
+    fn rechequeos_que_pasan_el_tope_quedan_inconclusos() {
+        use super::Medido;
+        use crate::{backend::Minifier, cache, compare_and_report, known, minify, oracle, runner, triage, Ctx, Stats};
+        use std::path::Path;
+        if !crate::test_util::requiere_node() {
+            return;
+        }
+        let d = std::env::temp_dir().join(format!("difuzz-test-rechequeo-tope-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        let reporter = oracle::Reporter::new(&d, "test".into(), runner::PRELOAD);
+        let known = known::Known::load(&d, &d, 0, Minifier::Oxc);
+        let cache = cache::CacheA::new(None, &[]);
+        let triage = triage::Triage::load(&d);
+        let (preset, kind) = (minify::Preset::CoreDefaults, minify::SourceKind::Script);
+        let medido = Some(Medido { minifier: Minifier::Oxc, preset, kind });
+        let ctx = Ctx { reporter: &reporter, known: &known, cache: &cache, triage: &triage, medido };
+        let preload = runner::Preload::write_tagged("rechequeo-tope").unwrap();
+        let r = runner::Runner::new(&preload, crate::test_util::id_runner(), std::time::Duration::from_secs(20)).con_tope_salida(1 << 20);
+        let cfg = preset.build(Minifier::Oxc, kind);
+        let names_cfg = minify::Config::con_nombres(Minifier::Oxc, preset, kind);
+        let pesa = "{ const s = \"x\".repeat(1 << 20); for (let i = 0; i < 3; i++) console.log(s); }";
+        // A es el original impreso por el codegen (sin compresion): conserva el `if (false) {}` muerto,
+        // que el minificado (con o sin mangle, con keep_names) borra. Se busca armado con codigos (un
+        // literal "if(false){}" estaria en todos los textos).
+        let minificado = "if (false) {}\nconst minificado = !require(\"fs\").readFileSync(__filename, \"utf8\").includes([105, 102, 40, 102, 97, 108, 115, 101, 41, 123, 125].map((c) => String.fromCharCode(c)).join(\"\"));\n";
+        let casos: [(&str, String); 10] = [
+            ("extends", format!("let r = \"none\";\ntry {{ class A extends 1 {{}} r = typeof A; {pesa} }} catch (e) {{ r = Math.cbrt(-8); }}\nconsole.log(r);\n")),
+            ("with", format!("var o = {{ k: 1 }};\nvar r;\nwith (o) {{ r = typeof k !== \"undefined\" ? Math.cbrt(-8) : \"nok\"; }}\nif (r === \"nok\") {pesa}\nconsole.log(r);\n")),
+            ("global_conocido", format!("var r;\ntry {{ r = window.location ? \"nav\" : \"x\"; {pesa} }} catch (e) {{ r = Math.cbrt(-8); }}\nconsole.log(r);\n")),
+            ("violaciones", format!("let r = \"none\";\ntry {{ r = String(x); {pesa} }} catch (e) {{ r = Math.cbrt(-8); }}\nconsole.log(r);\nlet x = 1;\n")),
+            ("solo_sloppy", format!("function f() {{ return this; }}\nvar r = f() === undefined ? \"estricto\" : Math.cbrt(-8);\nif (r === \"estricto\") {pesa}\nconsole.log(r);\n")),
+            ("builtins", format!("Array.prototype.includes = function (v) {{ return Math.cbrt(-8); }};\nvar arr = [1];\narr.push(2);\nif (arr.includes(2) === true) {pesa}\nconsole.log(arr.includes(2));\n")),
+            ("coercion", format!("var o = {{ valueOf() {{ return Math.cbrt(-8); }} }};\nif (typeof (o + 1) === \"string\") {pesa}\nconsole.log(o + 1);\n")),
+            ("contenido", format!("function f() {{ return 1; }}\nlet result = \"none\";\nvar s = String(f);\nif (s.endsWith(\"}}\") && !s.includes(\"native\")) {{ result = Math.cbrt(-8); }} else {pesa}\nconsole.log(result);\n")),
+            ("nombres", format!("{minificado}(function () {{\n  function manejadorLargo() {{}}\n  if (minificado && manejadorLargo.name.length > 5) {pesa}\n  console.log(manejadorLargo.name);\n}})();\n")),
+            ("mensaje_nombre", format!("{minificado}function run(cb) {{\n  try {{\n    cb();\n  }} catch (e) {{\n    if (minificado && e.message.startsWith(\"cb \")) {pesa}\n    console.log(e.message);\n  }}\n}}\nrun();\n")),
+        ];
+        for (paso, src) in &casos {
+            let minify::Outcome::Ok { original, minified, static_flags, .. } = minify::prepare(src, &cfg) else { panic!("no minifica: {paso}") };
+            let a = r.run(&original);
+            assert!(a.stdout.len() < 1024, "{paso}: A no tiene que pasar el tope: {}", a.stdout.len());
+            let mut st = Stats::default();
+            let p = format!("{paso}/input.js");
+            let names = (*paso == "nombres").then_some(&names_cfg);
+            assert!(compare_and_report(&ctx, &r, &mut st, Path::new(&p), &original, &minified, a, false, None, false, &static_flags, names), "{paso}: no diverge");
+            assert_eq!((st.known, st.divergences), (0, 1), "{paso}");
+            let meta = std::fs::read_to_string(d.join(format!("div/{paso}/meta.txt"))).unwrap();
+            let linea = meta.lines().find(|l| l.starts_with(&format!("  {paso}: "))).unwrap_or_else(|| panic!("{paso}: sin paso en la traza: {meta}"));
+            assert!(linea.contains("Inconcluso") && linea.contains("paso un tope de node"), "{paso}: {meta}");
+        }
+        std::fs::remove_dir_all(&d).unwrap();
+    }
+
     /// 8.3 (= 7.11, d2/difuzz-1, hono sse.js), de punta a punta con oxc: el programa imprime
     /// el TypeError del motor con el nombre del parametro (`cb is not a function`) y oxc lo
     /// manglea. Desde cd54ad2 iba a div/; ahora known/ por `mensaje_nombre`. Si ademas se

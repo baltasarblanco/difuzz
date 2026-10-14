@@ -141,6 +141,14 @@ fn presupuesto(mem_total: Option<u64>, jobs: usize, mem_hijo_mib: Option<u64>) -
     (p, format!("MemTotal/2 / {jobs} workers"))
 }
 
+/// 11.2c (rev-b11-2b-B N1 = A-H6): techo del tope de RSS con que se repite un B que paso el suyo
+/// (`Runner::con_topes_mayores`): MemTotal/2, el presupuesto entero de node. Sin /proc/meminfo, sin
+/// techo. Se lee una vez.
+pub fn techo_topes_mayores() -> u64 {
+    static TECHO: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+    *TECHO.get_or_init(|| mem_total().map_or(u64::MAX, |t| t / 2))
+}
+
 /// MemTotal de `/proc/meminfo`, en bytes.
 fn mem_total() -> Option<u64> {
     let s = std::fs::read_to_string("/proc/meminfo").ok()?;

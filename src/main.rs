@@ -1063,9 +1063,10 @@ fn main() {
     }
     // 11.5 (I3): el tope de RSS de node, con los workers reales (tambien con --en-proceso).
     let (tope_node, de_donde) = subproceso::tope_node(jobs, cli.mem_node);
-    // 11.7 (I5): y el de la salida que se junta.
+    // 11.7 (I5): y el de la salida que se junta. 11.2c (rev-b11-2b-B N4): a recursos/ solo si los
+    // pasa el original.
     eprintln!(
-        "topes de node: {} MiB de RSS por ejecucion ({de_donde}) y {} MiB de salida (--max-salida); al pasarlos, a recursos/ (node_memoria, node_salida)",
+        "topes de node: {} MiB de RSS por ejecucion ({de_donde}) y {} MiB de salida (--max-salida); si los pasa el original, a recursos/ (node_memoria, node_salida); si los pasa el minificado, se repite con topes mayores (una repeticion a la vez), como un Timeout de B",
         tope_node >> 20,
         cli.max_salida
     );
@@ -1434,7 +1435,7 @@ fn process_case(
     stats.sensor_omitidos += usize::from(por_riesgo.is_some());
     let runner = por_riesgo.as_ref().unwrap_or(runner);
     // Precondicion del oraculo: el original termina solo (exit 0 o lanzando).
-    let (a, a_cached) = ctx.cache.run(runner, &original, &mut stats.cache_hits);
+    let (a, a_cached) = como_a(QUIEN_A_CRUDA, || ctx.cache.run(runner, &original, &mut stats.cache_hits));
     // 10.1: el crudo contra A antes de cualquier descarte de A: un codegen que rompe A lo
     // descartaria (`invalido`, `exit`) sin que nadie lo viera.
     if cli.crudo && !matches!(a.status, Status::Failed(_)) {
@@ -1924,7 +1925,7 @@ fn observe_epilogue(
             return;
         }
     };
-    let (a, a_cached) = ctx.cache.run(runner, &original, &mut stats.cache_hits);
+    let (a, a_cached) = como_a(QUIEN_A_EPILOGO, || ctx.cache.run(runner, &original, &mut stats.cache_hits));
     let b_previo = match descarte_sandbox(ctx, runner, stats, rel, &a, &minified) {
         Pasada::Descartada => return,
         Pasada::Sigue(b) => b,
@@ -1988,13 +1989,20 @@ fn recurso_de_node(ctx: &Ctx, stats: &mut Stats, rel: &Path, src: &str, x: &runn
     } else {
         stats.recursos_node_memoria += 1;
     }
-    // 11.2b: B, las confirmaciones y los re-chequeos no llegan aca (`correr_b`, `confirm`,
-    // `clasificar::sin_tope`): el que se paso es el original.
-    reportar_excedido(ctx, rel, src, x, QUIEN_A);
+    // 11.2b: B y los re-chequeos no llegan aca (`correr_b`, `clasificar::sin_tope`): el que se paso
+    // es el original. 11.2c (rev-b11-2b-A H5): cual de sus pasadas, si la corrio `como_a`.
+    reportar_excedido(ctx, rel, src, x, x.quien.as_deref().unwrap_or(QUIEN_A));
 }
 
 /// 11.2b (A-H2/B-H3): que ejecucion paso el tope, en el meta.txt de `recursos/`.
 const QUIEN_A: &str = "el original (A) del caso: la pasada cruda, una observada (epilogo, bloques, --invocar, envoltorio de modulos) o su repeticion sin el sensor";
+/// 11.2c (rev-b11-2b-A H5): la pasada concreta (`como_a`); `QUIEN_A` queda si ninguna lo dijo.
+const QUIEN_A_CRUDA: &str = "el original (A) del caso, en la pasada cruda";
+const QUIEN_A_EPILOGO: &str = "el original (A) del caso, en la pasada observada (epilogo que imprime los bindings)";
+const QUIEN_A_BLOQUES: &str = "el original (A) del caso, en la pasada de los bindings en bloques";
+const QUIEN_A_INVOCAR: &str = "el original (A) del caso, en la pasada de --invocar";
+const QUIEN_A_MODULOS: &str = "el original (A) del caso, por el envoltorio de modulos (carril B, programa mudo)";
+const QUIEN_A_SIN_SENSOR: &str = "el original (A) del caso, repetido sin el sensor (I3)";
 
 /// 11.5 (I3): `recursos/<caso>` de una ejecucion de node que paso un tope (caso o variante).
 /// 11.2b: `quien` dice que ejecucion fue (va primero en el mensaje).
@@ -2077,7 +2085,7 @@ fn pasada_bloques(
         }
         minify::Outcome::ParseError { .. } | minify::Outcome::CodegenError => return Ok(None),
     };
-    let (a, a_cached) = ctx.cache.run(runner, &original, &mut stats.cache_hits);
+    let (a, a_cached) = como_a(QUIEN_A_BLOQUES, || ctx.cache.run(runner, &original, &mut stats.cache_hits));
     let b_previo = match descarte_sandbox(ctx, runner, stats, rel, &a, &minified) {
         Pasada::Descartada => return Ok(Some(true)),
         Pasada::Sigue(b) => b,
@@ -2173,7 +2181,7 @@ fn invoke_pass(
         }
         minify::Outcome::ParseError { .. } | minify::Outcome::CodegenError => return false,
     };
-    let (a, a_cached) = ctx.cache.run(runner, &original, &mut stats.cache_hits);
+    let (a, a_cached) = como_a(QUIEN_A_INVOCAR, || ctx.cache.run(runner, &original, &mut stats.cache_hits));
     let b_previo = match descarte_sandbox(ctx, runner, stats, rel, &a, &minified) {
         Pasada::Descartada => return true,
         Pasada::Sigue(b) => b,
@@ -2204,12 +2212,12 @@ fn observe_module(
 ) -> bool {
     let mut obs = runner.observing();
     // M28: cacheada con el tag del envoltorio (cache.rs).
-    let (mut a, mut a_cached) = ctx.cache.run(&obs, original, &mut stats.cache_hits);
+    let (mut a, mut a_cached) = como_a(QUIEN_A_MODULOS, || ctx.cache.run(&obs, original, &mut stats.cache_hits));
     // M31 (a): si invocar los exports no termina, la observacion sin invocar.
     if invocar && !a.completed() {
         stats.invocar_retry += 1;
         obs = runner.observing().with_invocar(false);
-        (a, a_cached) = ctx.cache.run(&obs, original, &mut stats.cache_hits);
+        (a, a_cached) = como_a(QUIEN_A_MODULOS, || ctx.cache.run(&obs, original, &mut stats.cache_hits));
     }
     // 7.7 (MENOR 5): la nota de solo-A es de esta pasada, no de la cruda (misma nota del
     // analisis: mismo original y mismo minificado).
@@ -2495,7 +2503,7 @@ fn compare_and_report(
             runner = &sin_sensor;
             stats.sensor_repetidos += 1;
             if da != Some(runner::SENSOR_CAIDO) {
-                con_sensor_a = Some(std::mem::replace(&mut a, runner.run(original)));
+                con_sensor_a = Some(std::mem::replace(&mut a, como_a(QUIEN_A_SIN_SENSOR, || runner.run(original))));
                 a_cached = false;
             }
             if db != Some(runner::SENSOR_CAIDO) {
@@ -2525,7 +2533,7 @@ fn compare_and_report(
     if let Some(c) = b.tope() {
         pasos_tope.push(format!("B (el minificado) paso el tope de node ({c}): {}", b.tope_mensaje().unwrap_or_default()));
     }
-    let (mut a, mut b) = match confirm(ctx, runner, stats, rel, original, minified, a, a_cached, b, &mut pasos_tope) {
+    let (mut a, mut b, a_cache) = match confirm(ctx, runner, stats, rel, original, minified, a, a_cached, b, &mut pasos_tope) {
         Confirmed::Same { corto: true } => return descarte_corto(ctx, stats, rel, elapsed_a),
         Confirmed::Same { corto: false } => return false,
         Confirmed::Nondeterministic => return true,
@@ -2627,7 +2635,8 @@ fn compare_and_report(
                 nota.as_deref(),
                 &flags,
                 &flags_b,
-                if a_cached { "hit (confirmado con una corrida fresca)" } else { "miss" },
+                // 11.2c (rev-b11-2b-B N3): lo que dice `confirm`, no solo si salio de la cache.
+                a_cache,
                 &traza.texto(),
             );
             true
@@ -2642,8 +2651,9 @@ enum Confirmed {
     Same { corto: bool },
     /// A no se reproduce a si mismo: el caso se descarta (`no_determinista`).
     Nondeterministic,
-    /// La divergencia sigue con este A y este B.
-    Divergence(Box<(runner::Exec, runner::Exec)>),
+    /// La divergencia sigue con este A y este B. 11.2c: y que paso con la cache de A (`a_cache:` de
+    /// meta.txt).
+    Divergence(Box<(runner::Exec, runner::Exec, &'static str)>),
 }
 
 /// A y A' dicen lo mismo para el oraculo (status y stdout normalizado).
@@ -2658,6 +2668,8 @@ fn same_exec(x: &runner::Exec, y: &runner::Exec) -> bool {
 ///   (depende de ppid, worker, cwd, otra corrida): lapida y se sigue con el A fresco.
 /// - Si la divergencia sigue y A no fue confirmado por una corrida fresca, se
 ///   corre A otra vez: si no se reproduce, el caso es no determinista.
+/// - 11.2c: un A (fresco u otra vez) que pasa un tope de node desenrolla (`como_a`): el caso va a
+///   `recursos/`, como con cualquier pasada de A.
 #[allow(clippy::too_many_arguments)]
 fn confirm(
     ctx: &Ctx,
@@ -2676,8 +2688,10 @@ fn confirm(
     if !diverges(&a, &b) {
         return Confirmed::Same { corto: corto_por_sandbox(runner, &a, &b) };
     }
+    // M3: el timeout largo de B. 11.2c (rev-b11-2b-A H2): tambien el de su repeticion con los topes
+    // mayores (abajo), que antes corria con el timeout normal.
+    let longer = (runner.timeout() * 4).max(a.elapsed * 20);
     if b.status == Status::Timeout {
-        let longer = (runner.timeout() * 4).max(a.elapsed * 20);
         let b2 = correr_b_con(runner, |r| r.run_with_timeout(minified, longer));
         if let Some(c) = b2.tope() {
             // 11.2b: no termino en el timeout y con mas tiempo paso un tope (un bucle que imprime o
@@ -2694,22 +2708,32 @@ fn confirm(
     // con los topes mayores (`Runner::con_topes_mayores`); si ahora termina, se compara con eso; si
     // se vuelve a pasar (o no termina a tiempo), la divergencia sigue con el B cortado (status
     // `Signal`: `oracle::compare` da ExitStatus, sin mirar la salida cortada).
+    // 11.2c (rev-b11-2b-A H1): con A de la cache, "A no" es que no los paso al grabarse, con topes
+    // iguales o menores (`CacheA::run` no sirve otra entrada); se confirma en fresco abajo.
+    let a_no = if a_cached { "y A no (A de la cache, grabado con topes iguales o menores; se confirma en fresco abajo)" } else { "y A no" };
     if let Some(c) = b.tope() {
-        let mayor = runner.con_topes_mayores();
+        let mayor = runner.con_topes_mayores(subproceso::techo_topes_mayores());
         let (rss, salida) = mayor.topes();
-        let b2 = correr_b(&mayor, minified);
-        let topes = format!("{} MiB de RSS, {} MiB de salida", rss >> 20, salida >> 20);
+        let topes = format!("{} MiB de RSS, {} MiB de salida, timeout {} ms", rss >> 20, salida >> 20, longer.as_millis());
+        // 11.2c (rev-b11-2b-B N1 = A-H6): una sola repeticion con los topes mayores a la vez en todo
+        // difuzz (`TOPES_MAYORES`): lo que corre junto queda en (workers - 1) x tope + el mayor. Antes
+        // cada worker podia estar en la suya: workers x 2 x tope (con el default, toda la RAM). Y con el
+        // timeout largo (rev-b11-2b-A H2): un B mas lento y mas pesado que A no es un hallazgo.
+        let b2 = {
+            let _turno = TOPES_MAYORES.lock().unwrap_or_else(|e| e.into_inner());
+            correr_b_con(&mayor, |r| r.run_with_timeout(minified, longer))
+        };
         match b2.tope() {
             Some(c2) => pasos.push(format!(
-                "B paso el tope de node ({c}) y A no; repetido con topes mayores ({topes}) lo vuelve a pasar ({c2}): B no termina dentro de los topes (lo mato difuzz) -> divergencia ExitStatus, su salida cortada no se compara ({})",
+                "B paso el tope de node ({c}) {a_no}; repetido con topes mayores ({topes}) lo vuelve a pasar ({c2}): B no termina dentro de los topes (lo mato difuzz) -> divergencia ExitStatus, su salida cortada no se compara ({})",
                 b2.tope_mensaje().unwrap_or_default()
             )),
             None if matches!(b2.status, Status::Timeout | Status::Failed(_)) => pasos.push(format!(
-                "B paso el tope de node ({c}) y A no; repetido con topes mayores ({topes}) no termino ({:?}): sigue la divergencia con el B cortado",
+                "B paso el tope de node ({c}) {a_no}; repetido con topes mayores ({topes}) no termino ({:?}): sigue la divergencia con el B cortado",
                 b2.status
             )),
             None => {
-                pasos.push(format!("B paso el tope de node ({c}) y A no; repetido con topes mayores ({topes}) termino y se compara con eso"));
+                pasos.push(format!("B paso el tope de node ({c}) {a_no}; repetido con topes mayores ({topes}) termino y se compara con eso"));
                 b = b2;
                 if !diverges(&a, &b) {
                     return Confirmed::Same { corto: corto_por_sandbox(runner, &a, &b) };
@@ -2718,39 +2742,58 @@ fn confirm(
         }
     }
     let mut fresh_ok = false;
+    let mut a_cache = "miss";
     if a_cached {
-        // 11.2b (A-H1/B-H2): una confirmacion de A que pasa un tope no confirma ni descarta (como
-        // un Failed): queda en la traza y sigue el A que se tenia.
-        match sin_pasar_topes(|| runner.run(original)) {
-            Err(x) => pasos.push(format!("A fresco (confirmacion de la cache) paso un tope de node: inconcluso, sigue el A de la cache ({})", x.mensaje)),
-            Ok(a1) => {
-                if same_exec(&a1, &a) {
-                    // M21: el A fresco (su elapsed es de esta corrida, no de la cacheada).
-                    a = a1;
-                    fresh_ok = true;
-                } else if !matches!(a1.status, Status::Failed(_)) {
-                    ctx.cache.tombstone(runner, original);
-                    a = a1;
-                    if !diverges(&a, &b) {
-                        return Confirmed::Same { corto: corto_por_sandbox(runner, &a, &b) };
-                    }
-                }
+        // 11.2c (rev-b11-2b-A H1 = B-N3): un A fresco que pasa un tope es un A que pasa un tope: el
+        // caso va a `recursos/` (desenrolla hasta el worker, como cualquier pasada de A). Antes quedaba
+        // Inconcluso y seguia el A de la cache: falso `div/` con una entrada grabada con otros topes.
+        let a1 = como_a(QUIEN_A_CACHE, || runner.run(original));
+        if same_exec(&a1, &a) {
+            // M21: el A fresco (su elapsed es de esta corrida, no de la cacheada).
+            a = a1;
+            fresh_ok = true;
+            a_cache = "hit (confirmado con una corrida fresca)";
+        } else if !matches!(a1.status, Status::Failed(_)) {
+            ctx.cache.tombstone(runner, original);
+            a = a1;
+            a_cache = "hit envenenado (la corrida fresca dio otra cosa: lapida, se sigue con el A fresco)";
+            if !diverges(&a, &b) {
+                return Confirmed::Same { corto: corto_por_sandbox(runner, &a, &b) };
             }
+        } else {
+            a_cache = "hit (la corrida fresca fallo: no confirmado)";
         }
     }
     if !fresh_ok {
-        match sin_pasar_topes(|| runner.run(original)) {
-            Err(x) => pasos.push(format!("A otra vez (no determinismo) paso un tope de node: inconcluso, sigue la divergencia ({})", x.mensaje)),
-            Ok(a2) => {
-                if !matches!(a2.status, Status::Failed(_)) && !same_exec(&a2, &a) {
-                    stats.a_nondet += 1;
-                    ctx.reporter.discard(rel, "no_determinista", a2.elapsed);
-                    return Confirmed::Nondeterministic;
-                }
-            }
+        // 11.2c: lo mismo con la repeticion de A (no determinismo).
+        let a2 = como_a(QUIEN_A_OTRA_VEZ, || runner.run(original));
+        if !matches!(a2.status, Status::Failed(_)) && !same_exec(&a2, &a) {
+            stats.a_nondet += 1;
+            ctx.reporter.discard(rel, "no_determinista", a2.elapsed);
+            return Confirmed::Nondeterministic;
         }
     }
-    Confirmed::Divergence(Box::new((a, b)))
+    Confirmed::Divergence(Box::new((a, b, a_cache)))
+}
+
+/// 11.2c (rev-b11-2b-B N1 = A-H6): turno de la repeticion de B con los topes mayores (`confirm`): una a
+/// la vez en todo difuzz.
+static TOPES_MAYORES: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// 11.2c (rev-b11-2b-A H5): `quien` de las pasadas de A que se pasan de un tope (`como_a`).
+const QUIEN_A_CACHE: &str = "el original (A) en fresco, al confirmar una divergencia con el A de la cache";
+const QUIEN_A_OTRA_VEZ: &str = "el original (A) otra vez, al confirmar una divergencia (no determinismo)";
+
+/// 11.2c (rev-b11-2b-A H5): `f` corre el original; si una de sus ejecuciones pasa un tope de node, el
+/// `Excedido` sigue hasta el worker (el caso va a `recursos/`) con `quien` dicho, si nadie lo dijo antes.
+fn como_a<T>(quien: &str, f: impl FnOnce() -> T) -> T {
+    match sin_pasar_topes(f) {
+        Ok(t) => t,
+        Err(mut x) => {
+            x.quien.get_or_insert_with(|| quien.to_string());
+            std::panic::resume_unwind(x)
+        }
+    }
 }
 
 /// Contadores de las variantes (mejora 10). R1-H15: `comparadas` = iguales +
