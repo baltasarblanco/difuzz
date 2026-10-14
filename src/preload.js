@@ -885,9 +885,34 @@
   // valor de retorno, mismos errores); `process.stderr.write`, con el `write` de stdout tomado
   // arriba. El nombre y el largo de lo envuelto son los del original (el programa puede leerlos;
   // A y B ven lo mismo de todas formas).
+  // N1 (rev-b11a-B vuelta 2): una escritura VACIA no lleva el prefijo. Node escribe un chunk vacio
+  // a `process.stderr` al terminar cada `execFileSync`/`execSync` (el stderr del hijo, aunque no
+  // haya), y el `[stderr] ` suelto se pegaba a la linea siguiente. Vacio: un string de largo 0 o
+  // una vista de 0 bytes; en `fs.writeSync`, ademas, un `length` explicito de 0 o un `offset` que
+  // llega al final sin `length`. Cualquier otra cosa lleva el prefijo (A y B ven lo mismo igual).
   {
     const PREF_STDERR = '[stderr] ';
     const formato = util.format;
+    const esVista = ArrayBuffer.isView;
+    const vacio = (dato) => {
+      try {
+        if (typeof dato === 'string') return dato.length === 0;
+        return esVista(dato) && dato.byteLength === 0;
+      } catch {
+        return false;
+      }
+    };
+    const vacioSync = (args) => {
+      const dato = args[1];
+      if (vacio(dato)) return true;
+      try {
+        if (!esVista(dato)) return false;
+        if (typeof args[3] === 'number') return args[3] === 0;
+        return args[3] === undefined && typeof args[2] === 'number' && args[2] >= dato.byteLength;
+      } catch {
+        return false;
+      }
+    };
     const envolver = (obj, clave, f) => {
       try {
         const d = Object.getOwnPropertyDescriptor(obj, clave);
@@ -905,7 +930,7 @@
     if (stderr) {
       envolver(stderr, 'write', {
         write(chunk, encoding, cb) {
-          write(PREF_STDERR);
+          if (!vacio(chunk)) write(PREF_STDERR);
           return write(chunk, encoding, cb);
         },
       }.write);
@@ -918,7 +943,7 @@
         if (fd !== 2) return aplicar(writeSyncReal, this, arguments);
         const args = [1];
         for (let i = 1; i < arguments.length; i++) args[i] = arguments[i];
-        writeSync(fs, 1, PREF_STDERR);
+        if (!vacioSync(args)) writeSync(fs, 1, PREF_STDERR);
         return aplicar(writeSyncReal, this, args);
       },
     }.writeSync);

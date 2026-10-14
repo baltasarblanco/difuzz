@@ -2666,6 +2666,23 @@ mod tests {
         }
     }
 
+    /// N1 de rev-b11a-B vuelta 2 (integracion del bloque 11): una escritura vacia a stderr no deja un
+    /// `[stderr] ` suelto pegado a la linea siguiente (node la hace al terminar cada `execFileSync`).
+    /// Las no vacias, por las tres vias, siguen con el prefijo.
+    #[test]
+    fn stderr_vacio_sin_prefijo() {
+        use super::{Preload, Runner, Status};
+        use std::time::Duration;
+        if !crate::test_util::requiere_node() {
+            return;
+        }
+        let preload = Preload::write_tagged("stderr-vacio").unwrap();
+        let r = Runner::new(&preload, crate::test_util::id_runner(), Duration::from_secs(60)).with_sensor(false);
+        let js = "const fs = require(\"fs\");\nprocess.stderr.write(\"\");\nprocess.stderr.write(Buffer.alloc(0));\nfs.writeSync(2, \"\");\nfs.writeSync(2, Buffer.from(\"ab\"), 0, 0);\nfs.writeSync(2, Buffer.from(\"ab\"), 2);\nconsole.log(\"x\");\nprocess.stderr.write(\"y\\n\");\nfs.writeSync(2, Buffer.from(\"zw\\n\"), 1);\nprocess._rawDebug(\"r\");\nconst out = require(\"child_process\").execFileSync(process.execPath, [\"-e\", \"console.log(1)\"]);\nconsole.log(\"hijo:\", String(out).trim());\n";
+        let e = r.run(js);
+        assert_eq!((e.status, e.stdout.as_str()), (Status::Exited(0), "x\n[stderr] y\n[stderr] w\n[stderr] r\nhijo: 1\n"), "{}", e.stderr);
+    }
+
     /// 11.2b (rev-b11b-B H1): el mensaje de un throw lo elige el programa y va al canal de control
     /// (linea `exc`). El preload lo recorta a 64 Ki caracteres (el throw sigue siendo el mismo para
     /// el oraculo: `throw Error` en stdout y en el canal); y un canal que pesa mas que el tope de
