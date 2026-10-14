@@ -1076,6 +1076,18 @@ Límites que quedan (11.2b, de las revisiones de 11b):
   En una máquina chica (con un solo worker y MemTotal ≤ 8 GiB, el tope ya es MemTotal/2) el techo
   deja el mayor igual al tope: un B que reserva un poco más que A va a `div/` ExitStatus en vez de
   iguales.
+- (11.2d, revisiones de b11-final) El kind de un B en un bucle que imprime depende de la carga:
+  `Timeout` si el timeout llega antes que el tope de salida, `ExitStatus` si el tope llega antes
+  (MEDIDO: 16 MiB a los 4,76 s con un timeout de 5 s). Siempre `div/`.
+- El costo de que un A que pasa un tope al confirmar vaya a `recursos/` (11.2c): un caso con un bug
+  real cuyo A está al borde del tope de RSS (una corrida lo pasa y otra no) va a `recursos/` en vez
+  de `div/`. Es la regla: un A que pasa un tope no se compara.
+- El `b.stdout` de un B cortado guarda los primeros 64 KiB (retrocediendo al borde de un carácter):
+  si B diverge después, ahí no se ve dónde. La clasificación no cambia (kind `ExitStatus`) y
+  `a.stdout` está entero.
+- La caché de A se regraba con los topes de la última corrida que midió A: como el tope por defecto
+  depende de los workers, subir `--jobs` (tope menor) hace miss en todo y regraba; volver a bajarlo
+  usa esas entradas. Es rendimiento, no corrección.
 
 ## Códigos de salida
 

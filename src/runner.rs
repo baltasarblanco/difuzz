@@ -1258,8 +1258,14 @@ fn run_file(r: &Runner, script: &Path, start: Instant, timeout: Duration, opts: 
         if excedida.is_none() || v.len() <= PREFIJO_PARCIAL {
             return decode_lossless(&v);
         }
-        let mut s = decode_lossless(&v[..PREFIJO_PARCIAL]);
-        s.push_str(&format!("\n[... difuzz recorto {} de los {} bytes que junto: la ejecucion paso un tope de node]\n", v.len() - PREFIJO_PARCIAL, v.len()));
+        // 11.2d (rev-b11-final B-F3): el corte retrocede (hasta 3 bytes) al principio del caracter
+        // UTF-8 que parte; si no, un caracter partido se veia como un byte invalido del programa.
+        let mut fin = PREFIJO_PARCIAL;
+        while fin > PREFIJO_PARCIAL - 3 && v[fin] & 0xC0 == 0x80 {
+            fin -= 1;
+        }
+        let mut s = decode_lossless(&v[..fin]);
+        s.push_str(&format!("\n[... difuzz recorto {} de los {} bytes que junto: la ejecucion paso un tope de node]\n", v.len() - fin, v.len()));
         s
     };
     let stdout = decodificar(stdout);
@@ -2737,6 +2743,14 @@ mod tests {
         assert!(out.starts_with("\u{FFFD}ff") && out.contains("[... difuzz recorto ") && out.contains("la ejecucion paso un tope de node]"), "{}", &out[out.len() - 200..]);
         let e = r.run("console.log(\"x\".repeat(200 * 1024));\n");
         assert_eq!(e.stdout.len(), 200 * 1024 + 1);
+        // 11.2d (rev-b11-final B-F3): el corte cae en medio de un `€` (3 bytes, del 65535 al 65537):
+        // retrocede al principio del caracter, sin U+FFFD.
+        let js = "const fs = require(\"fs\");\nfs.writeSync(1, \"a\".repeat(65535));\nconst s = \"€\".repeat(1 << 16);\nfor (;;) fs.writeSync(1, s);\n";
+        let Err(p) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| r.run(js))) else {
+            panic!("tenia que pasar el tope");
+        };
+        let out = p.downcast::<Excedido>().unwrap().parcial.stdout;
+        assert!(out.starts_with(&format!("{}\n[... difuzz recorto ", "a".repeat(65535))) && !out.contains('\u{FFFD}'), "{:?}", &out[65530..65600]);
     }
 
     /// 11.2d (rev-b11-final A-N1 = B-F1): con los pipes bloqueantes, lo que el programa escribe por
