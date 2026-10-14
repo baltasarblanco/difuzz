@@ -149,3 +149,15 @@ El corpus sale de `--corpus DIR` o de la variable `DIFUZZ_CORPUS`; sin ninguno d
 Para los fixtures de SWC: `<clon de swc>/crates/swc_ecma_minifier/tests`. `--help` lista las opciones
 (`--ignorar-campo`, `--reusar`, `--base-de`, ...) y sale con 0. `scripts/matriz.sh`, `scripts/medir-serie.sh` y
 `scripts/subir-oxc.sh` toman el corpus de `CORPUS` (o, si falta, de `DIFUZZ_CORPUS`).
+
+## Origen y licencia de los casos copiados
+
+- `aceptacion/rechequeos/corpus/15-coercion-positivo/input.js` es una copia sin modificar (mismo sha256) del
+  test `comparing/keep_comparisons` de terser (https://github.com/terser/terser), tal como lo distribuye SWC
+  (https://github.com/swc-project/swc) en `crates/swc_ecma_minifier/tests/terser/compress/comparing/keep_comparisons/input.js`
+  (commit `42e4f7e98b2c78d708a5b85c7e29365fdce2b213`, el mismo de la muestra fija). Terser se distribuye bajo la
+  licencia BSD de 2 cláusulas (BSD-2-Clause), "Copyright 2012-2018 (c) Mihai Bazon <mihai.bazon@gmail.com>": el
+  texto completo está en [`muestra/LICENSE-TERSER`](muestra/LICENSE-TERSER). SWC, bajo la licencia Apache 2.0,
+  "Copyright 2024 SWC contributors": el texto completo está en [`muestra/LICENSE-SWC`](muestra/LICENSE-SWC).
+- `golden/corpus/oxc-n6422-2-fixture/input.js`: ver "Origen y licencia" en `golden/README.md`.
+- Los casos de `muestra/casos/`: ver "Origen y licencia" en `muestra/README.md`.

@@ -12,11 +12,19 @@ de SWC.
   mutated (#12398)"), carpeta `crates/swc_ecma_minifier/tests/`.
 - Licencia: Apache License 2.0, "Copyright 2024 SWC contributors". El texto
   completo esta en `LICENSE-SWC` (copia del `LICENSE` de la raiz de SWC en ese
-  commit). SWC no tiene archivo `NOTICE` en ese commit.
+  commit). En ese commit SWC no tiene `NOTICE` en la raiz ni en
+  `crates/swc_ecma_minifier/`: el unico, `bindings/binding_native_addon/NOTICE`,
+  atribuye a Node.js una interfaz de ese binding y no alcanza a estos casos.
 - Archivos copiados: `input.js` y, cuando existe, `config.json` de cada caso,
   byte a byte, bajo `casos/<ruta relativa a crates/swc_ecma_minifier/tests>/`.
   No se modifico ninguno. difuzz no lee `config.json` (`src/` no lo nombra); se
   conserva para no separar el caso de su configuracion original.
+- Algunos casos de SWC pueden ser fragmentos de codigo de terceros: SWC los
+  guarda en carpetas con el nombre de un proyecto
+  (`fixture/projects/{backbone,jquery,next,react,underscore,yui}/`,
+  `fixture/next/`, `fixture/issues/{react,react-autosuggest,vercel}/`) y los
+  distribuye sin avisos propios. Ningun archivo de `casos/` trae un aviso de
+  copyright o de licencia.
 - Los 44 casos de `casos/terser/` vienen, a traves de SWC, de la suite de
   tests de compresion de terser (https://github.com/terser/terser): SWC los
   declara "Tests ported from terser." (`tests/compress.rs`, sobre
