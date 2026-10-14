@@ -34,7 +34,10 @@ difieren, el minifier cambió el comportamiento del programa: es un candidato a 
      rutas y pids); tampoco lo que llega al fd 2 por otras vías: `process.stderr.end(dato)`,
      `fs.write(2, ...)`, `fs.writeFileSync(2)` o `'/dev/stderr'`, un stream nuevo sobre el fd 2 y
      los procesos hijos que heredan el stderr. Una escritura que lanza (un `chunk` inválido) deja
-     el `[stderr] ` sin dato, igual en los dos lados;
+     el `[stderr] ` sin dato, igual en los dos lados. Lo que llega por stderr se compara igual que
+     stdout: un stack escrito a stderr con el nombre de un marco mangleado (`at miFuncion` contra
+     `at e`, core_defaults) va a `div/`, como ya pasaba con `console.error(e.stack)` (la decisión
+     pendiente sobre marcos renombrados; 11.1 solo agranda el canal);
 4. **Comparar.** Si el estado de salida o el stdout difieren, hay divergencia, de una de estas
    clases (`kind`):
 
