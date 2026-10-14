@@ -433,12 +433,19 @@ fn validar_oraculo(exe: &std::path::Path) -> Result<(), String> {
 /// (main imprime el aviso, una vez). Un oraculo mas viejo que este binario se
 /// usa igual, con el aviso en `Ok` via `aviso_viejo`.
 pub fn configurar_oraculo() -> Result<Option<PathBuf>, String> {
+    configurar_oraculo_desde(std::env::var_os("DIFUZZ_ORACULO"))
+}
+
+/// `configurar_oraculo` con el valor de `DIFUZZ_ORACULO` dado. 11.2a (B-O2 de rev-b11a-B): el test
+/// lo llama con `None`, asi no depende de que el usuario tenga la variable exportada (el README la
+/// sugiere para el golden).
+fn configurar_oraculo_desde(env: Option<std::ffi::OsString>) -> Result<Option<PathBuf>, String> {
     if !cfg!(debug_assertions) {
         let _ = ORACULO.set(None);
         return Ok(None);
     }
     let exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("difuzz"));
-    let r = elegir_oraculo(&exe, std::env::var_os("DIFUZZ_ORACULO"));
+    let r = elegir_oraculo(&exe, env);
     let _ = ORACULO.set(r.as_ref().ok().cloned());
     r.map(Some)
 }
@@ -1260,7 +1267,8 @@ pub(crate) mod tests {
         }
         // En el binario de tests (con debug assertions y sin hermanos) no hay oraculo.
         // (Sin debug assertions no hace falta oraculo: Ok(None).)
-        assert_eq!(configurar_oraculo().is_err(), cfg!(debug_assertions));
+        // Sin DIFUZZ_ORACULO aunque el usuario la tenga exportada (11.2a, B-O2).
+        assert_eq!(configurar_oraculo_desde(None).is_err(), cfg!(debug_assertions));
         assert!(!hay_oraculo() && oraculo(Minifier::Oxc, Preset::CoreDefaults, SourceKind::Script, false).is_none());
         assert_eq!(candidatos_oraculo(&exe, Some("".into())).len(), 2, "DIFUZZ_ORACULO vacio no cuenta");
     }
