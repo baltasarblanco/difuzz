@@ -641,8 +641,15 @@ class Gen {
       () => `${s()}.${this.pick(['toLowerCase', 'toUpperCase', 'trim', 'trimStart', 'trimEnd'])}()`,
       () => `${s()}.concat(${a()}, ${a()})`,
       () => `${s()}.${this.pick(['substring', 'slice'])}(${af()}${this.chance(0.6) ? `, ${af()}` : ''})`,
-      // posiciones fuera de rango en indexOf/lastIndexOf: G (solo con --con-conocidos)
-      () => `${s()}.${this.pick(['indexOf', 'lastIndexOf'])}(${s()}${this.chance(0.5) ? `, ${CONOCIDOS ? af() : this.pick(['0', '1', '-1', '-0', '0.5'])}` : ''})`,
+      // posiciones fuera de rango en indexOf/lastIndexOf: G (solo con --con-conocidos). Sin el,
+      // indexOf no recibe una posicion mayor que el largo de su receptor (con S, solo `1` sobre `""`:
+      // `"".indexOf("", 1)` se pliega a 1, node da 0). Un solo pick, como antes.
+      () => {
+        const rec = s();
+        const m = this.pick(['indexOf', 'lastIndexOf']);
+        const largo = m === 'indexOf' ? JSON.parse(rec).length : Infinity;
+        return `${rec}.${m}(${s()}${this.chance(0.5) ? `, ${CONOCIDOS ? af() : this.pick(['0', '1', '-1', '-0', '0.5'].filter((p) => Math.trunc(Number(p)) <= largo))}` : ''})`;
+      },
       () => `(${n()}).toString(${this.pick(['', '2', '16', '36', '10', '8', '3', 'undefined'])})`,
       () => `Math.${this.pick(['round', 'ceil', 'floor', 'trunc', 'sign', 'abs', 'fround', 'clz32', 'sqrt', ...(CONOCIDOS ? ['cbrt'] : [])])}(${this.chance(0.7) ? n() : a()})`,
       () => `Math.${this.pick(['min', 'max', 'imul'])}(${[...Array(this.int(4))].map(() => (this.chance(0.7) ? n() : a())).join(', ')})`,
