@@ -1,7 +1,8 @@
 # Subir (o bajar) la version de oxc en difuzz
 
-Procedimiento C7 del registro interno de mejoras. El trabajo lo hace `scripts/subir-oxc.sh`; este documento
-dice cuando usarlo, como leer lo que deja y que queda a mano.
+Procedimiento para mantener difuzz al dia con oxc: subir (o bajar) la version de los crates `oxc_*` y
+de `oxc-minify` en `probe/`, y ver que cambia en los hallazgos. El trabajo lo hace `scripts/subir-oxc.sh`;
+este documento dice cuando usarlo, como leer lo que deja y que queda a mano.
 
 ## Antes
 
@@ -9,8 +10,8 @@ dice cuando usarlo, como leer lo que deja y que queda a mano.
    `curl -s -A '<contacto>' https://crates.io/api/v1/crates/oxc_minifier`) y
    `curl -s https://registry.npmjs.org/oxc-minify/latest`. oxc publica los lunes, todos los crates
    `oxc_*` con el mismo numero. Que este tambien en npm importa: los reportes a oxc se reproducen con
-   `oxc-minify` de npm. Ademas `probe/package.json` fija `oxc-minify` a la version exacta del crate
-   (decision 9e): el test C1 de `tests/muestra/` exige que la version de npm sea la de
+   `oxc-minify` de npm. Ademas `probe/package.json` fija `oxc-minify` a la version exacta del crate:
+   el test C1 de `tests/muestra/` exige que la version de npm sea la de
    `Minifier::Oxc.version()`, asi que el crate y el paquete de npm se suben juntos.
 2. Partir de un commit (REV, default `HEAD`): lo no commiteado del arbol NO entra.
 3. Tener compiladas las dependencias en algun target y pasarlo como `TARGET=` (si no, compila todo
@@ -25,10 +26,11 @@ CORPUS=<corpus> TARGET=<target con dependencias> RED=1 REPRO=<repro> ENVIAR=<tex
 
 - `CORPUS` (o `DIFUZZ_CORPUS`) es obligatoria: el arnes y el informe corren sobre ese corpus (el de
   los fixtures de SWC es `<clon de swc>/crates/swc_ecma_minifier/tests`). `REPRO` (directorio con los
-  `*.mjs` y sus `.out`) es obligatoria con `RED=1`. `ENVIAR` (el archivo con los textos de reporte a
-  oxc sin mandar) es opcional: sin ella no hay aviso de version en esos textos. Ninguna tiene default.
+  `*.mjs` y sus `.out`, los repro de tus borradores de reporte) es obligatoria con `RED=1`. `ENVIAR` (un
+  archivo con borradores de reportes a oxc que todavia no publicaste) es opcional: sin ella no hay aviso
+  de version en esos textos. Ninguna tiene default.
 - Tarda ~20-30 min (dos builds de cada perfil, `cargo test`, clippy, golden y aceptacion dos veces
-  y el arnes en 5 celdas por lado). Anunciarlo antes (las corridas largas se anuncian aparte).
+  y el arnes en 5 celdas por lado).
   `RED=1` (o `NPM=1`) usa la red: npm install (repro de `REPRO` y `oxc-minify` en `probe/`), C1 y
   `gh api`.
 - Golden (`tests/golden/`), aceptacion de los re-chequeos (`tests/aceptacion/rechequeos/`) y arnes
@@ -56,7 +58,7 @@ CORPUS=<corpus> TARGET=<target con dependencias> RED=1 REPRO=<repro> ENVIAR=<tex
 | `arnes/DIFERENCIAS.txt` | el detalle del arnes de no regresion (incluye minificados distintos en el mismo destino) |
 | `golden/cambios.tsv`, `aceptacion/cambios.tsv` | celdas del golden y de la aceptacion de los re-chequeos que cambian de base a nuevo |
 | `lock.diff`, `menciones-vieja.txt`, `api.stat` | paquetes del Cargo.lock que cambian; lineas que siguen nombrando la version vieja; archivos de src/ tocados |
-| `subida-oxc-<version>.patch` | la propuesta: Cargo.toml, Cargo.lock, `version()`, el test del oraculo, `probe/package.json` (y `probe/package-lock.json` con `RED=1`) y los arreglos de API. Se aplica con `git apply` en el arbol principal (orden del usuario) |
+| `subida-oxc-<version>.patch` | la propuesta: Cargo.toml, Cargo.lock, `version()`, el test del oraculo, `probe/package.json` (y `probe/package-lock.json` con `RED=1`) y los arreglos de API. Se aplica con `git apply` en tu checkout |
 | `bin-base/`, `bin-nuevo/` | los dos pares de binarios (`difuzz` y `difuzz-oraculo`) |
 | `npm/` | `oxc-minify@<version>` y la salida de los repro de `REPRO` (con `RED=1`) |
 | `logs/npm-probe.log`, `logs/c1.log` | la subida de `oxc-minify` en `probe/` y el test C1 de la muestra (con `RED=1`) |
@@ -97,7 +99,7 @@ Por celda, cada caso cuyo estado cambia. Estado = destinos del caso (`div:<kind>
   corre C1 (`cargo test c1_igual_a_oxc_minify_de_npm -- --ignored`). Sin `RED=1` queda avisado: el
   parche lleva un `package.json` que no coincide con su lock hasta que se haga
   `npm install --save-exact oxc-minify@<version>` en `probe/`.
-- **Textos de reporte a oxc sin mandar** (`ENVIAR=`, con sus repro en `REPRO=`): nombran la version
+- **Borradores de reportes a oxc sin publicar** (`ENVIAR=`, con sus repro en `REPRO=`): nombran la version
   con que se reprodujeron. Antes de mandar cualquiera, reproducirlo con la version nueva (`RED=1` corre los
   `REPRO/*.mjs` y compara con sus `.out`) y cambiar la version del texto. El aviso sale en toda
   corrida cuya version vieja aparezca en `ENVIAR` (tambien al bajar, donde no aplica). Si un repro da otra salida,
@@ -126,10 +128,10 @@ Por celda, cada caso cuyo estado cambia. Estado = destinos del caso (`div:<kind>
   --profile oraculo`). El paso 5 verifica con `--preparar --info` que los cuatro binarios digan la
   version esperada; un oraculo viejo junto a un principal nuevo se rechaza en la corrida (b1-c).
 
-## Despues (usuario)
+## Despues
 
-Aplicar `subida-oxc-<version>.patch` en el arbol principal, volver a compilar los dos perfiles,
-`npm ci` en `probe/` (para que `probe/node_modules` tenga el `oxc-minify` nuevo y C1 pase), y
-anotar la version nueva en el registro interno de decisiones (que nombra la version de
-`oxc_minifier`) y en el de mejoras. Si se confirmaron fixes de oxc, actualizar golden y los textos de `ENVIAR`
-en el mismo momento.
+Revisar el informe, aplicar `subida-oxc-<version>.patch` en tu checkout (`git apply`), volver a
+compilar los dos perfiles, `npm ci` en `probe/` (para que `probe/node_modules` tenga el `oxc-minify`
+nuevo y C1 pase) y actualizar la version de oxc donde la nombra la documentacion (la tabla de
+minifiers de `README.md` y de `MANUAL.md`). Si se confirmaron fixes de oxc, actualizar el golden (y los
+borradores de `ENVIAR`, si los hay) en el mismo momento.

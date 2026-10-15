@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# subir-oxc.sh: cambia la version de los crates de oxc y dice que cambio en los hallazgos (C7).
+# subir-oxc.sh: cambia la version de los crates de oxc y dice que cambio en los hallazgos.
 #
 # uso: [VARIABLES] scripts/subir-oxc.sh VERSION DIR_SALIDA
 #
@@ -64,7 +64,7 @@
 #   ARNES      default REPO/scripts/comparar-binarios.sh
 #   GOLDEN     default REPO/tests/golden (GOLDEN=no para saltearlo)
 #   ACEPTACION default REPO/tests/aceptacion/rechequeos (ACEPTACION=no para saltearla)
-#   ENVIAR     archivo con los textos de reporte a oxc sin mandar (opcional, sin default). Si
+#   ENVIAR     archivo con borradores de reportes a oxc sin publicar (opcional, sin default). Si
 #              esta, avisa cuantas veces nombra la version vieja
 #   REPRO      directorio con los repro de esos textos (*.mjs y su .out); sin default, OBLIGATORIA
 #              con RED=1 (sin ella sale con 2)
@@ -240,7 +240,7 @@ if ! hecho subir; then
   # algo (comentarios, mensajes de tests). Se lista para leerlo a mano.
   rg -n -F "$VIEJA" "$WT/src" "$WT/tests" "$WT/Cargo.toml" 2>/dev/null | sd -F "$WT/" '' > "$OUT/menciones-vieja.txt"
   [[ -s $OUT/menciones-vieja.txt ]] && pendiente "$(rg -c '' "$OUT/menciones-vieja.txt") lineas de src/ y tests/ siguen nombrando $VIEJA (comentarios y mensajes; ver $OUT/menciones-vieja.txt)"
-  # 9e: C1 (tests/muestra) exige oxc-minify de npm == Minifier::Oxc.version(): se mueven juntos.
+  # C1 (tests/muestra) exige oxc-minify de npm == Minifier::Oxc.version(): se mueven juntos.
   pj=$WT/probe/package.json
   if rg -q "\"oxc-minify\": *\"${VERSION//./\\.}\"" "$pj" 2>/dev/null; then
     say "  probe/package.json: oxc-minify ya en $VERSION"
@@ -381,7 +381,7 @@ indice() {
   [[ -f $r/descartes.tsv ]] && rg -N -v '^#' "$r/descartes.tsv" | cut -f1,2 | while IFS=$'\t' read -r caso kind; do
     printf '%s\tdescarte:%s\t-\n' "$caso" "$kind"; done
 }
-# 10.2b (B-H7 de la revision B del bloque 10): codegen/ (--crudo) tambien es un hallazgo (de oxc: el parser o el codegen).
+# 10.2b: codegen/ (--crudo) tambien es un hallazgo (de oxc: el parser o el codegen).
 # El estado entero `codegen`, no `descarte:codegen` (un original que no se pudo imprimir).
 hallazgo() { [[ $1 == *div:* || $1 == *panic* || +$1+ == *+codegen+* ]]; }
 stats_diff() { # stdout_base stdout_nuevo -> "  stats: clave base -> nuevo, ..." de la linea total=
@@ -480,7 +480,7 @@ fi
 
 # --- 10 npm (opcional) ------------------------------------------------------
 if [[ $RED == 1 ]] && ! hecho npm; then
-  say "== 10 npm oxc-minify@$VERSION y repro de ENVIAR.md ($REPRO)"
+  say "== 10 npm oxc-minify@$VERSION y repro de los reportes ($REPRO)"
   command -v npm >/dev/null || fallar "RED=1 sin npm"
   mkdir -p "$OUT/npm/repro"
   [[ -f $OUT/npm/package.json ]] || printf '{ "name": "probe-oxc-%s", "private": true }\n' "$VERSION" > "$OUT/npm/package.json"
@@ -490,12 +490,12 @@ if [[ $RED == 1 ]] && ! hecho npm; then
     b=$(basename "$f" .mjs); cp "$f" "$OUT/npm/repro/"
     node "$OUT/npm/repro/$b.mjs" > "$OUT/npm/repro/$b.out" 2>&1
     if [[ -f $REPRO/$b.out ]] && diff -q "$REPRO/$b.out" "$OUT/npm/repro/$b.out" >/dev/null; then
-      say "  $b: igual que el .out de ENVIAR"
+      say "  $b: igual que su .out"
     else
-      pendiente "repro $b de ENVIAR.md da otra salida con oxc-minify@$VERSION (diff $REPRO/$b.out $OUT/npm/repro/$b.out): el bug pudo cambiar o arreglarse"
+      pendiente "repro $b da otra salida con oxc-minify@$VERSION (diff $REPRO/$b.out $OUT/npm/repro/$b.out): el bug pudo cambiar o arreglarse"
     fi
   done
-  # 9e: probe/ del worktree con oxc-minify@VERSION (package.json y package-lock.json) y C1 de la
+  # probe/ del worktree con oxc-minify@VERSION (package.json y package-lock.json) y C1 de la
   # muestra (tests/muestra/auditoria.rs: el crate imprime lo mismo que oxc-minify de npm).
   if [[ -d $WT ]]; then
     npm install --prefix "$WT/probe" --save-exact --no-audit --no-fund "oxc-minify@$VERSION" > "$LOGS/npm-probe.log" 2>&1 \
@@ -523,7 +523,7 @@ fi
 # --- avisos -----------------------------------------------------------------
 if [[ -f $ENVIAR ]]; then
   nv=$(rg -c -F "$VIEJA" "$ENVIAR" || echo 0)
-  ((nv)) && pendiente "ENVIAR.md nombra $VIEJA $nv veces (versiones y comandos npm i). Antes de mandar: reproducir cada texto con $VERSION (RED=1) y actualizar la version; un hallazgo que DESAPARECE puede ser uno de esos issues"
+  ((nv)) && pendiente "$ENVIAR nombra $VIEJA $nv veces (versiones y comandos npm i). Antes de mandar: reproducir cada texto con $VERSION (RED=1) y actualizar la version; un hallazgo que DESAPARECE puede ser uno de esos issues"
 fi
 
 # --- 11 parche y limpieza ---------------------------------------------------
