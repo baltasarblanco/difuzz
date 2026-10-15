@@ -159,5 +159,10 @@ Para los fixtures de SWC: `<clon de swc>/crates/swc_ecma_minifier/tests`. `--hel
   licencia BSD de 2 cláusulas (BSD-2-Clause), "Copyright 2012-2018 (c) Mihai Bazon <mihai.bazon@gmail.com>": el
   texto completo está en [`muestra/LICENSE-TERSER`](muestra/LICENSE-TERSER). SWC, bajo la licencia Apache 2.0,
   "Copyright 2024 SWC contributors": el texto completo está en [`muestra/LICENSE-SWC`](muestra/LICENSE-SWC).
+- `aceptacion/rechequeos/corpus/27-b113-n03-valor-de-un-nombre-borrado/input.js` es, debajo de un comentario
+  propio de difuzz, una copia sin modificar del código de `crates/swc_ecma_minifier/tests/fixture/issues/12306/input.js`
+  de SWC (https://github.com/swc-project/swc), en el mismo commit que la muestra fija
+  (`42e4f7e98b2c78d708a5b85c7e29365fdce2b213`). Está bajo la licencia Apache 2.0 de SWC, "Copyright 2024 SWC
+  contributors": el texto completo está en [`muestra/LICENSE-SWC`](muestra/LICENSE-SWC).
 - `golden/corpus/oxc-n6422-2-fixture/input.js`: ver "Origen y licencia" en `golden/README.md`.
 - Los casos de `muestra/casos/`: ver "Origen y licencia" en `muestra/README.md`.
