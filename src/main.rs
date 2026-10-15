@@ -2742,6 +2742,8 @@ fn confirm(
     let a_no = if a_cached { "y A no (A de la cache, grabado con topes iguales o menores; se confirma en fresco abajo)" } else { "y A no" };
     // 11.2e: B es la repeticion con topes mayores, que corrio sin el sensor (ver abajo y al final).
     let mut b_mayor_sin_sensor = false;
+    // 11.2g: la repeticion de B con topes mayores (sin el sensor) no termino por tiempo.
+    let mut b_mayor_sin_sensor_timeout = false;
     if let Some(c) = b.tope() {
         // 11.2e (rev-b11-final-A vuelta 2, V2-H1): la repeticion corre SIN el sensor, una sola vez. Con
         // el sensor y sin reintento (11.2d), un B sin bug que pasa el tope y solo es lento con el
@@ -2780,10 +2782,14 @@ fn confirm(
                 "B paso el tope de node ({c}) {a_no}; repetido con topes mayores ({topes}) lo vuelve a pasar ({c2}): B no termina dentro de los topes (lo mato difuzz) -> divergencia ExitStatus, su salida cortada no se compara ({})",
                 b2.tope_mensaje().unwrap_or_default()
             )),
-            None if matches!(b2.status, Status::Timeout | Status::Failed(_)) => pasos.push(format!(
-                "B paso el tope de node ({c}) {a_no}; repetido con topes mayores ({topes}) no termino ({:?}): sigue la divergencia con el B cortado",
-                b2.status
-            )),
+            None if matches!(b2.status, Status::Timeout | Status::Failed(_)) => {
+                pasos.push(format!(
+                    "B paso el tope de node ({c}) {a_no}; repetido con topes mayores ({topes}) no termino ({:?}): sigue la divergencia con el B cortado",
+                    b2.status
+                ));
+                // 11.2g: si no termino por tiempo, se mira A sin el sensor al final (abajo).
+                b_mayor_sin_sensor_timeout = b2.status == Status::Timeout;
+            }
             None => {
                 pasos.push(format!("B paso el tope de node ({c}) {a_no}; repetido con topes mayores ({topes}) termino y se compara con eso"));
                 b = b2;
@@ -2836,6 +2842,25 @@ fn confirm(
     // que sea determinista). Si no, inconcluso: la divergencia sigue con el A con el sensor. 11.2f
     // (rev-b11-final-A vuelta 3, V3-H1): si A sin el sensor termino y tambien difiere de B, es el A de
     // la divergencia (A y B sin el sensor, como I3) y el resto del caso corre sin el sensor.
+    // 11.2g (rev-b11-final-A vuelta 4, V4-H1): la repeticion de B (sin el sensor) no termino a tiempo
+    // y A (con el sensor) si. Si A sin el sensor tampoco termina (con el mismo timeout largo, fuera del
+    // turno, topes de siempre), la divergencia puede ponerla el sensor y no el minifier (g01: un
+    // programa que sin el sensor gira sin fin). El caso sigue en div/ (conservador: no se cambia
+    // ningun destino), pero la traza lo dice para el triage. Si A sin el sensor termina, la
+    // divergencia no la explica el sensor: queda como estaba, con el A con el sensor (el B que se
+    // guarda es el cortado con el sensor, y asi el par es del mismo modo).
+    if b_mayor_sin_sensor_timeout && runner.con_sensor() {
+        let sin = runner.sin_sensor();
+        let a_sin = como_a(QUIEN_A_SIN_SENSOR_MAYOR, || sin.run_sin_reintento(original, longer));
+        if a_sin.status == Status::Timeout {
+            pasos.push(format!(
+                "LA DIVERGENCIA DEPENDE DEL SENSOR: A sin el sensor tampoco termina (Timeout con {} ms), como la repeticion de B; puede no ser un bug del minifier (sigue en div/)",
+                longer.as_millis()
+            ));
+        } else {
+            pasos.push(format!("A sin el sensor termina ({:?}) y la repeticion de B no: la divergencia no la explica el sensor", a_sin.status));
+        }
+    }
     let mut sin_sensor = false;
     if b_mayor_sin_sensor && runner.con_sensor() {
         let sin = runner.sin_sensor();

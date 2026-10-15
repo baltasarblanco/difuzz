@@ -821,12 +821,22 @@ fn confirmacion_de_b_con_timeout_largo() {
         )
         .as_bytes(),
     );
+    // 11.2g (rev-b11-final-A vuelta 4, V4-H1): g01, sin bug. El programa nota el sensor y sin el gira
+    // sin fin (A y B igual); solo B pasa el tope. La repeticion de B (sin el sensor) no termina, A con el
+    // sensor si: sigue en div/ (no se cambia ningun destino), pero la traza dice que A sin el sensor
+    // tampoco termina: la divergencia la pone el sensor.
+    let visto = "var visto = false;\nclass E extends Error { toString() { visto = true; return \"E\"; } }\ntry { throw new E(\"x\"); } catch (e) {}";
+    caso(
+        &corpus,
+        "g01",
+        solo_b(&format!("{visto}\nconst keep = [];\nfor (let i = 0; i < 6; i++) keep.push(Buffer.alloc(50 << 20, 1));"), visto, "if (!visto) for (;;) {}\nconsole.log(\"listo\");").as_bytes(),
+    );
     let out = b.join("out");
     let o = difuzz(&b, &[corpus.to_str().unwrap(), "--out", out.to_str().unwrap(), "--timeout-ms", "1000", "--mem-node", "300", "--max-salida", "1", "--no-cache", "--jobs", "1"]);
     assert_eq!(rc(&o), Some(0), "{}", err(&o));
     let stdout = String::from_utf8_lossy(&o.stdout);
     let stats = stdout.lines().find(|l| l.starts_with("total=")).unwrap();
-    for (c, n) in [("total", 11), ("iguales", 4), ("DIVERGENCIAS", 7), ("RECURSOS", 0), ("panics_del_fuzzer", 0)] {
+    for (c, n) in [("total", 12), ("iguales", 4), ("DIVERGENCIAS", 8), ("RECURSOS", 0), ("panics_del_fuzzer", 0)] {
         assert_eq!(campo(stats, c), n, "{c}: {stats}\n{}", err(&o));
     }
     let celda = out.join("oxc+carril_a+tal_cual");
@@ -839,6 +849,11 @@ fn confirmacion_de_b_con_timeout_largo() {
     assert!(meta.contains("  profundidad: no aplica (A con mas pila da lo mismo"), "{meta}");
     assert_eq!(std::fs::read_to_string(celda.join("div/x01/a.stdout")).unwrap(), "fin 2\n");
     assert!(celda.join("div/h02/meta.txt").is_file() && celda.join("div/x02/meta.txt").is_file());
+    let meta = std::fs::read_to_string(celda.join("div/g01/meta.txt")).unwrap();
+    assert!(meta.contains("LA DIVERGENCIA DEPENDE DEL SENSOR: A sin el sensor tampoco termina"), "{meta}");
+    // x02: A sin el sensor termina (la repeticion de B no): esa nota, sin la otra.
+    let meta = std::fs::read_to_string(celda.join("div/x02/meta.txt")).unwrap();
+    assert!(meta.contains("A sin el sensor termina") && !meta.contains("DEPENDE DEL SENSOR"), "{meta}");
     let meta = std::fs::read_to_string(celda.join("div/d01/meta.txt")).unwrap();
     assert!(meta.contains("A sin el sensor no se reproduce (dos corridas distintas): inconcluso"), "{meta}");
     let meta = std::fs::read_to_string(celda.join("div/bucle-lento/meta.txt")).unwrap();

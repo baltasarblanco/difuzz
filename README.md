@@ -1090,6 +1090,13 @@ Límites que quedan (11.2b, de las revisiones de 11b):
 - (11.2e) Con los pipes bloqueantes, `process.stdout.write` nunca devuelve `false`: un programa
   cuyo bucle sigue mientras no haya contrapresión (`while (process.stdout.write(x))`) escribe hasta
   el tope de salida y va a `recursos/` (`node_salida`). Igual en A y en B: no da un falso `div/`.
+- (11.2f/11.2g) La repetición de B con topes mayores corre sin el sensor. Si termina y difiere de A,
+  se compara con A sin el sensor, que tiene que terminar solo y dar dos veces lo mismo: si da lo
+  mismo que B, iguales; si difiere, A y B se guardan y se re-chequean sin el sensor. Si la
+  repetición no termina a tiempo y A sin el sensor tampoco, el caso **sigue en `div/`**, pero la
+  traza de `meta.txt` dice `LA DIVERGENCIA DEPENDE DEL SENSOR`: un programa que sin el sensor no
+  termina (y con él sí) puede dar un `div/` sin bug del minifier cuando solo B pasa un tope. Hay
+  que mirarlo antes de reportarlo.
 - `interrumpido` sale solo de una SIGINT/SIGTERM a difuzz. Sin `--sandbox`, un programa puede
   mandársela (leyendo el pid real de su padre en `/proc`); eso ya cortaba la corrida antes de 11.2d.
   Con `--sandbox`, el filtro de señales lo impide.
