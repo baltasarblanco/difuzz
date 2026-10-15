@@ -2566,7 +2566,14 @@ fn compare_and_report(
         pasos_tope.push(format!("B (el minificado) paso el tope de node ({c}): {}", b.tope_mensaje().unwrap_or_default()));
     }
     let sin_sensor_mayor;
-    let (mut a, mut b, a_cache, a_sin_sensor) = match confirm(ctx, runner, stats, rel, original, minified, a, a_cached, b, &mut pasos_tope) {
+    // 11.2j: el origen del A que va a `confirm`. Con I3 completo, `a` es el A auxiliar (sin el sensor) y
+    // `con_sensor_a` el A del caso.
+    let origen = match (&con_sensor_a, a_cached) {
+        (Some(del_caso), _) => OrigenA::I3SinSensor { del_caso, runner_con },
+        (None, true) => OrigenA::Cache,
+        (None, false) => OrigenA::DelCaso,
+    };
+    let (mut a, mut b, a_cache, a_sin_sensor) = match confirm(ctx, runner, stats, rel, original, minified, a, origen, b, &mut pasos_tope) {
         Confirmed::Same { corto: true } => return descarte_corto(ctx, stats, rel, elapsed_a),
         Confirmed::Same { corto: false } => return false,
         Confirmed::Nondeterministic => return true,
@@ -2734,10 +2741,11 @@ fn confirm(
     original: &str,
     minified: &str,
     a: runner::Exec,
-    a_cached: bool,
+    origen: OrigenA<'_>,
     b: runner::Exec,
     pasos: &mut Vec<String>,
 ) -> Confirmed {
+    let a_cached = origen.cacheado();
     let diverges = |a: &runner::Exec, b: &runner::Exec| matches!(oracle::compare(a, b), oracle::Verdict::Divergence(_));
     let (mut a, mut b) = (a, b);
     if !diverges(&a, &b) {
@@ -2850,12 +2858,39 @@ fn confirm(
         }
     }
     if !fresh_ok {
-        // 11.2c: lo mismo con la repeticion de A (no determinismo).
-        let a2 = como_a(QUIEN_A_OTRA_VEZ, || runner.run(original));
-        if !matches!(a2.status, Status::Failed(_)) && !same_exec(&a2, &a) {
-            stats.a_nondet += 1;
-            ctx.reporter.discard(rel, "no_determinista", a2.elapsed);
-            return Confirmed::Nondeterministic;
+        // 11.2c: lo mismo con la repeticion de A (no determinismo). 11.2j: segun el origen del A.
+        match &origen {
+            OrigenA::DelCaso | OrigenA::Cache => {
+                // Repite el A del caso (regla C1): un tope desenrolla a recursos/; si no se reproduce,
+                // el caso es no determinista.
+                let a2 = como_a(QUIEN_A_OTRA_VEZ, || runner.run(original));
+                if !matches!(a2.status, Status::Failed(_)) && !same_exec(&a2, &a) {
+                    stats.a_nondet += 1;
+                    ctx.reporter.discard(rel, "no_determinista", a2.elapsed);
+                    return Confirmed::Nondeterministic;
+                }
+            }
+            OrigenA::I3SinSensor { del_caso, runner_con } => {
+                // 11.2j (rev-b11-final-B vuelta 7, V7-H1 y V7-H2): `a` es el A auxiliar de I3 (sin el
+                // sensor) y `runner` el runner sin el sensor: repetirlo es una corrida AUXILIAR. Un tope
+                // deja el paso inconcluso (no recursos/). Si no se reproduce, se repite el A del caso
+                // (con el sensor, `runner_con`): si tampoco se reproduce, el programa es no determinista
+                // (como siempre); si se reproduce, inconcluso y la divergencia sigue.
+                if let Some(a2) = auxiliar(pasos, "A otra vez (el de I3, sin el sensor)", || runner.run(original)) {
+                    if !matches!(a2.status, Status::Failed(_)) && !same_exec(&a2, &a) {
+                        let a3 = como_a(QUIEN_A_OTRA_VEZ, || runner_con.run(original));
+                        if !matches!(a3.status, Status::Failed(_)) && !same_exec(&a3, del_caso) {
+                            stats.a_nondet += 1;
+                            ctx.reporter.discard(rel, "no_determinista", a3.elapsed);
+                            return Confirmed::Nondeterministic;
+                        }
+                        pasos.push(
+                            "A otra vez (el de I3, sin el sensor) no se reproduce y el A del caso (con el sensor) si: inconcluso, la divergencia sigue con el par de I3"
+                                .into(),
+                        );
+                    }
+                }
+            }
         }
     }
     // 11.2e (V2-H1): B es la repeticion con topes mayores, que corrio sin el sensor, y A corrio con el.
@@ -2920,6 +2955,27 @@ fn confirm(
         }
     }
     Confirmed::Divergence(Box::new((a, b, a_cache, sin_sensor)))
+}
+
+/// 11.2j (rev-b11-final-B vuelta 7): de donde sale el A que llega a `confirm`. De aca, y solo de aca,
+/// sale que corridas de A de `confirm` son del A del caso (regla C1: un tope -> recursos/; si no se
+/// reproduce -> no_determinista) y cuales auxiliares (un tope o no reproducirse -> inconcluso).
+enum OrigenA<'r> {
+    /// El A del caso, corrido en esta pasada (o el que `run_inner` repitio sin el sensor, `sensor_caido`:
+    /// es el que paso la precondicion del oraculo).
+    DelCaso,
+    /// El A del caso leido de la cache de A: `confirm` lo confirma con una corrida fresca.
+    Cache,
+    /// El A que I3 repitio sin el sensor (`compare_and_report`): una corrida auxiliar. `del_caso` es el
+    /// A del caso (con el sensor) y `runner_con` el runner con el sensor.
+    I3SinSensor { del_caso: &'r runner::Exec, runner_con: &'r runner::Runner },
+}
+
+impl OrigenA<'_> {
+    /// El A viene de la cache (y se confirma en fresco).
+    fn cacheado(&self) -> bool {
+        matches!(self, OrigenA::Cache)
+    }
 }
 
 /// 11.2h (rev-b11-final-A vuelta 5, V5-H1): una corrida AUXILIAR (no el A del caso: solo el A del caso

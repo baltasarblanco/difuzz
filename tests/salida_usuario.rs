@@ -863,12 +863,39 @@ fn confirmacion_de_b_con_timeout_largo() {
     caso(&corpus, "i01", format!("{nota_sensor}if (n === 0) for (let i = 0; i < 400; i++) {{ try {{ null.x; }} catch (e) {{}} }}\nif (!sensor) {{\n  const s = \"z\".repeat(1 << 20);\n  for (;;) process.stdout.write(s + \"\\n\");\n}}\nconsole.log(\"fin\", n);\n").as_bytes());
     caso(&corpus, "i3-tope", format!("{nota_sensor}if (sensor) {{\n  if (n === 0) for (;;) {{}}\n  console.log(\"con\", n);\n}} else {{\n  if (n !== 0) {{ const b = []; for (let i = 0; i < 25; i++) b.push(Buffer.alloc(16 << 20, 1)); }}\n  console.log(\"sin\", n);\n}}\n").as_bytes());
     caso(&corpus, "i3-colgado", format!("{nota_sensor}console.log(\"hola\");\nif (sensor) {{\n  if (n === 0) for (;;) {{}}\n  console.log(\"fin\");\n}} else {{\n  if (n === 0) process.exit(0);\n  for (;;) {{}}\n}}\n").as_bytes());
+    // 11.2j (rev-b11-final-B vuelta 7, V7-H1 y V7-H2): con I3 completo (B con el sensor gira y se
+    // repite sin el; A se repite sin el), "A otra vez" repite el A auxiliar de I3. Las corridas sin el
+    // sensor de A cuentan en un archivo de afuera. i3-tope2: la segunda reserva 400 MiB (pasa el tope);
+    // i3-nodet: la segunda imprime otra cosa. Las dos quedan inconclusas y el caso sigue en div/ (antes:
+    // recursos/ y no_determinista; i3-nodet ya pasaba en 2ff4d90).
+    let i3_cuenta = |p: &Path, si_segunda: &str| {
+        format!(
+            "const fs = require(\"fs\");\n{nota_sensor}if (sensor) {{\n  if (n === 0) for (;;) {{}}\n  console.log(\"con\", n);\n}} else if (n === 0) {{\n  console.log(\"sin\", n);\n}} else {{\n  const p = {:?};\n  let c = 0;\n  try {{ c = Number(fs.readFileSync(p, \"utf8\")); }} catch (e) {{}}\n  c++;\n  fs.writeFileSync(p, String(c));\n  {si_segunda}\n}}\n",
+            p.to_str().unwrap()
+        )
+    };
+    caso(&corpus, "i3-tope2", i3_cuenta(&b.join("cuenta-i3-tope2"), "if (c >= 2) { const b = []; for (let i = 0; i < 25; i++) b.push(Buffer.alloc(16 << 20, 1)); }\n  console.log(\"sin\", n);").as_bytes());
+    caso(&corpus, "i3-nodet", i3_cuenta(&b.join("cuenta-i3-nodet"), "console.log(c <= 1 ? \"sin 2\" : \"otra cosa\");").as_bytes());
+    // i3-nodet2: ademas, con el sensor, A cuenta sus corridas en otro archivo e imprime la cuenta: el A
+    // del caso tampoco se reproduce. Es no determinista de verdad: descartes (no_determinista).
+    let con = b.join("cuenta-i3-nodet2-con");
+    caso(
+        &corpus,
+        "i3-nodet2",
+        i3_cuenta(&b.join("cuenta-i3-nodet2"), "console.log(c <= 1 ? \"sin 2\" : \"otra cosa\");")
+            .replacen(
+                "  console.log(\"con\", n);\n",
+                &format!("  const q = {:?};\n  let k = 0;\n  try {{ k = Number(fs.readFileSync(q, \"utf8\")); }} catch (e) {{}}\n  k++;\n  fs.writeFileSync(q, String(k));\n  console.log(\"con\", n, k);\n", con.to_str().unwrap()),
+                1,
+            )
+            .as_bytes(),
+    );
     let out = b.join("out");
     let o = difuzz(&b, &[corpus.to_str().unwrap(), "--out", out.to_str().unwrap(), "--timeout-ms", "1000", "--mem-node", "300", "--max-salida", "1", "--no-cache", "--jobs", "1"]);
     assert_eq!(rc(&o), Some(0), "{}", err(&o));
     let stdout = String::from_utf8_lossy(&o.stdout);
     let stats = stdout.lines().find(|l| l.starts_with("total=")).unwrap();
-    for (c, n) in [("total", 18), ("iguales", 4), ("DIVERGENCIAS", 14), ("RECURSOS", 0), ("panics_del_fuzzer", 0)] {
+    for (c, n) in [("total", 21), ("iguales", 4), ("DIVERGENCIAS", 16), ("RECURSOS", 0), ("panics_del_fuzzer", 0)] {
         assert_eq!(campo(stats, c), n, "{c}: {stats}\n{}", err(&o));
     }
     let celda = out.join("oxc+carril_a+tal_cual");
@@ -894,6 +921,12 @@ fn confirmacion_de_b_con_timeout_largo() {
         let meta = std::fs::read_to_string(celda.join(format!("div/{i}/meta.txt"))).unwrap();
         assert!(meta.contains(&format!("A repetido sin el sensor (I3) {por}")) && meta.contains("inconcluso, A y B se comparan como estaban"), "{i}: {meta}");
     }
+    let meta = std::fs::read_to_string(celda.join("div/i3-tope2/meta.txt")).unwrap();
+    assert!(meta.contains("A otra vez (el de I3, sin el sensor) paso un tope de node: inconcluso"), "{meta}");
+    let meta = std::fs::read_to_string(celda.join("div/i3-nodet/meta.txt")).unwrap();
+    assert!(meta.contains("A otra vez (el de I3, sin el sensor) no se reproduce y el A del caso (con el sensor) si: inconcluso"), "{meta}");
+    let descartes = std::fs::read_to_string(celda.join("descartes.tsv")).unwrap();
+    assert!(descartes.contains("i3-nodet2/input.js\tno_determinista\t"), "{descartes}");
     let meta = std::fs::read_to_string(celda.join("div/d01/meta.txt")).unwrap();
     assert!(meta.contains("A sin el sensor no se reproduce (dos corridas distintas): inconcluso"), "{meta}");
     let meta = std::fs::read_to_string(celda.join("div/bucle-lento/meta.txt")).unwrap();

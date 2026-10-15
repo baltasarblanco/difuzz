@@ -1102,7 +1102,11 @@ Límites que quedan (11.2b, de las revisiones de 11b):
   También es auxiliar el A que I3 repite sin el sensor cuando el sensor se degradó: si pasa un tope
   o no termina solo, I3 queda inconcluso (la traza lo dice) y A y B se comparan como estaban, con el
   A del caso (con el sensor). Antes un tope mandaba el caso a `recursos/`, y un A que no terminaba se
-  comparaba igual (un bug real podía dar iguales; ya pasaba en `2ff4d90`).
+  comparaba igual (un bug real podía dar iguales; ya pasaba en `2ff4d90`). (11.2j) Si I3 se
+  completa, el par de la divergencia es el de I3 (A y B sin el sensor), y su "A otra vez" también
+  es auxiliar: si pasa un tope, inconcluso; si no se reproduce, se repite el A del caso con el
+  sensor, y solo si ese tampoco se reproduce el caso va a `no_determinista`. Antes iba a
+  `recursos/` o a `no_determinista` por el A auxiliar (lo segundo ya pasaba en `2ff4d90`).
 - `interrumpido` sale solo de una SIGINT/SIGTERM a difuzz. Sin `--sandbox`, un programa puede
   mandársela (leyendo el pid real de su padre en `/proc`); eso ya cortaba la corrida antes de 11.2d.
   Con `--sandbox`, el filtro de señales lo impide.
