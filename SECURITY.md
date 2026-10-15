@@ -76,7 +76,7 @@ them, difuzz exits with 1 before running anything, and `--sandbox` is the fallba
 - The `repro_original:` / `repro_minificado:` commands written to `meta.txt` do not include the
   sandbox flags: running them by hand runs the case without the sandbox.
 
-The Sandbox section of `README.md` (in Spanish) has the full details and measurements.
+The Sandbox section of `MANUAL.md` (in Spanish) has the full details and measurements.
 
 ## Reporting a vulnerability
 

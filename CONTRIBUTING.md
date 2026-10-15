@@ -1,6 +1,6 @@
 # Contributing
 
-Thanks for your interest in difuzz. Most of the documentation (`README.md`, `tests/README.md`)
+Thanks for your interest in difuzz. Most of the documentation (`MANUAL.md`, `tests/README.md`)
 is in Spanish.
 
 ## Requirements

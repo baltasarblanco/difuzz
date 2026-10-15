@@ -23,7 +23,7 @@
 # Fijo, sin opcion para cambiarlo: --minifier oxc --config carril_a --forma tal_cual --invocar
 # --stubs --sandbox-red. El corpus es codigo ajeno: el sandbox con namespaces (sin red, sin
 # sockets unix del sistema; node lee solo el preload, el programa y el directorio de trabajo del
-# caso, y escribe solo en ese directorio; ver README "Sandbox") no se puede apagar
+# caso, y escribe solo en ese directorio; ver MANUAL.md, "Sandbox") no se puede apagar
 # desde aca (decision del 10-oct: --sandbox sigue apagado por defecto en difuzz, por
 # comparabilidad de celdas y cache, y es obligatorio en este barrido). Si el sandbox no se puede
 # armar (sin user namespaces), difuzz sale con 1 y este script tambien.
@@ -32,7 +32,7 @@
 # sandbox imposible; 130 interrumpida), o 2 por un error de uso de este script. Tambien 1 si difuzz
 # termino con 0 pero su stdout no trae la linea "sandbox: modo=permisos+red" (no deberia pasar).
 #
-# Cuanto tarda (MEDIDO el 10-oct, --jobs 8, ver README "Corpus"): ~12 casos/s en CJS y ~25 en ESM;
+# Cuanto tarda (MEDIDO el 10-oct, --jobs 8, ver MANUAL.md, "Corpus"): ~12 casos/s en CJS y ~25 en ESM;
 # el pool local entero (18749 casos en 4 corpus) en 23 min 35 s.
 # Dependencias: bash >= 4, rg, sort, tr, tee, sha256sum, realpath, date.
 set -uo pipefail

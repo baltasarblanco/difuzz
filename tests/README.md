@@ -86,7 +86,7 @@ con la etiqueta, sigue en `known/`) y 1 de R2 de la misma revisión (`26-b103-o0
 exporta una función cuyo `.name` cambia con el bug de keep_names; la pasada observada la escribe con su nombre:
 `div/` en carril_a, igual en core_defaults, descarte en el carril A) y 1 límite conocido (`26-b102b-l01`, 10.2b, x03
 de la revisión A del bloque 10: el valor del bug elige qué literal se imprime y la sal confirma; espera `known/` en las 4
-celdas aunque B ejecuta el bug; ver "Límites conocidos" en el README principal) y 5 del re-chequeo de nombres de
+celdas aunque B ejecuta el bug; ver "Límites conocidos" en el manual (`MANUAL.md`)) y 5 del re-chequeo de nombres de
 core_defaults (`27-b113-`, ítem 11.3, I6 de la revisión integral 1: `n01` y `n02` llevan el bug E de oxc en un programa
 que nombra `.name` y van a `div/` en las 4; con el paso de nombres siempre `Explica`, la mutación m1, iban a `known/` en
 core_defaults; `p01`, solo el nombre mangleado, y `p02`, un valor que sale de un nombre y que explica el renombre, van a `known/` en
@@ -99,7 +99,7 @@ keep_names los nombres se borran); `25-b91-c01`, igual en las 4.
 Destino esperado en `esperado.tsv` (mismo formato que el golden). Reutiliza `tests/golden/verificar.sh`.
 Lo que la aceptación no cubre: un programa en que oxc pliega mal la condición y borra la rama entera de la
 violación (B no depende de la asunción y no se distingue de un minificado que la aprovechó; ver "Límites
-conocidos" en el README principal).
+conocidos" en el manual (`MANUAL.md`)).
 
 ```sh
 tests/aceptacion/rechequeos/verificar.sh [--jobs N] [BINARIO] [DIR_SALIDA]

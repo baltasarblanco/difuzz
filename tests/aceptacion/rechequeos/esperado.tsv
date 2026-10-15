@@ -419,7 +419,7 @@
 # `tdz_atrapada`. Ahora A hereda la violacion que el sensor vio antes del tope y el re-chequeo (sin el sensor, B == A')
 # decide: t01 (la TDZ en el loop) y t02 (la TDZ antes del ruido) son positivos, known/. t03 (bug del getter al lado)
 # y t04 (21-n10 en un loop: el bug en el catch de la TDZ) siguen en div/. t05: la TDZ despues del tope no la ve el
-# sensor, div/ (limite documentado en el README).
+# sensor, div/ (limite documentado en MANUAL.md).
 # Integracion 7.1 + 7.4 (b7-int, 10-oct; H3 de rev-7.1, H1 de rev-int): Explica exige ademas el camino de B (7.1).
 # Como A y B se comparan sin el sensor, el re-chequeo corre B otra vez con el sensor (tope 4096) y sin el, con
 # cobertura (`recheck::camino_sensor_i3`): la corrida con el sensor tiene que ser entera, dar lo mismo que B y tener la
@@ -850,8 +850,8 @@
 26-b103-o02-export-objeto-con-fn	oxc-b-carril_a	div:Stdout
 # 10.2b (H1 de la revision A del bloque 10, x03): LIMITE CONOCIDO, no un positivo. El valor del bug F de oxc elige que
 # literal de un ?: se imprime, y A con mas pila elige el mismo: la sal llega al token que difiere y confirma. known/ con
-# c9eab79 y con el tope de 10.2b (MEDIDO), aunque B ejecuta el bug (README, Limites conocidos). Si un cambio lo manda a
-# div/, actualizar esto y el README.
+# c9eab79 y con el tope de 10.2b (MEDIDO), aunque B ejecuta el bug (MANUAL.md, Limites conocidos). Si un cambio lo manda a
+# div/, actualizar esto y MANUAL.md.
 26-b102b-l01-rama-elegida-por-bug	oxc-a-core_defaults	known
 26-b102b-l01-rama-elegida-por-bug	oxc-a-carril_a	known
 26-b102b-l01-rama-elegida-por-bug	oxc-b-core_defaults	known
