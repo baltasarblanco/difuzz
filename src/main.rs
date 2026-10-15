@@ -2012,7 +2012,6 @@ const QUIEN_A_BLOQUES: &str = "el original (A) del caso, en la pasada de los bin
 const QUIEN_A_INVOCAR: &str = "el original (A) del caso, en la pasada de --invocar";
 const QUIEN_A_MODULOS: &str = "el original (A) del caso, por el envoltorio de modulos (carril B, programa mudo)";
 const QUIEN_A_SIN_SENSOR: &str = "el original (A) del caso, repetido sin el sensor (I3)";
-const QUIEN_A_SIN_SENSOR_MAYOR: &str = "el original (A) del caso, sin el sensor, para comparar con la repeticion de B con topes mayores";
 
 /// 11.5 (I3): `recursos/<caso>` de una ejecucion de node que paso un tope (caso o variante).
 /// 11.2b: `quien` dice que ejecucion fue (va primero en el mensaje).
@@ -2849,27 +2848,38 @@ fn confirm(
     // ningun destino), pero la traza lo dice para el triage. Si A sin el sensor termina, la
     // divergencia no la explica el sensor: queda como estaba, con el A con el sensor (el B que se
     // guarda es el cortado con el sensor, y asi el par es del mismo modo).
+    // 11.2h (rev-b11-final-A vuelta 5, V5-H1): las corridas de A sin el sensor de aca abajo son
+    // AUXILIARES (no son el A del caso, que ya termino dentro de los topes y se confirmo): si pasan un
+    // tope, el paso queda inconcluso (`auxiliar`) y la divergencia sigue con lo que habia. Antes pasaban
+    // por `como_a` y mandaban el caso entero a recursos/ (g03, g04).
+    let termino = |e: &runner::Exec| e.ok_with_output() || e.ok_silent();
     if b_mayor_sin_sensor_timeout && runner.con_sensor() {
         let sin = runner.sin_sensor();
-        let a_sin = como_a(QUIEN_A_SIN_SENSOR_MAYOR, || sin.run_sin_reintento(original, longer));
-        if a_sin.status == Status::Timeout {
-            pasos.push(format!(
-                "LA DIVERGENCIA DEPENDE DEL SENSOR: A sin el sensor tampoco termina (Timeout con {} ms), como la repeticion de B; puede no ser un bug del minifier (sigue en div/)",
-                longer.as_millis()
-            ));
-        } else {
-            pasos.push(format!("A sin el sensor termina ({:?}) y la repeticion de B no: la divergencia no la explica el sensor", a_sin.status));
+        if let Some(a_sin) = auxiliar(pasos, "A sin el sensor", || sin.run_sin_reintento(original, longer)) {
+            match &a_sin.status {
+                Status::Timeout => pasos.push(format!(
+                    "LA DIVERGENCIA DEPENDE DEL SENSOR: A sin el sensor tampoco termina (Timeout con {} ms), como la repeticion de B; puede no ser un bug del minifier (sigue en div/)",
+                    longer.as_millis()
+                )),
+                // 11.2h (V5-H2): Failed no es terminar.
+                Status::Failed(e) => pasos.push(format!("A sin el sensor fallo ({e}): no se sabe si la divergencia depende del sensor")),
+                _ if termino(&a_sin) => pasos.push(format!("A sin el sensor termina ({:?}) y la repeticion de B no: la divergencia no la explica el sensor", a_sin.status)),
+                s => pasos.push(format!("A sin el sensor no termino solo ({s:?}): no se sabe si la divergencia depende del sensor")),
+            }
         }
     }
     let mut sin_sensor = false;
     if b_mayor_sin_sensor && runner.con_sensor() {
         let sin = runner.sin_sensor();
-        let termino = |e: &runner::Exec| e.ok_with_output() || e.ok_silent();
-        let a_sin = como_a(QUIEN_A_SIN_SENSOR_MAYOR, || sin.run(original));
+        let Some(a_sin) = auxiliar(pasos, "A sin el sensor", || sin.run(original)) else {
+            return Confirmed::Divergence(Box::new((a, b, a_cache, false)));
+        };
         if !termino(&a_sin) {
             pasos.push(format!("A sin el sensor no termino solo ({:?}): inconcluso, la divergencia sigue con el A con el sensor", a_sin.status));
         } else {
-            let a_sin2 = como_a(QUIEN_A_SIN_SENSOR_MAYOR, || sin.run(original));
+            let Some(a_sin2) = auxiliar(pasos, "A sin el sensor (segunda corrida)", || sin.run(original)) else {
+                return Confirmed::Divergence(Box::new((a, b, a_cache, false)));
+            };
             if !termino(&a_sin2) || !same_exec(&a_sin, &a_sin2) {
                 pasos.push("A sin el sensor no se reproduce (dos corridas distintas): inconcluso, la divergencia sigue con el A con el sensor".into());
             } else if !diverges(&a_sin, &b) {
@@ -2883,6 +2893,19 @@ fn confirm(
         }
     }
     Confirmed::Divergence(Box::new((a, b, a_cache, sin_sensor)))
+}
+
+/// 11.2h (rev-b11-final-A vuelta 5, V5-H1): una corrida AUXILIAR (no el A del caso: solo el A del caso
+/// puede mandar el caso a recursos/ por un tope). Si pasa un tope de node, deja en `pasos` "<cual> paso un
+/// tope de node: inconcluso" y devuelve `None`; quien la llamo sigue con lo que tenia.
+fn auxiliar(pasos: &mut Vec<String>, cual: &str, f: impl FnOnce() -> runner::Exec) -> Option<runner::Exec> {
+    match sin_pasar_topes(f) {
+        Ok(e) => Some(e),
+        Err(x) => {
+            pasos.push(format!("{cual} paso un tope de node: inconcluso, la divergencia sigue con el A con el sensor ({})", x.mensaje));
+            None
+        }
+    }
 }
 
 /// 11.2c (rev-b11-2b-B N1 = A-H6): turno de la repeticion de B con los topes mayores (`confirm`): una a

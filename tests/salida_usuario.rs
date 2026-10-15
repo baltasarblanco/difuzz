@@ -831,12 +831,34 @@ fn confirmacion_de_b_con_timeout_largo() {
         "g01",
         solo_b(&format!("{visto}\nconst keep = [];\nfor (let i = 0; i < 6; i++) keep.push(Buffer.alloc(50 << 20, 1));"), visto, "if (!visto) for (;;) {}\nconsole.log(\"listo\");").as_bytes(),
     );
+    // 11.2h (rev-b11-final-A vuelta 5, V5-H1): las corridas de A sin el sensor son auxiliares: si pasan
+    // un tope, el paso queda inconcluso y el caso sigue en div/ (antes, `como_a`: recursos/). Los dos
+    // con el bug F de oxc y un programa que nota el sensor; solo B reserva 300 MiB. g03: sin el sensor
+    // imprime 256 KiB cada 500 ms sin fin: la repeticion de B (4 MiB de tope) da Timeout y A sin el
+    // sensor (11.2g, 1 MiB) pasa el tope. g04: sin el sensor, el camino de A imprime sin fin y el de B
+    // termina: la repeticion de B termina y difiere, y A sin el sensor (11.2f) pasa el tope.
+    let visto_bug = "let visto = false;\nclass E extends Error { toString() { visto = true; return \"E\"; } }\ntry { throw new E(\"x\"); } catch (e) {}\nconst n = \"abc\".substring(1, undefined).length;\nconst keep = [];\nif (n === 0) for (let i = 0; i < 6; i++) keep.push(Buffer.alloc(50 << 20, 1));\n";
+    let imprime = |cond: &str, kib: u32, ms: u32| format!("if ({cond}) {{\n  const s = \"z\".repeat({kib} * 1024);\n  const ia = new Int32Array(new SharedArrayBuffer(4));\n  for (;;) {{ process.stdout.write(s + \"\\n\"); Atomics.wait(ia, 0, 0, {ms}); }}\n}}\nconsole.log(\"fin\", n);\n");
+    caso(&corpus, "g03", format!("{visto_bug}{}", imprime("!visto", 256, 500)).as_bytes());
+    caso(&corpus, "g04", format!("{visto_bug}{}", imprime("!visto && n !== 0", 1024, 50)).as_bytes());
+    // d02: como d01, pero la tercera corrida sin el sensor (la segunda de A sin el sensor) escribe 2 MiB
+    // y pasa el tope de salida: inconcluso, sigue en div/.
+    let contador2 = b.join("contador2");
+    caso(
+        &corpus,
+        "d02",
+        format!(
+            "const fs = require(\"fs\");\nconst n = \"abc\".substring(1, undefined).length;\nlet sensor = false;\nclass E extends Error {{ toString() {{ sensor = true; return \"E\"; }} }}\ntry {{ throw new E(\"x\"); }} catch (e) {{}}\nif (sensor) {{\n  if (n === 0) {{ const b = []; for (let i = 0; i < 25; i++) b.push(Buffer.alloc(16 << 20, 1)); }}\n  console.log(\"con\", n);\n}} else {{\n  const p = {:?};\n  let c = 0;\n  try {{ c = Number(fs.readFileSync(p, \"utf8\")); }} catch (e) {{}}\n  c++;\n  fs.writeFileSync(p, String(c));\n  if (c >= 3) console.log(\"z\".repeat(2 << 20));\n  console.log(\"sin\", c);\n}}\n",
+            contador2.to_str().unwrap()
+        )
+        .as_bytes(),
+    );
     let out = b.join("out");
     let o = difuzz(&b, &[corpus.to_str().unwrap(), "--out", out.to_str().unwrap(), "--timeout-ms", "1000", "--mem-node", "300", "--max-salida", "1", "--no-cache", "--jobs", "1"]);
     assert_eq!(rc(&o), Some(0), "{}", err(&o));
     let stdout = String::from_utf8_lossy(&o.stdout);
     let stats = stdout.lines().find(|l| l.starts_with("total=")).unwrap();
-    for (c, n) in [("total", 12), ("iguales", 4), ("DIVERGENCIAS", 8), ("RECURSOS", 0), ("panics_del_fuzzer", 0)] {
+    for (c, n) in [("total", 15), ("iguales", 4), ("DIVERGENCIAS", 11), ("RECURSOS", 0), ("panics_del_fuzzer", 0)] {
         assert_eq!(campo(stats, c), n, "{c}: {stats}\n{}", err(&o));
     }
     let celda = out.join("oxc+carril_a+tal_cual");
@@ -854,6 +876,10 @@ fn confirmacion_de_b_con_timeout_largo() {
     // x02: A sin el sensor termina (la repeticion de B no): esa nota, sin la otra.
     let meta = std::fs::read_to_string(celda.join("div/x02/meta.txt")).unwrap();
     assert!(meta.contains("A sin el sensor termina") && !meta.contains("DEPENDE DEL SENSOR"), "{meta}");
+    for (g, cual) in [("g03", "A sin el sensor paso"), ("g04", "A sin el sensor paso"), ("d02", "A sin el sensor (segunda corrida) paso")] {
+        let meta = std::fs::read_to_string(celda.join(format!("div/{g}/meta.txt"))).unwrap();
+        assert!(meta.contains(&format!("{cual} un tope de node: inconcluso")), "{g}: {meta}");
+    }
     let meta = std::fs::read_to_string(celda.join("div/d01/meta.txt")).unwrap();
     assert!(meta.contains("A sin el sensor no se reproduce (dos corridas distintas): inconcluso"), "{meta}");
     let meta = std::fs::read_to_string(celda.join("div/bucle-lento/meta.txt")).unwrap();
