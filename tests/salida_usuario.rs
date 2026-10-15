@@ -922,7 +922,7 @@ fn confirmacion_de_b_con_timeout_largo() {
         assert!(meta.contains(&format!("A repetido sin el sensor (I3) {por}")) && meta.contains("inconcluso, A y B se comparan como estaban"), "{i}: {meta}");
     }
     let meta = std::fs::read_to_string(celda.join("div/i3-tope2/meta.txt")).unwrap();
-    assert!(meta.contains("A otra vez (el de I3, sin el sensor) paso un tope de node: inconcluso"), "{meta}");
+    assert!(meta.contains("A otra vez (el de I3, sin el sensor) paso un tope de node: inconcluso, la divergencia sigue con el par de I3 (A y B sin el sensor)"), "{meta}");
     let meta = std::fs::read_to_string(celda.join("div/i3-nodet/meta.txt")).unwrap();
     assert!(meta.contains("A otra vez (el de I3, sin el sensor) no se reproduce y el A del caso (con el sensor) si: inconcluso"), "{meta}");
     let descartes = std::fs::read_to_string(celda.join("descartes.tsv")).unwrap();
@@ -1022,6 +1022,49 @@ fn a_que_pasa_el_tope_al_confirmar_va_a_recursos() {
 /// los dos pasan el tope de 300 casi a la vez y se repiten con 600. En la repeticion, B toma un
 /// archivo exclusivo (`wx`) durante 3 s: si otra repeticion lo tiene, imprime `solapado` y diverge.
 /// Con el turno, iguales los dos; sin el (las dos a la vez, `jobs` x 2 x tope), uno va a div/.
+/// 11.2k (rev-b11-final-B vuelta 8, V8-H1): I3 con el A del caso leido de la cache. El programa tiene
+/// el bug F de oxc y nota el sensor; con el sensor imprime una "version" que se lee de un archivo de
+/// afuera (cambia entre corridas: la entrada de la cache queda vieja); sin el sensor, A alterna su
+/// salida (el A auxiliar de I3 no se reproduce). Corrida 1: div/. Corrida 2, misma cache: el A del caso
+/// fresco difiere de la entrada; antes eso mandaba un bug real a no_determinista. Ahora: lapida, otra
+/// corrida fresca que da lo mismo, inconcluso y div/.
+#[test]
+fn i3_con_una_entrada_vieja_de_la_cache_sigue_en_div() {
+    if !test_util::requiere_node() {
+        return;
+    }
+    let b = base("i3-cache");
+    let corpus = b.join("corpus");
+    let (version, contador, cache) = (b.join("version.txt"), b.join("contador"), b.join("cache"));
+    caso(
+        &corpus,
+        "i3-cache",
+        format!(
+            "const fs = require(\"fs\");\nconst n = \"abc\".substring(1, undefined).length;\nlet sensor = false;\nclass E extends Error {{ toString() {{ sensor = true; return \"E\"; }} }}\ntry {{ throw new E(\"x\"); }} catch (e) {{}}\nconst ver = fs.readFileSync({:?}, \"utf8\").trim();\nif (sensor) {{\n  if (n === 0) for (;;) {{}}\n  console.log(\"con\", n, ver);\n}} else if (n === 0) {{\n  console.log(\"sin\", n);\n}} else {{\n  const p = {:?};\n  let c = 0;\n  try {{ c = Number(fs.readFileSync(p, \"utf8\")); }} catch (e) {{}}\n  c++;\n  fs.writeFileSync(p, String(c));\n  console.log(c % 2 ? \"sin a\" : \"sin b\");\n}}\n",
+            version.to_str().unwrap(),
+            contador.to_str().unwrap()
+        )
+        .as_bytes(),
+    );
+    for (i, ver, hits) in [(1, "v1", 0), (2, "v2", 1)] {
+        std::fs::write(&version, ver).unwrap();
+        let out = b.join(format!("out-{i}"));
+        let o = difuzz(&b, &[corpus.to_str().unwrap(), "--out", out.to_str().unwrap(), "--cache", cache.to_str().unwrap(), "--timeout-ms", "1000", "--jobs", "1"]);
+        assert_eq!(rc(&o), Some(0), "{}", err(&o));
+        let stdout = String::from_utf8_lossy(&o.stdout);
+        let stats = stdout.lines().find(|l| l.starts_with("total=")).unwrap();
+        for (c, n) in [("total", 1), ("DIVERGENCIAS", 1), ("no_determinista", 0), ("cache_a_hits", hits)] {
+            assert_eq!(campo(stats, c), n, "corrida {i}, {c}: {stats}");
+        }
+        let meta = std::fs::read_to_string(out.join("oxc+carril_a+tal_cual/div/i3-cache/meta.txt")).unwrap();
+        assert!(meta.contains("A y B comparados sin el sensor (I3)"), "corrida {i}: {meta}");
+        if i == 2 {
+            assert!(meta.contains("salio de la cache y una corrida fresca dio otra cosa: lapida"), "{meta}");
+        }
+    }
+    std::fs::remove_dir_all(&b).unwrap();
+}
+
 #[test]
 fn una_repeticion_con_topes_mayores_a_la_vez() {
     if !test_util::requiere_node() {

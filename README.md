@@ -1106,7 +1106,12 @@ Límites que quedan (11.2b, de las revisiones de 11b):
   completa, el par de la divergencia es el de I3 (A y B sin el sensor), y su "A otra vez" también
   es auxiliar: si pasa un tope, inconcluso; si no se reproduce, se repite el A del caso con el
   sensor, y solo si ese tampoco se reproduce el caso va a `no_determinista`. Antes iba a
-  `recursos/` o a `no_determinista` por el A auxiliar (lo segundo ya pasaba en `2ff4d90`).
+  `recursos/` o a `no_determinista` por el A auxiliar (lo segundo ya pasaba en `2ff4d90`). Lado
+  conservador: un programa sin bug cuyo A sin el sensor no se reproduce (pero con el sensor sí) y que
+  entra en I3 (por ejemplo, más de 256 excepciones atrapadas) queda en `div/` con la nota
+  "inconcluso" en vez de en `no_determinista`; hay que mirarlo antes de reportarlo. (11.2k) Si ese A
+  del caso salió de la caché, una entrada vieja no lo manda a `no_determinista`: lápida, otra
+  corrida fresca y, si se reproduce, inconcluso.
 - `interrumpido` sale solo de una SIGINT/SIGTERM a difuzz. Sin `--sandbox`, un programa puede
   mandársela (leyendo el pid real de su padre en `/proc`); eso ya cortaba la corrida antes de 11.2d.
   Con `--sandbox`, el filtro de señales lo impide.

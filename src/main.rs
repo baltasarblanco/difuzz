@@ -2497,6 +2497,8 @@ fn compare_and_report(
     // 7.4: las corridas con el sensor (`con_sensor_a`/`_b`, salvo las `sensor_caido`, que ya
     // son sin el) se guardan para heredar sus violaciones despues de confirmar.
     let (mut a, mut b, mut a_cached) = (a, b, a_cached);
+    // 11.2k (V8-H1): si el A del caso salio de la cache, antes de que I3 lo reemplace.
+    let a_del_caso_cacheado = a_cached;
     let sin_sensor;
     // Integracion 7.1 + 7.4: el runner con el sensor, para el camino de B tras I3 (abajo).
     let runner_con = runner;
@@ -2569,7 +2571,7 @@ fn compare_and_report(
     // 11.2j: el origen del A que va a `confirm`. Con I3 completo, `a` es el A auxiliar (sin el sensor) y
     // `con_sensor_a` el A del caso.
     let origen = match (&con_sensor_a, a_cached) {
-        (Some(del_caso), _) => OrigenA::I3SinSensor { del_caso, runner_con },
+        (Some(del_caso), _) => OrigenA::I3SinSensor { del_caso, del_caso_cacheado: a_del_caso_cacheado, runner_con },
         (None, true) => OrigenA::Cache,
         (None, false) => OrigenA::DelCaso,
     };
@@ -2870,19 +2872,32 @@ fn confirm(
                     return Confirmed::Nondeterministic;
                 }
             }
-            OrigenA::I3SinSensor { del_caso, runner_con } => {
+            OrigenA::I3SinSensor { del_caso, del_caso_cacheado, runner_con } => {
                 // 11.2j (rev-b11-final-B vuelta 7, V7-H1 y V7-H2): `a` es el A auxiliar de I3 (sin el
                 // sensor) y `runner` el runner sin el sensor: repetirlo es una corrida AUXILIAR. Un tope
                 // deja el paso inconcluso (no recursos/). Si no se reproduce, se repite el A del caso
                 // (con el sensor, `runner_con`): si tampoco se reproduce, el programa es no determinista
                 // (como siempre); si se reproduce, inconcluso y la divergencia sigue.
-                if let Some(a2) = auxiliar(pasos, "A otra vez (el de I3, sin el sensor)", || runner.run(original)) {
+                if let Some(a2) = auxiliar(pasos, "A otra vez (el de I3, sin el sensor)", SIGUE_PAR_I3, || runner.run(original)) {
                     if !matches!(a2.status, Status::Failed(_)) && !same_exec(&a2, &a) {
                         let a3 = como_a(QUIEN_A_OTRA_VEZ, || runner_con.run(original));
                         if !matches!(a3.status, Status::Failed(_)) && !same_exec(&a3, del_caso) {
-                            stats.a_nondet += 1;
-                            ctx.reporter.discard(rel, "no_determinista", a3.elapsed);
-                            return Confirmed::Nondeterministic;
+                            // 11.2k (rev-b11-final-B vuelta 8, V8-H1): si el A del caso salio de la cache, la
+                            // entrada nunca se confirmo en fresco (I3 no corre el A fresco de la cache): que
+                            // difiera de `a3` puede ser una entrada vieja. Lapida (como el "hit envenenado"
+                            // sin I3) y otra corrida fresca: si da lo mismo que `a3`, el A del caso es
+                            // determinista y el paso queda inconcluso.
+                            let reproduce = *del_caso_cacheado && {
+                                ctx.cache.tombstone(runner_con, original);
+                                pasos.push("el A del caso (con el sensor) salio de la cache y una corrida fresca dio otra cosa: lapida".into());
+                                let a4 = como_a(QUIEN_A_OTRA_VEZ, || runner_con.run(original));
+                                matches!(a4.status, Status::Failed(_)) || same_exec(&a3, &a4)
+                            };
+                            if !reproduce {
+                                stats.a_nondet += 1;
+                                ctx.reporter.discard(rel, "no_determinista", a3.elapsed);
+                                return Confirmed::Nondeterministic;
+                            }
                         }
                         pasos.push(
                             "A otra vez (el de I3, sin el sensor) no se reproduce y el A del caso (con el sensor) si: inconcluso, la divergencia sigue con el par de I3"
@@ -2917,7 +2932,7 @@ fn confirm(
     let termino = |e: &runner::Exec| e.ok_with_output() || e.ok_silent();
     if b_mayor_sin_sensor_timeout && runner.con_sensor() {
         let sin = runner.sin_sensor();
-        if let Some(a_sin) = auxiliar(pasos, "A sin el sensor", || sin.run_sin_reintento(original, longer)) {
+        if let Some(a_sin) = auxiliar(pasos, "A sin el sensor", SIGUE_A_CON_SENSOR, || sin.run_sin_reintento(original, longer)) {
             match &a_sin.status {
                 Status::Timeout => pasos.push(format!(
                     "LA DIVERGENCIA DEPENDE DEL SENSOR: A sin el sensor tampoco termina (Timeout con {} ms), como la repeticion de B; puede no ser un bug del minifier (sigue en div/)",
@@ -2933,13 +2948,13 @@ fn confirm(
     let mut sin_sensor = false;
     if b_mayor_sin_sensor && runner.con_sensor() {
         let sin = runner.sin_sensor();
-        let Some(a_sin) = auxiliar(pasos, "A sin el sensor", || sin.run(original)) else {
+        let Some(a_sin) = auxiliar(pasos, "A sin el sensor", SIGUE_A_CON_SENSOR, || sin.run(original)) else {
             return Confirmed::Divergence(Box::new((a, b, a_cache, false)));
         };
         if !termino(&a_sin) {
             pasos.push(format!("A sin el sensor no termino solo ({:?}): inconcluso, la divergencia sigue con el A con el sensor", a_sin.status));
         } else {
-            let Some(a_sin2) = auxiliar(pasos, "A sin el sensor (segunda corrida)", || sin.run(original)) else {
+            let Some(a_sin2) = auxiliar(pasos, "A sin el sensor (segunda corrida)", SIGUE_A_CON_SENSOR, || sin.run(original)) else {
                 return Confirmed::Divergence(Box::new((a, b, a_cache, false)));
             };
             if !termino(&a_sin2) || !same_exec(&a_sin, &a_sin2) {
@@ -2968,7 +2983,8 @@ enum OrigenA<'r> {
     Cache,
     /// El A que I3 repitio sin el sensor (`compare_and_report`): una corrida auxiliar. `del_caso` es el
     /// A del caso (con el sensor) y `runner_con` el runner con el sensor.
-    I3SinSensor { del_caso: &'r runner::Exec, runner_con: &'r runner::Runner },
+    /// 11.2k: `del_caso_cacheado`, si ese A del caso salio de la cache (I3 ya puso `a_cached = false`).
+    I3SinSensor { del_caso: &'r runner::Exec, del_caso_cacheado: bool, runner_con: &'r runner::Runner },
 }
 
 impl OrigenA<'_> {
@@ -2981,11 +2997,16 @@ impl OrigenA<'_> {
 /// 11.2h (rev-b11-final-A vuelta 5, V5-H1): una corrida AUXILIAR (no el A del caso: solo el A del caso
 /// puede mandar el caso a recursos/ por un tope). Si pasa un tope de node, deja en `pasos` "<cual> paso un
 /// tope de node: inconcluso" y devuelve `None`; quien la llamo sigue con lo que tenia.
-fn auxiliar(pasos: &mut Vec<String>, cual: &str, f: impl FnOnce() -> runner::Exec) -> Option<runner::Exec> {
+/// 11.2k: textos de `auxiliar` para con que sigue la divergencia.
+const SIGUE_A_CON_SENSOR: &str = "con el A con el sensor";
+const SIGUE_PAR_I3: &str = "con el par de I3 (A y B sin el sensor)";
+
+/// 11.2k (rev-b11-final-A vuelta 8): `sigue`, con que par sigue la divergencia (para la traza).
+fn auxiliar(pasos: &mut Vec<String>, cual: &str, sigue: &str, f: impl FnOnce() -> runner::Exec) -> Option<runner::Exec> {
     match sin_pasar_topes(f) {
         Ok(e) => Some(e),
         Err(x) => {
-            pasos.push(format!("{cual} paso un tope de node: inconcluso, la divergencia sigue con el A con el sensor ({})", x.mensaje));
+            pasos.push(format!("{cual} paso un tope de node: inconcluso, la divergencia sigue {sigue} ({})", x.mensaje));
             None
         }
     }
