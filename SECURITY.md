@@ -57,13 +57,14 @@ them, difuzz exits with 1 before running anything, and `--sandbox` is the fallba
   When difuzz sees a run go over the memory cap or the output cap, it kills node's process group;
   a control channel left larger than the output cap is not read and counts as going over it. The
   output of a run that went over a cap is not compared. A minified run that goes over one is
-  repeated once with larger caps (twice the memory cap, not above half of MemTotal unless the cap
-  already is, and four times the output cap), one such repetition at a time in the whole difuzz
-  process. These are not kernel limits: difuzz polls node's peak RSS (`VmHWM`) while it runs, so
-  node can go over the cap until the next poll, a peak right before node exits is not seen, and
-  processes that the case spawns (possible without `--sandbox`) are not counted. There is no CPU
-  limit apart from the timeout. `--mem-hijo` limits the minifier and analysis child processes,
-  not node.
+  repeated once with larger caps (twice the memory cap but at most half of MemTotal, or the cap
+  itself if it is already above that, and four times the output cap) and a longer timeout (four
+  times `--timeout-ms`, or twenty times what the original took if that is more), one such
+  repetition at a time in the whole difuzz process. These are not kernel limits: difuzz polls
+  node's peak RSS (`VmHWM`) while it runs, so node can go over the cap until the next poll, a
+  peak right before node exits is not seen, and processes that the case spawns (possible
+  without `--sandbox`) are not counted. There is no CPU limit apart from the timeout.
+  `--mem-hijo` limits the minifier and analysis child processes, not node.
 - `node --check` (difuzz uses it to ask whether node accepts a source) and `node --version` run
   outside the sandbox, without a timeout and with difuzz's environment. `node --check` only
   checks the syntax; it does not run the case.
