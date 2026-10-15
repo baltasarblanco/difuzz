@@ -119,8 +119,8 @@ uso: difuzz <corpus_dir> [--out DIR] [--minifier M] [--config C] [--forma F] [--
   --mem-node MiB 11.5: tope de RSS de cada ejecucion de node (A, B, confirmaciones, re-chequeos), medido
                  cada ~10 ms mientras corre; un pico justo antes de terminar puede no verse (default:
                  la misma cuenta que --mem-hijo sin el, MemTotal/2 / workers entre 256 MiB y 4 GiB;
-                 --mem-hijo no lo cambia). La
-                 ejecucion que lo pasa muere y lo que imprimio no se compara. 11.2b: si fue el
+                 --mem-hijo no lo cambia).
+                 La ejecucion que lo pasa muere y lo que imprimio no se compara. 11.2b: si fue el
                  original, el caso (o la variante) va a recursos/ (causa node_memoria); si fue el
                  minificado, se repite con topes mayores y, si los vuelve a pasar, div/ ExitStatus;
                  si fue un re-chequeo o una confirmacion de A, ese paso queda Inconcluso
