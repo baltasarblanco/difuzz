@@ -2011,7 +2011,6 @@ const QUIEN_A_EPILOGO: &str = "el original (A) del caso, en la pasada observada 
 const QUIEN_A_BLOQUES: &str = "el original (A) del caso, en la pasada de los bindings en bloques";
 const QUIEN_A_INVOCAR: &str = "el original (A) del caso, en la pasada de --invocar";
 const QUIEN_A_MODULOS: &str = "el original (A) del caso, por el envoltorio de modulos (carril B, programa mudo)";
-const QUIEN_A_SIN_SENSOR: &str = "el original (A) del caso, repetido sin el sensor (I3)";
 
 /// 11.5 (I3): `recursos/<caso>` de una ejecucion de node que paso un tope (caso o variante).
 /// 11.2b: `quien` dice que ejecucion fue (va primero en el mensaje).
@@ -2505,29 +2504,53 @@ fn compare_and_report(
     // b7-8: un caso con el sensor omitido corre entero sin el (`con_sensor` es false).
     let mut paso_sensor = runner.sensor_omitido().then(|| SENSOR_OMITIDO_TRAZA.to_string());
     let (mut con_sensor_a, mut con_sensor_b) = (None, None);
+    // 11.2i (rev-b11-final vuelta 6, V6-H1 y V6-H2): el A repetido sin el sensor de I3 es una corrida
+    // AUXILIAR (existe porque el sensor se degrado; el A del caso ya termino dentro de los topes). Si
+    // pasa un tope o no termina solo, I3 queda inconcluso: no se cambia al runner sin el sensor y A y B
+    // se comparan como estaban (el A del caso, con el sensor). Antes un tope mandaba el caso a
+    // recursos/ (i01, i3-tope) y un A que no terminaba se comparaba igual (i3-colgado: el bug F, iguales;
+    // tambien en 2ff4d90).
+    let mut nota_i3 = None;
     if runner.con_sensor() {
         let (da, db) = (a.sensor_degradado(), b.sensor_degradado());
         if da.is_some() || db.is_some() {
-            sin_sensor = runner.sin_sensor();
-            runner = &sin_sensor;
-            stats.sensor_repetidos += 1;
-            if da != Some(runner::SENSOR_CAIDO) {
-                con_sensor_a = Some(std::mem::replace(&mut a, como_a(QUIEN_A_SIN_SENSOR, || runner.run(original))));
-                a_cached = false;
-            }
-            if db != Some(runner::SENSOR_CAIDO) {
-                con_sensor_b = Some(std::mem::replace(&mut b, correr_b(runner, minified)));
-            }
             let lado = |d: Option<&str>| match d {
                 Some(runner::SENSOR_CAIDO) => "sin el sensor (sensor_caido: senal o timeout con el)",
                 Some(_) => "con el sensor a medias (sensor_tope: MAX_PAUSAS)",
                 None => "con el sensor",
             };
-            paso_sensor = Some(format!(
-                "A {}, B {} -> A y B comparados sin el sensor (I3)",
-                lado(da),
-                lado(db)
-            ));
+            let a_i3 = if da != Some(runner::SENSOR_CAIDO) {
+                let sin = runner.sin_sensor();
+                match sin_pasar_topes(|| sin.run(original)) {
+                    Err(x) => Err(format!("paso un tope de node ({})", x.mensaje)),
+                    Ok(e) if !(e.ok_with_output() || e.ok_silent()) => Err(format!("no termino solo ({:?})", e.status)),
+                    Ok(e) => Ok(Some(e)),
+                }
+            } else {
+                Ok(None)
+            };
+            match a_i3 {
+                Err(por) => {
+                    nota_i3 = Some(format!(
+                        "A {}, B {}: A repetido sin el sensor (I3) {por}: inconcluso, A y B se comparan como estaban (el A del caso, con el sensor)",
+                        lado(da),
+                        lado(db)
+                    ));
+                }
+                Ok(nuevo_a) => {
+                    sin_sensor = runner.sin_sensor();
+                    runner = &sin_sensor;
+                    stats.sensor_repetidos += 1;
+                    if let Some(e) = nuevo_a {
+                        con_sensor_a = Some(std::mem::replace(&mut a, e));
+                        a_cached = false;
+                    }
+                    if db != Some(runner::SENSOR_CAIDO) {
+                        con_sensor_b = Some(std::mem::replace(&mut b, correr_b(runner, minified)));
+                    }
+                    paso_sensor = Some(format!("A {}, B {} -> A y B comparados sin el sensor (I3)", lado(da), lado(db)));
+                }
+            }
         }
     }
     if let Status::Failed(e) = &b.status {
@@ -2626,6 +2649,10 @@ fn compare_and_report(
             // M1 (revision-b456): que el sensor no corrio entero queda en meta.txt.
             if let Some(p) = paso_sensor {
                 traza.anteponer("sensor", p);
+            }
+            // 11.2i: I3 inconcluso (el A repetido sin el sensor paso un tope o no termino solo).
+            if let Some(n) = nota_i3 {
+                traza.anteponer("sensor", n);
             }
             // 11.2b: B o una confirmacion de A pasaron un tope de node.
             if !pasos_tope.is_empty() {

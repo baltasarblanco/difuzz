@@ -853,12 +853,22 @@ fn confirmacion_de_b_con_timeout_largo() {
         )
         .as_bytes(),
     );
+    // 11.2i (rev-b11-final vuelta 6, V6-H1 y V6-H2): el A repetido sin el sensor de I3 es auxiliar. Los
+    // tres con el bug F de oxc y un programa que nota el sensor; el sensor de B se degrada (i01: B atrapa
+    // 400 excepciones, `sensor_tope`; i3-tope e i3-colgado: B con el sensor gira, `sensor_caido`). i01 (de
+    // la revision A): A sin el sensor imprime sin fin y pasa el tope de salida. i3-tope (B): A sin el
+    // sensor reserva 400 MiB. i3-colgado (B): A sin el sensor no termina (y su salida parcial es la de B).
+    // I3 queda inconcluso y el caso sigue en div/ (antes: recursos/, recursos/ e iguales).
+    let nota_sensor = "let sensor = false;\nclass E extends Error { toString() { sensor = true; return \"E\"; } }\ntry { throw new E(\"x\"); } catch (e) {}\nconst n = \"abc\".substring(1, undefined).length;\n";
+    caso(&corpus, "i01", format!("{nota_sensor}if (n === 0) for (let i = 0; i < 400; i++) {{ try {{ null.x; }} catch (e) {{}} }}\nif (!sensor) {{\n  const s = \"z\".repeat(1 << 20);\n  for (;;) process.stdout.write(s + \"\\n\");\n}}\nconsole.log(\"fin\", n);\n").as_bytes());
+    caso(&corpus, "i3-tope", format!("{nota_sensor}if (sensor) {{\n  if (n === 0) for (;;) {{}}\n  console.log(\"con\", n);\n}} else {{\n  if (n !== 0) {{ const b = []; for (let i = 0; i < 25; i++) b.push(Buffer.alloc(16 << 20, 1)); }}\n  console.log(\"sin\", n);\n}}\n").as_bytes());
+    caso(&corpus, "i3-colgado", format!("{nota_sensor}console.log(\"hola\");\nif (sensor) {{\n  if (n === 0) for (;;) {{}}\n  console.log(\"fin\");\n}} else {{\n  if (n === 0) process.exit(0);\n  for (;;) {{}}\n}}\n").as_bytes());
     let out = b.join("out");
     let o = difuzz(&b, &[corpus.to_str().unwrap(), "--out", out.to_str().unwrap(), "--timeout-ms", "1000", "--mem-node", "300", "--max-salida", "1", "--no-cache", "--jobs", "1"]);
     assert_eq!(rc(&o), Some(0), "{}", err(&o));
     let stdout = String::from_utf8_lossy(&o.stdout);
     let stats = stdout.lines().find(|l| l.starts_with("total=")).unwrap();
-    for (c, n) in [("total", 15), ("iguales", 4), ("DIVERGENCIAS", 11), ("RECURSOS", 0), ("panics_del_fuzzer", 0)] {
+    for (c, n) in [("total", 18), ("iguales", 4), ("DIVERGENCIAS", 14), ("RECURSOS", 0), ("panics_del_fuzzer", 0)] {
         assert_eq!(campo(stats, c), n, "{c}: {stats}\n{}", err(&o));
     }
     let celda = out.join("oxc+carril_a+tal_cual");
@@ -879,6 +889,10 @@ fn confirmacion_de_b_con_timeout_largo() {
     for (g, cual) in [("g03", "A sin el sensor paso"), ("g04", "A sin el sensor paso"), ("d02", "A sin el sensor (segunda corrida) paso")] {
         let meta = std::fs::read_to_string(celda.join(format!("div/{g}/meta.txt"))).unwrap();
         assert!(meta.contains(&format!("{cual} un tope de node: inconcluso")), "{g}: {meta}");
+    }
+    for (i, por) in [("i01", "paso un tope de node"), ("i3-tope", "paso un tope de node"), ("i3-colgado", "no termino solo (Timeout)")] {
+        let meta = std::fs::read_to_string(celda.join(format!("div/{i}/meta.txt"))).unwrap();
+        assert!(meta.contains(&format!("A repetido sin el sensor (I3) {por}")) && meta.contains("inconcluso, A y B se comparan como estaban"), "{i}: {meta}");
     }
     let meta = std::fs::read_to_string(celda.join("div/d01/meta.txt")).unwrap();
     assert!(meta.contains("A sin el sensor no se reproduce (dos corridas distintas): inconcluso"), "{meta}");

@@ -1097,9 +1097,12 @@ Límites que quedan (11.2b, de las revisiones de 11b):
   traza de `meta.txt` dice `LA DIVERGENCIA DEPENDE DEL SENSOR`: un programa que sin el sensor no
   termina (y con él sí) puede dar un `div/` sin bug del minifier cuando solo B pasa un tope. Hay
   que mirarlo antes de reportarlo. (11.2h) Esas corridas de A sin el sensor son auxiliares: si pasan
-  un tope, el paso queda inconcluso y el caso sigue en `div/`. Solo el A del caso (el que se compara
-  y se confirma: la pasada, su repetición sin el sensor de I3, el A fresco de la caché y "A otra
-  vez") manda el caso a `recursos/` por pasar un tope.
+  un tope, el paso queda inconcluso y el caso sigue en `div/`. Solo el A del caso (el de cada pasada,
+  el A fresco de la caché y "A otra vez") manda el caso a `recursos/` por pasar un tope. (11.2i)
+  También es auxiliar el A que I3 repite sin el sensor cuando el sensor se degradó: si pasa un tope
+  o no termina solo, I3 queda inconcluso (la traza lo dice) y A y B se comparan como estaban, con el
+  A del caso (con el sensor). Antes un tope mandaba el caso a `recursos/`, y un A que no terminaba se
+  comparaba igual (un bug real podía dar iguales; ya pasaba en `2ff4d90`).
 - `interrumpido` sale solo de una SIGINT/SIGTERM a difuzz. Sin `--sandbox`, un programa puede
   mandársela (leyendo el pid real de su padre en `/proc`); eso ya cortaba la corrida antes de 11.2d.
   Con `--sandbox`, el filtro de señales lo impide.
