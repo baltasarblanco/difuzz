@@ -792,15 +792,55 @@ fn confirmacion_de_b_con_timeout_largo() {
     // sensor da lo mismo: iguales.
     let cuenta = "var calls = 0;\nError.prepareStackTrace = function () { calls++; return \"\"; };\ntry { null.x; } catch (e) {}";
     caso(&corpus, "s03", solo_b(&format!("{cuenta}\nconst keep = [];\nfor (let i = 0; i < 6; i++) keep.push(Buffer.alloc(50 << 20, 1));"), cuenta, "console.log(\"llamadas\", calls);").as_bytes());
+    // 11.2f (rev-b11-final-B vuelta 3, V3-H1): h01 y h02, con el bug F de oxc. El `toString` propio
+    // de un error atrapado solo corre con el sensor (V8 formatea el stack al pausar). Con el bug, B con
+    // el sensor reserva 400 MiB (pasa el tope); repetido sin el sensor no reserva y sale. h01: A sin el
+    // sensor gira sin fin con la misma salida parcial que B; antes (70509f2) se tomaba como igual a B
+    // y el bug se perdia: tiene que seguir en div/. h02: A sin el sensor termina y difiere de B: div/.
+    let nota = "const n = \"abc\".substring(1, undefined).length;\nclass E extends Error { toString() { globalThis.v = 1; return \"E\"; } }\ntry { throw new E(\"x\"); } catch (e) {}\nconsole.log(\"hola\", typeof globalThis.v);\nif (n === 0) {\n  if (globalThis.v) { const b = []; for (let i = 0; i < 25; i++) b.push(Buffer.alloc(16 << 20, 1)); console.log(b.length); }\n  process.exit(0);\n}\n";
+    caso(&corpus, "h01", format!("{nota}if (!globalThis.v) for (;;) {{}}\nconsole.log(\"fin\");\n").as_bytes());
+    caso(&corpus, "h02", format!("{nota}console.log(\"fin\");\n").as_bytes());
+    // 11.2f (rev-b11-final-A vuelta 3, V3-H1): x01 nota el sensor (el `toString` imprime solo con el
+    // sensor) y tiene el bug F; solo B reserva 400 MiB. A con el sensor, A sin el y B difieren: div/, y
+    // el A guardado es el sin el sensor (A y B comparados sin el sensor). x02: B ademas gira sin fin:
+    // la repeticion no termina y queda en div/ sin esa comparacion.
+    let x = "class E extends Error { toString() { console.log(\"toString llamado\"); return \"E\"; } }\ntry { throw new E(\"x\"); } catch (e) {}\nconst n = \"abc\".substring(1, undefined).length;\nconst keep = [];\n";
+    caso(&corpus, "x01", format!("{x}if (n === 0) for (let i = 0; i < 8; i++) keep.push(Buffer.alloc(50 << 20, 1));\nconsole.log(\"fin\", n);\n").as_bytes());
+    caso(&corpus, "x02", format!("{x}if (n === 0) {{ for (let i = 0; i < 8; i++) keep.push(Buffer.alloc(50 << 20, 1)); for (;;) {{}} }}\nconsole.log(\"fin\", n);\n").as_bytes());
+    // 11.2f (rev-b11-final-A: A sin el sensor corria una sola vez): d01, con el bug F. Sin el sensor
+    // el programa cuenta sus corridas en un archivo de afuera: la repeticion de B (1) y la primera de
+    // A sin el sensor (2) imprimen lo mismo, la segunda (3) otra cosa. A sin el sensor no se reproduce:
+    // inconcluso, sigue en div/ (con una sola corrida se tomaba como igual a B).
+    let contador = b.join("contador");
+    caso(
+        &corpus,
+        "d01",
+        format!(
+            "const fs = require(\"fs\");\nconst n = \"abc\".substring(1, undefined).length;\nlet sensor = false;\nclass E extends Error {{ toString() {{ sensor = true; return \"E\"; }} }}\ntry {{ throw new E(\"x\"); }} catch (e) {{}}\nif (sensor) {{\n  if (n === 0) {{ const b = []; for (let i = 0; i < 25; i++) b.push(Buffer.alloc(16 << 20, 1)); }}\n  console.log(\"con\", n);\n}} else {{\n  const p = {:?};\n  let c = 0;\n  try {{ c = Number(fs.readFileSync(p, \"utf8\")); }} catch (e) {{}}\n  c++;\n  fs.writeFileSync(p, String(c));\n  console.log(\"sin\", c <= 2 ? \"a\" : \"b\");\n}}\n",
+            contador.to_str().unwrap()
+        )
+        .as_bytes(),
+    );
     let out = b.join("out");
     let o = difuzz(&b, &[corpus.to_str().unwrap(), "--out", out.to_str().unwrap(), "--timeout-ms", "1000", "--mem-node", "300", "--max-salida", "1", "--no-cache", "--jobs", "1"]);
     assert_eq!(rc(&o), Some(0), "{}", err(&o));
     let stdout = String::from_utf8_lossy(&o.stdout);
     let stats = stdout.lines().find(|l| l.starts_with("total=")).unwrap();
-    for (c, n) in [("total", 6), ("iguales", 4), ("DIVERGENCIAS", 2), ("RECURSOS", 0), ("panics_del_fuzzer", 0)] {
+    for (c, n) in [("total", 11), ("iguales", 4), ("DIVERGENCIAS", 7), ("RECURSOS", 0), ("panics_del_fuzzer", 0)] {
         assert_eq!(campo(stats, c), n, "{c}: {stats}\n{}", err(&o));
     }
     let celda = out.join("oxc+carril_a+tal_cual");
+    let meta = std::fs::read_to_string(celda.join("div/h01/meta.txt")).unwrap();
+    assert!(meta.contains("A sin el sensor no termino solo (Timeout): inconcluso"), "{meta}");
+    let meta = std::fs::read_to_string(celda.join("div/x01/meta.txt")).unwrap();
+    assert!(meta.contains("A y B se comparan sin el sensor"), "{meta}");
+    // Los re-chequeos tambien sin el sensor: A con mas pila (profundidad) da lo mismo que el A sin el
+    // sensor. Con el runner con el sensor imprimiria "toString llamado" y el paso compararia otra cosa.
+    assert!(meta.contains("  profundidad: no aplica (A con mas pila da lo mismo"), "{meta}");
+    assert_eq!(std::fs::read_to_string(celda.join("div/x01/a.stdout")).unwrap(), "fin 2\n");
+    assert!(celda.join("div/h02/meta.txt").is_file() && celda.join("div/x02/meta.txt").is_file());
+    let meta = std::fs::read_to_string(celda.join("div/d01/meta.txt")).unwrap();
+    assert!(meta.contains("A sin el sensor no se reproduce (dos corridas distintas): inconcluso"), "{meta}");
     let meta = std::fs::read_to_string(celda.join("div/bucle-lento/meta.txt")).unwrap();
     assert!(meta.contains("kind: Timeout\n") && meta.contains("antes de terminar; queda el Timeout"), "{meta}");
     let meta = std::fs::read_to_string(celda.join("div/mayor-gira/meta.txt")).unwrap();

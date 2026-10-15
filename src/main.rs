@@ -2543,7 +2543,8 @@ fn compare_and_report(
     if let Some(c) = b.tope() {
         pasos_tope.push(format!("B (el minificado) paso el tope de node ({c}): {}", b.tope_mensaje().unwrap_or_default()));
     }
-    let (mut a, mut b, a_cache) = match confirm(ctx, runner, stats, rel, original, minified, a, a_cached, b, &mut pasos_tope) {
+    let sin_sensor_mayor;
+    let (mut a, mut b, a_cache, a_sin_sensor) = match confirm(ctx, runner, stats, rel, original, minified, a, a_cached, b, &mut pasos_tope) {
         Confirmed::Same { corto: true } => return descarte_corto(ctx, stats, rel, elapsed_a),
         Confirmed::Same { corto: false } => return false,
         Confirmed::Nondeterministic => return true,
@@ -2555,6 +2556,13 @@ fn compare_and_report(
         }
         Confirmed::Divergence(ab) => *ab,
     };
+    // 11.2f (rev-b11-final-A vuelta 3, V3-H1): A y B quedaron sin el sensor (la repeticion de B con
+    // topes mayores y A sin el sensor, `confirm`): los re-chequeos corren sin el sensor, como en I3,
+    // para no mezclar la diferencia del sensor con la del bug.
+    if a_sin_sensor {
+        sin_sensor_mayor = runner.sin_sensor();
+        runner = &sin_sensor_mayor;
+    }
     // 7.4 (Fase R I3): un positivo que atrapa mas de MAX_PAUSAS excepciones iba a div/: sin
     // el sensor, A no tiene la violacion atrapada y el re-chequeo de violaciones no corria.
     // A y B (ya confirmados, sin el sensor) heredan lo que el sensor ubico antes de
@@ -2669,7 +2677,9 @@ enum Confirmed {
     Nondeterministic,
     /// La divergencia sigue con este A y este B. 11.2c: y que paso con la cache de A (`a_cache:` de
     /// meta.txt).
-    Divergence(Box<(runner::Exec, runner::Exec, &'static str)>),
+    /// 11.2f: el `bool`, si A y B quedaron sin el sensor (la repeticion de B con topes mayores y A
+    /// sin el sensor): el resto del caso corre con el runner sin el sensor.
+    Divergence(Box<(runner::Exec, runner::Exec, &'static str, bool)>),
     /// 11.2d (rev-b11-final B-F2): difuzz se esta cerrando (primera SIGINT/SIGTERM) y faltaba la
     /// repeticion de B con los topes mayores: el caso no se clasifica (descarte `interrumpido`).
     Abandonado,
@@ -2820,15 +2830,34 @@ fn confirm(
     // Si el programa nota el sensor (I3), la diferencia puede ser solo esa: con A ya confirmado, A sin
     // el sensor (fuera del turno, con los topes de siempre; si los pasa, `recursos/`, como cualquier
     // A) y, si da lo mismo que B, iguales.
+    // 11.2f (rev-b11-final-B vuelta 3, V3-H1): `oracle::compare` no exige que A haya terminado (la
+    // precondicion del oraculo lo garantiza para el A del caso, no para esta corrida nueva): A sin el
+    // sensor cuenta solo si termino solo, y dos veces igual (rev-b11-final-A: una corrida sola no dice
+    // que sea determinista). Si no, inconcluso: la divergencia sigue con el A con el sensor. 11.2f
+    // (rev-b11-final-A vuelta 3, V3-H1): si A sin el sensor termino y tambien difiere de B, es el A de
+    // la divergencia (A y B sin el sensor, como I3) y el resto del caso corre sin el sensor.
+    let mut sin_sensor = false;
     if b_mayor_sin_sensor && runner.con_sensor() {
         let sin = runner.sin_sensor();
+        let termino = |e: &runner::Exec| e.ok_with_output() || e.ok_silent();
         let a_sin = como_a(QUIEN_A_SIN_SENSOR_MAYOR, || sin.run(original));
-        if !diverges(&a_sin, &b) {
-            pasos.push("A sin el sensor da lo mismo que la repeticion de B (sin el sensor): la diferencia era el sensor -> iguales".into());
-            return Confirmed::Same { corto: corto_por_sandbox(runner, &a_sin, &b) };
+        if !termino(&a_sin) {
+            pasos.push(format!("A sin el sensor no termino solo ({:?}): inconcluso, la divergencia sigue con el A con el sensor", a_sin.status));
+        } else {
+            let a_sin2 = como_a(QUIEN_A_SIN_SENSOR_MAYOR, || sin.run(original));
+            if !termino(&a_sin2) || !same_exec(&a_sin, &a_sin2) {
+                pasos.push("A sin el sensor no se reproduce (dos corridas distintas): inconcluso, la divergencia sigue con el A con el sensor".into());
+            } else if !diverges(&a_sin, &b) {
+                pasos.push("A sin el sensor (dos veces igual) da lo mismo que la repeticion de B (sin el sensor): la diferencia era el sensor -> iguales".into());
+                return Confirmed::Same { corto: corto_por_sandbox(runner, &a_sin, &b) };
+            } else {
+                pasos.push("A sin el sensor (dos veces igual) tambien difiere de la repeticion de B: A y B se comparan sin el sensor (como I3), y el resto del caso corre sin el".into());
+                a = a_sin;
+                sin_sensor = true;
+            }
         }
     }
-    Confirmed::Divergence(Box::new((a, b, a_cache)))
+    Confirmed::Divergence(Box::new((a, b, a_cache, sin_sensor)))
 }
 
 /// 11.2c (rev-b11-2b-B N1 = A-H6): turno de la repeticion de B con los topes mayores (`confirm`): una a
