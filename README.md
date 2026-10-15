@@ -1059,9 +1059,10 @@ Límites que quedan (11.2b, de las revisiones de 11b):
   topes habría sido `Timeout` (un bucle que imprime) o `Stdout` (un B que escribe o reserva mucho y
   termina): la salida cortada no se compara. Si con los topes mayores termina, el kind es el de
   siempre.
-- `node --check` (el chequeo de que node acepta un texto) corre sin topes ni `PR_SET_PDEATHSIG`, y
-  la prueba de `setpriv` al arrancar (`setpriv --pdeathsig KILL -- node --version`) corre sin
-  topes: son cortos y no ejecutan el programa.
+- `node --check` (el chequeo de que node acepta un texto) y `node --version` (la versión que va a la
+  caché y a la corrida) corren sin topes ni `PR_SET_PDEATHSIG`, y la prueba de `setpriv` (`setpriv
+  --pdeathsig KILL -- node --version`, una vez, en la primera ejecución de node sin `--sandbox`)
+  corre sin topes: son cortos y no ejecutan el programa.
 - Con setpriv queda una ventana de microsegundos entre su exec y su `prctl` en la que, si difuzz
   muere, node no recibe la señal.
 - Un caso en `recursos/` por memoria no se reproduce corriéndolo suelto con los defaults (el tope
