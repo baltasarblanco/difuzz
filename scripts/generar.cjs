@@ -165,8 +165,16 @@ class Gen {
       case 0: return `${this.paren(s())}.${this.pick(['charAt', 'charCodeAt', 'codePointAt', 'at'])}(${n()})`;
       // t-gen E/F: indexOf con no-ASCII (offset en bytes), posiciones >= 2**31, y
       // substring/slice con fin NaN/undefined se pliegan mal; sin --con-conocidos esos
-      // casos usan receptor ASCII literal y posiciones literales finitas.
-      case 1: return `${CONOCIDOS ? this.paren(s()) : this.sAscii()}.${this.pick(['indexOf', 'lastIndexOf', 'includes', 'startsWith', 'endsWith'])}(${s()}${CONOCIDOS || this.chance(0.5) ? '' : `, ${this.nFin()}`})`;
+      // casos usan receptor ASCII literal y posiciones literales finitas. G: una posicion mas alla
+      // del largo del receptor en indexOf/lastIndexOf (`("").indexOf((""), (2))` se pliega a 2, node
+      // da 0); sin --con-conocidos esas dos toman solo las posiciones de nFin que no pasan el largo
+      // de ningun receptor de sAscii (las que truncan a <= 0). Mismo sorteo: la tanda cambia solo ahi.
+      case 1: {
+        const rec = CONOCIDOS ? this.paren(s()) : this.sAscii();
+        const m = this.pick(['indexOf', 'lastIndexOf', 'includes', 'startsWith', 'endsWith']);
+        const pos = () => (m === 'indexOf' || m === 'lastIndexOf' ? `(${this.pick(['0', '-1', '-0', '0.5', '-2.5', '1e-7'])})` : this.nFin());
+        return `${rec}.${m}(${s()}${CONOCIDOS || this.chance(0.5) ? '' : `, ${pos()}`})`;
+      }
       case 2: return `${CONOCIDOS ? this.paren(s()) : this.sAscii()}.${this.pick(['slice', 'substring', 'substr'])}(${CONOCIDOS ? n() : this.nFin()}${this.chance(0.5) ? `, ${CONOCIDOS ? n() : this.nFin()}` : ''})`;
       case 3: return `${this.paren(s())}.${this.pick(['toUpperCase', 'toLowerCase', 'trim', 'trimStart', 'trimEnd'])}()`;
       case 4: return `${this.paren(s())}.${this.pick(['replace', 'replaceAll'])}(${this.pick(['"a"', '"0"', '""', '"1"'])}, ${s()})`;
