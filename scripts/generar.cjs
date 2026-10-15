@@ -153,7 +153,8 @@ class Gen {
   }
   paren(s) { return /^[\w.$"`]+$/.test(s) ? s : `(${s})`; }
   sAscii() { return `(${this.pick(['""', '"a"', '"0"', '"abc"', '"a,b"', '" 12 "', '"NaN"', '"1e3"', '"p"'])})`; }
-  nFin() { return `(${this.pick(['0', '1', '2', '3', '-1', '-0', '0.5', '-2.5', '10', '1e-7'])})`; }
+  // max: solo las que truncan a <= max (sin max, todas: el mismo pick de siempre)
+  nFin(max = Infinity) { return `(${this.pick(['0', '1', '2', '3', '-1', '-0', '0.5', '-2.5', '10', '1e-7'].filter((p) => Math.trunc(Number(p)) <= max))})`; }
   // llamadas a metodos conocidos que oxc pliega (replace_known_methods / fold_constants)
   known(sc, d) {
     const e = () => this.expr(sc, d);
@@ -165,14 +166,15 @@ class Gen {
       case 0: return `${this.paren(s())}.${this.pick(['charAt', 'charCodeAt', 'codePointAt', 'at'])}(${n()})`;
       // t-gen E/F: indexOf con no-ASCII (offset en bytes), posiciones >= 2**31, y
       // substring/slice con fin NaN/undefined se pliegan mal; sin --con-conocidos esos
-      // casos usan receptor ASCII literal y posiciones literales finitas. G: una posicion mas alla
-      // del largo del receptor en indexOf/lastIndexOf (`("").indexOf((""), (2))` se pliega a 2, node
-      // da 0); sin --con-conocidos esas dos toman solo las posiciones de nFin que no pasan el largo
-      // de ningun receptor de sAscii (las que truncan a <= 0). Mismo sorteo: la tanda cambia solo ahi.
+      // casos usan receptor ASCII literal y posiciones literales finitas. G: en indexOf, con
+      // busqueda "" y una posicion mas alla del largo del receptor (`("").indexOf((""), (2))` se
+      // pliega a 2, node da 0); sin --con-conocidos indexOf toma solo las posiciones de nFin que no
+      // pasan el largo de su receptor (lastIndexOf no diverge: nFin entera). Un solo pick, como antes.
       case 1: {
         const rec = CONOCIDOS ? this.paren(s()) : this.sAscii();
         const m = this.pick(['indexOf', 'lastIndexOf', 'includes', 'startsWith', 'endsWith']);
-        const pos = () => (m === 'indexOf' || m === 'lastIndexOf' ? `(${this.pick(['0', '-1', '-0', '0.5', '-2.5', '1e-7'])})` : this.nFin());
+        // pos() solo corre sin --con-conocidos: rec es `("...")` de sAscii
+        const pos = () => (m === 'indexOf' ? this.nFin(JSON.parse(rec.slice(1, -1)).length) : this.nFin());
         return `${rec}.${m}(${s()}${CONOCIDOS || this.chance(0.5) ? '' : `, ${pos()}`})`;
       }
       case 2: return `${CONOCIDOS ? this.paren(s()) : this.sAscii()}.${this.pick(['slice', 'substring', 'substr'])}(${CONOCIDOS ? n() : this.nFin()}${this.chance(0.5) ? `, ${CONOCIDOS ? n() : this.nFin()}` : ''})`;
