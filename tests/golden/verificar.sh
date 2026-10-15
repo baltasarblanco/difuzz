@@ -166,7 +166,7 @@ done
 # b2-int: RECURSOS (b2-b) es un destino terminal como PANICS (recursos/), no un contador ortogonal.
 # Los descartes con causa `analisis` (b2-c) ya son filas de descartes.tsv. Los contadores de c y d
 # (casos_con_fallo, analisis_swc, bloques) van en lineas aparte y no entran. Los de asserts/ van en
-# la linea "oraculo (R1-H05):" y no entran (se cuentan dentro de iguales).
+# la linea "oraculo:" y no entran (se cuentan dentro de iguales).
 for cel in "${celdas[@]}"; do
   s=$(rg '^total=' "$out/$cel.log")
   v() { rg -o -r '$1' "(?:^| )$1=([0-9]+)" <<< "$s" | rg -v '^$' | { read -r x; echo "${x:-0}"; }; }

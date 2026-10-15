@@ -410,7 +410,7 @@ en el mismo caso nunca se pierde por el chequeo, y la identidad de `total=` no c
 opción, una línea más en las stats (y en `CORRIDA.txt`):
 
 ```
-crudo (10.1): comparados=N identicos=N iguales=N CODEGEN=N contenido=N no_determinista=N timeout=N runner=N | cache_hits=N
+crudo: comparados=N identicos=N iguales=N CODEGEN=N contenido=N no_determinista=N timeout=N runner=N | cache_hits=N
 ```
 
 `comparados = identicos + iguales + CODEGEN + contenido + no_determinista + timeout + runner`

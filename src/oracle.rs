@@ -682,7 +682,7 @@ analisis_de_difuzz_fallo:
             )
         };
         let meta = format!(
-            "case: {}\nkind: {kind:?}\nconfig: {}\nnota: el texto crudo y el original que imprime el backend (A) dan otra salida en node, y se repite: el parser o el codegen del backend (o su cadena antes del minificador) cambiaron la semantica. No es una divergencia del minificador: A y B salen del mismo programa parseado y cargan el cambio igual (10.1, --crudo)\npasos: {pasos}\n\ncrudo: {:?} en {:?}\noriginal: {:?} en {:?}\n{}\nrepro_crudo: {}\nrepro_original: {}\n",
+            "case: {}\nkind: {kind:?}\nconfig: {}\nnota: el texto crudo y el original que imprime el backend (A) dan otra salida en node, y se repite: el parser o el codegen del backend (o su cadena antes del minificador) cambiaron la semantica. No es una divergencia del minificador: A y B salen del mismo programa parseado y cargan el cambio igual (--crudo)\npasos: {pasos}\n\ncrudo: {:?} en {:?}\noriginal: {:?} en {:?}\n{}\nrepro_crudo: {}\nrepro_original: {}\n",
             case.display(),
             self.config_name,
             r.status,

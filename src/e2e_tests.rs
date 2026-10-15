@@ -140,7 +140,7 @@ const TRAZA_CAUSA: &str = "\nclasificacion:\n  contenido: Explica (A depende del
 const TRAZA_INVALIDO: &str = "\nclasificacion:\n  profundidad: no aplica (A con mas pila da lo mismo, o la corrida honda fallo)\n  asunciones: sensor, asuncion: oxc: Coercion Methods Are Pure\n  minificado_invalido: si (node --check rechaza el minificado y acepta el original): sin flags, ninguna\n  decision: div/\n";
 
 /// 11.4: la traza de un B muerto por senal.
-const TRAZA_SENAL: &str = "\nclasificacion:\n  sensor: A con el sensor, B sin el sensor (sensor_caido: senal o timeout con el) -> A y B comparados sin el sensor (I3)\n  profundidad: no aplica (A con mas pila da lo mismo, o la corrida honda fallo)\n  asunciones: ninguna (ni flag de la tabla, ni ruta, ni backlog)\n  decision: div/\n";
+const TRAZA_SENAL: &str = "\nclasificacion:\n  sensor: A con el sensor, B sin el sensor (sensor_caido: senal o timeout con el) -> A y B comparados sin el sensor\n  profundidad: no aplica (A con mas pila da lo mismo, o la corrida honda fallo)\n  asunciones: ninguna (ni flag de la tabla, ni ruta, ni backlog)\n  decision: div/\n";
 
 /// 11.3: las trazas del re-chequeo de nombres de core_defaults (oxc de verdad).
 const TRAZA_NOMBRES_EXPLICA: &str = "\nclasificacion:\n  profundidad: no aplica (A con mas pila da lo mismo, o la corrida honda fallo)\n  nombres: Explica (con los nombres preservados la divergencia desaparece)\n  asunciones: sensor, asuncion: oxc: No Reliance on Function.prototype.name (keep_names apagado en core_defaults)\n  minificado_invalido: no (node --check acepta el minificado)\n  sintoma: el de known-sintomas.tsv (o primero registrado)\n  decision: known/ (sensor, asuncion: oxc: No Reliance on Function.prototype.name (keep_names apagado en core_defaults))\n";
@@ -376,11 +376,11 @@ fn tabla() -> Vec<Fila> {
             back: Back::Rompe("41)", "41"),
             args: &[],
             destino: Destino::Div,
-            // La nota trae tambien la del analisis (R1-H13): el minificado no parsea.
+            // La nota trae tambien la del analisis (R1-H13: el parser de SWC): el minificado no parsea.
             meta: &[
                 "kind: ThrowNew\n",
                 "\nknown: no\n",
-                "\nnota: analisis con el parser de SWC (R1-H13): minificado (lint): SWC no lo parsea, sin analizar | node --check rechaza el minificado (y acepta el original): ninguna asuncion lo explica\n",
+                "\nnota: analisis con el parser de SWC: minificado (lint): SWC no lo parsea, sin analizar | node --check rechaza el minificado (y acepta el original): ninguna asuncion lo explica\n",
                 "\nflags_a: coercion,minificado_invalido\n",
                 TRAZA_INVALIDO,
             ],

@@ -68,7 +68,7 @@ uso: difuzz <corpus_dir> [--out DIR] [--minifier M] [--config C] [--forma F] [--
 
   corpus_dir     raiz con archivos input.js (p. ej. crates/swc_ecma_minifier/tests)
   --out DIR      donde guardar hallazgos, en DIR/<celda>/ (default: ./difuzz-out)
-                 R1-H09: celdas distintas no se pisan; DIR/<celda>/CORRIDA.txt dice si la corrida termino
+                 celdas distintas no se pisan; DIR/<celda>/CORRIDA.txt dice si la corrida termino
   --minifier M   swc | oxc                          (default: oxc)
   --config C     carril_a | core_defaults           (default: carril_a)
   --forma F      tal_cual | en_funcion              (default: tal_cual)
@@ -80,10 +80,10 @@ uso: difuzz <corpus_dir> [--out DIR] [--minifier M] [--config C] [--forma F] [--
   --invocar      el epilogo observador ademas llama a las funciones observadas
   --mutaciones N variantes por caso (borrar sentencias, perturbar literales), solo
                  por la pasada cruda + lint                (default: 0)
-  --mutaciones-extra N  M33: ademas, N variantes de los operadores nuevos (literal a
+  --mutaciones-extra N  ademas, N variantes de los operadores nuevos (literal a
                  negativo, envolver, duplicar, if, var/let/const, \"use strict\"),
                  numeradas despues de las clasicas         (default: 0)
-  --stubs        M30: un import/require que no resuelve pasa a un modulo stub inerte
+  --stubs        un import/require que no resuelve pasa a un modulo stub inerte
                  (igual en A y B) en vez de descartar el caso como enlace (default: off)
   --sandbox      node corre con su modelo de permisos (--permission de node 24): lee solo el
                  preload, el programa y su directorio de trabajo, escribe solo en ese directorio,
@@ -94,12 +94,12 @@ uso: difuzz <corpus_dir> [--out DIR] [--minifier M] [--config C] [--forma F] [--
   --sandbox-red  --sandbox mas namespaces de Linux sin root (usuario, red, montajes): sin red
                  (solo un loopback propio), /run tapado y los sockets unix del sistema tapados.
                  Solo Linux con user namespaces; si no se puede armar, sale con 1 (default: off)
-  --crudo        10.1: ademas corre el texto crudo de cada caso (lo que lee el backend, antes de
+  --crudo        ademas corre el texto crudo de cada caso (lo que lee el backend, antes de
                  parsearlo e imprimirlo) con el mismo runner que el original y lo compara con el
                  original impreso (A): status y stdout, sin posiciones de stack. Si difieren y se
                  repite, el caso va tambien a codegen/ (un bug del parser o del codegen: A y B lo
                  cargan igual, el oraculo no lo ve), ortogonal como lint/. Solo la pasada cruda del
-                 caso base (no las observadas ni las variantes). Una linea `crudo (10.1):` en las
+                 caso base (no las observadas ni las variantes). Una linea `crudo:` en las
                  stats. Cuesta una ejecucion de node mas por caso (cacheable) (default: off)
   --cache DIR    cache de la ejecucion del original, compartible entre celdas (default: <out>/cache-a)
   --no-cache     no leer ni escribir la cache
@@ -116,18 +116,18 @@ uso: difuzz <corpus_dir> [--out DIR] [--minifier M] [--config C] [--forma F] [--
   --mem-hijo MiB presupuesto de RSS de los hijos de cada worker: 3/4 para sus minificadores,
                  sumados, y 1/4 para su hijo de analisis (default: MemTotal/2 / workers, entre
                  256 MiB y 4 GiB). El hijo de analisis que se pasa es un fallo del analisis, no recursos/
-  --mem-node MiB 11.5: tope de RSS de cada ejecucion de node (A, B, confirmaciones, re-chequeos), medido
+  --mem-node MiB tope de RSS de cada ejecucion de node (A, B, confirmaciones, re-chequeos), medido
                  cada ~10 ms mientras corre; un pico justo antes de terminar puede no verse (default:
                  la misma cuenta que --mem-hijo sin el, MemTotal/2 / workers entre 256 MiB y 4 GiB;
                  --mem-hijo no lo cambia).
-                 La ejecucion que lo pasa muere y lo que imprimio no se compara. 11.2b: si fue el
+                 La ejecucion que lo pasa muere y lo que imprimio no se compara. Si fue el
                  original, el caso (o la variante) va a recursos/ (causa node_memoria); si fue el
                  minificado, se repite con topes mayores y, si los vuelve a pasar, div/ ExitStatus;
                  si fue un re-chequeo o una confirmacion de A, ese paso queda Inconcluso
-  --max-salida MiB 11.7: tope de lo que difuzz junta de cada ejecucion de node, stdout mas stderr
+  --max-salida MiB tope de lo que difuzz junta de cada ejecucion de node, stdout mas stderr
                  (default: 16). Como --mem-node (causa node_salida): una salida cortada no se compara
 
-  oraculo sin debug assertions (R1-H05): este binario lleva debug assertions (Cargo.toml) y el
+  oraculo sin debug assertions: este binario lleva debug assertions (Cargo.toml) y el
   paquete npm del minifier no. Ante un panic, el caso se re-minifica con el mismo difuzz compilado
   sin ellas; si ese minifica, el caso se compara con su minificado (div/ con la nota
   solo_debug_assertions, o asserts/ si no diverge); si tambien falla, va a panic/.
@@ -140,18 +140,18 @@ uso: difuzz <corpus_dir> [--out DIR] [--minifier M] [--config C] [--forma F] [--
                  --help u otra opcion de la linea uso: es un error de uso (2); para una ruta con
                  ese nombre, ./-h
 
-  salida (R2-H06): cada caso termina en un destino, div/ known/ panic/ recursos/ (un directorio por
+  salida: cada caso termina en un destino, div/ known/ panic/ recursos/ (un directorio por
   caso), en iguales (sin archivo) o con una fila en descartes.tsv (caso, causa, elapsed_ms), incluidos
   mudo_sin_bindings, ilegible y panic_del_fuzzer. lint/, asserts/ y codegen/ (--crudo) son ortogonales
   (el caso cuenta tambien donde termino). Sin --mutaciones (las variantes caso__mutK tambien dejan filas):
     total = iguales + DIVERGENCIAS + conocidas + PANICS + RECURSOS + filas(descartes.tsv)
   (un panic del fuzzer despues de contar el caso lo cuenta dos veces: panics_del_fuzzer= lo dice)
 
-  codigos de salida (R2-H09):
+  codigos de salida:
     0    corrida entera (con o sin hallazgos; CORRIDA.txt: completa); --cruce, --emitir y --help sin error
     1    error de entrada o de entorno: corpus inexistente, que no es directorio o sin input.js; --out
          que no se puede escribir; escrituras perdidas o casos sin contar (CORRIDA.txt: incompleta);
-         el oraculo reescrito en el lugar a mitad de corrida (R1-H18/M3; CORRIDA.txt: incompleta, con
+         el oraculo reescrito en el lugar a mitad de corrida (CORRIDA.txt: incompleta, con
          binario_cambiado; con /proc, reemplazar difuzz o el oraculo por otro archivo no corta la
          corrida: se siguen lanzando los del arranque; sin /proc se vigilan por ruta y cualquier
          cambio corta); --cruce sin indices; --emitir que no puede leer o minificar; stdout que
@@ -159,8 +159,8 @@ uso: difuzz <corpus_dir> [--out DIR] [--minifier M] [--config C] [--forma F] [--
     2    error de uso: opcion desconocida, valor o combinacion invalida (con este texto en stderr)
     130  interrumpida por SIGINT o SIGTERM (CORRIDA.txt: interrumpida); una segunda senal sale en el
          acto, mata los node en curso y deja CORRIDA.txt en incompleta
-    ni un pipe cerrado en stdout (`| head -1`) ni un error al escribir en stderr cambian el codigo
-    (9.4): lo que no se pudo imprimir se pierde y la corrida sigue (sus resultados estan en --out)";
+    ni un pipe cerrado en stdout (`| head -1`) ni un error al escribir en stderr cambian el codigo:
+    lo que no se pudo imprimir se pierde y la corrida sigue (sus resultados estan en --out)";
 
 /// 9.4: escribe `t` en stdout sin panic (el `print!` de std lo hace si escribir falla). Un
 /// pipe que se cerro (`| head -1`, EPIPE) no es un error: el que lee no quiere mas (como
@@ -707,7 +707,7 @@ impl CrudoStats {
 
     fn line(&self) -> String {
         format!(
-            "crudo (10.1): comparados={} identicos={} iguales={} CODEGEN={} contenido={} no_determinista={} timeout={} runner={} | cache_hits={}",
+            "crudo: comparados={} identicos={} iguales={} CODEGEN={} contenido={} no_determinista={} timeout={} runner={} | cache_hits={}",
             self.comparados, self.identicos, self.iguales, self.codegen, self.contenido, self.no_determinista, self.timeout, self.runner, self.cache_hits
         )
     }
@@ -1217,22 +1217,22 @@ fn main() {
         linea!("{}", stats.mutaciones.line_extra());
     }
     if cli.invocar {
-        linea!("invocar (M31): reintentos_sin_invocar={}", stats.invocar_retry);
+        linea!("invocar: reintentos_sin_invocar={}", stats.invocar_retry);
     }
     // R1-H13 / R1-H14: en una linea aparte (no cambia la de `total=`).
     linea!(
-        "analisis_swc (R1-H13): recuperados={} perdidos={} lint_sin_analisis={} | bloques (R1-H14): pasadas={} sin_epilogo_normal={} sin_salida={}",
+        "analisis_swc: recuperados={} perdidos={} lint_sin_analisis={} | bloques: pasadas={} sin_epilogo_normal={} sin_salida={}",
         stats.analisis_recuperado, stats.analisis_perdido, stats.lint_sin_analisis, stats.bloques, stats.bloques_unica, stats.bloques_sin_salida
     );
     if subproceso::hay_oraculo() || stats.solo_asserts > 0 {
-        linea!("oraculo (R1-H05): solo_asserts={} sin_divergencia={}", stats.solo_asserts, stats.solo_asserts_sin_div);
+        linea!("oraculo: solo_asserts={} sin_divergencia={}", stats.solo_asserts, stats.solo_asserts_sin_div);
     }
     if stats.fallos_analisis > 0 {
-        linea!("analisis de difuzz (A6/R1-H12): casos_con_fallo={} descartados={}", stats.fallos_analisis, stats.descartes_analisis);
+        linea!("analisis de difuzz: casos_con_fallo={} descartados={}", stats.fallos_analisis, stats.descartes_analisis);
     }
     // M1 (revision de los bloques 4-6): en una linea aparte, solo si paso (no cambia la de `total=`).
     if stats.sensor_repetidos > 0 {
-        linea!("sensor (I3): comparados_sin_sensor={}", stats.sensor_repetidos);
+        linea!("sensor: comparados_sin_sensor={}", stats.sensor_repetidos);
     }
     // b7-8: idem.
     if stats.sensor_omitidos > 0 {
@@ -1302,7 +1302,7 @@ fn main() {
     }
     // R1-H18 (b6-infra): antes que el "incompleta" generico, para que el mensaje diga por que.
     if let Some(c) = cambiado {
-        eprintln!("corrida cortada (R1-H18): {c}; {} de {total} casos, el indice anterior quedo intacto", stats.total);
+        eprintln!("corrida cortada: {c}; {} de {total} casos, el indice anterior quedo intacto", stats.total);
         drop(preload);
         std::process::exit(SALIDA_ERROR);
     }
@@ -2083,7 +2083,7 @@ fn pasada_bloques(
     let (original, minified, static_flags) = match minify::prepare(&instrumented, cfg) {
         minify::Outcome::Ok { original, minified, static_flags, analisis, .. } => {
             let mut notas: Vec<String> = analisis.nota().into_iter().collect();
-            notas.push("pasada de bloques (R1-H14): el epilogo observa solo los bindings en bloques (var, funciones de Anexo B)".into());
+            notas.push("pasada de bloques: el epilogo observa solo los bindings en bloques (var, funciones de Anexo B)".into());
             stats.nota_pasada = Some(notas.join(" | "));
             (original, minified, static_flags)
         }
@@ -2361,7 +2361,7 @@ fn toca_sandbox(runner: &runner::Runner, a: &runner::Exec, minified: &str) -> To
 }
 
 /// 2c: la nota de meta.txt de una pasada en que solo el original toco el sandbox.
-const NOTA_SOLO_A: &str = "sandbox: solo el original toco el sandbox (el minificado no): se compara (2c)";
+const NOTA_SOLO_A: &str = "sandbox: solo el original toco el sandbox (el minificado no): se compara";
 
 /// 2c: la nota de la pasada mas la de solo-A. 7.7 (MENOR 5): una sola vez.
 fn con_nota_solo_a(nota: Option<String>) -> String {
@@ -2387,7 +2387,7 @@ fn sin_nota_solo_a(nota: Option<String>) -> Option<String> {
 
 /// 7.9: la nota de meta.txt de una pasada en que el original y el minificado tocaron el
 /// sandbox.
-const NOTA_AMBOS: &str = "sandbox: el original y el minificado tocaron el sandbox: se compara (7.9)";
+const NOTA_AMBOS: &str = "sandbox: el original y el minificado tocaron el sandbox: se compara";
 
 /// 7.9: la nota de la pasada mas la de A-y-B, una sola vez.
 fn con_nota_ambos(nota: Option<String>) -> String {
@@ -2535,7 +2535,7 @@ fn compare_and_report(
             match a_i3 {
                 Err(por) => {
                     nota_i3 = Some(format!(
-                        "A {}, B {}: A repetido sin el sensor (I3) {por}: inconcluso, A y B se comparan como estaban (el A del caso, con el sensor)",
+                        "A {}, B {}: A repetido sin el sensor {por}: inconcluso, A y B se comparan como estaban (el A del caso, con el sensor)",
                         lado(da),
                         lado(db)
                     ));
@@ -2551,7 +2551,7 @@ fn compare_and_report(
                     if db != Some(runner::SENSOR_CAIDO) {
                         con_sensor_b = Some(std::mem::replace(&mut b, correr_b(runner, minified)));
                     }
-                    paso_sensor = Some(format!("A {}, B {} -> A y B comparados sin el sensor (I3)", lado(da), lado(db)));
+                    paso_sensor = Some(format!("A {}, B {} -> A y B comparados sin el sensor", lado(da), lado(db)));
                 }
             }
         }
@@ -2610,7 +2610,7 @@ fn compare_and_report(
         if !heredadas_a.is_empty() || !heredadas_b.is_empty() {
             let lista = |v: &[String]| if v.is_empty() { "ninguna".to_string() } else { v.join(", ") };
             p.push_str(&format!(
-                "; violaciones que vio el sensor (7.4): A {}, B {}",
+                "; violaciones que vio el sensor: A {}, B {}",
                 lista(&heredadas_a),
                 lista(&heredadas_b)
             ));
@@ -2673,7 +2673,7 @@ fn compare_and_report(
             if oracle::solo_nombres_de_inspect(&a, &b) {
                 traza.anteponer(
                     "nombres_inspect",
-                    "A y B difieren solo en nombres que imprime util.inspect ([Function: x], [class X]); la celda promete keep_names (9.1)",
+                    "A y B difieren solo en nombres que imprime util.inspect ([Function: x], [class X]); la celda promete keep_names",
                 );
             }
             if why.is_some() {
@@ -2879,7 +2879,7 @@ fn confirm(
                 // deja el paso inconcluso (no recursos/). Si no se reproduce, se repite el A del caso
                 // (con el sensor, `runner_con`): si tampoco se reproduce, el programa es no determinista
                 // (como siempre); si se reproduce, inconcluso y la divergencia sigue.
-                if let Some(a2) = auxiliar(pasos, "A otra vez (el de I3, sin el sensor)", SIGUE_PAR_I3, || runner.run(original)) {
+                if let Some(a2) = auxiliar(pasos, "A otra vez (el auxiliar, sin el sensor)", SIGUE_PAR_I3, || runner.run(original)) {
                     if !matches!(a2.status, Status::Failed(_)) && !same_exec(&a2, &a) {
                         let a3 = como_a(QUIEN_A_OTRA_VEZ, || runner_con.run(original));
                         if !matches!(a3.status, Status::Failed(_)) && !same_exec(&a3, del_caso) {
@@ -2901,7 +2901,7 @@ fn confirm(
                             }
                         }
                         pasos.push(
-                            "A otra vez (el de I3, sin el sensor) no se reproduce y el A del caso (con el sensor) si: inconcluso, la divergencia sigue con el par de I3"
+                            "A otra vez (el auxiliar, sin el sensor) no se reproduce y el A del caso (con el sensor) si: inconcluso, la divergencia sigue con el par de A y B sin el sensor"
                                 .into(),
                         );
                     }
@@ -2964,7 +2964,7 @@ fn confirm(
                 pasos.push("A sin el sensor (dos veces igual) da lo mismo que la repeticion de B (sin el sensor): la diferencia era el sensor -> iguales".into());
                 return Confirmed::Same { corto: corto_por_sandbox(runner, &a_sin, &b) };
             } else {
-                pasos.push("A sin el sensor (dos veces igual) tambien difiere de la repeticion de B: A y B se comparan sin el sensor (como I3), y el resto del caso corre sin el".into());
+                pasos.push("A sin el sensor (dos veces igual) tambien difiere de la repeticion de B: A y B se comparan sin el sensor, y el resto del caso corre sin el".into());
                 a = a_sin;
                 sin_sensor = true;
             }
@@ -3000,7 +3000,7 @@ impl OrigenA<'_> {
 /// tope de node: inconcluso" y devuelve `None`; quien la llamo sigue con lo que tenia.
 /// 11.2k: textos de `auxiliar` para con que sigue la divergencia.
 const SIGUE_A_CON_SENSOR: &str = "con el A con el sensor";
-const SIGUE_PAR_I3: &str = "con el par de I3 (A y B sin el sensor)";
+const SIGUE_PAR_I3: &str = "con el par de A y B sin el sensor";
 
 /// 11.2k: `sigue`, con que par sigue la divergencia (para la traza).
 fn auxiliar(pasos: &mut Vec<String>, cual: &str, sigue: &str, f: impl FnOnce() -> runner::Exec) -> Option<runner::Exec> {
@@ -3109,7 +3109,7 @@ impl MutStats {
 
     /// M33: aparte, para no cambiar la linea de siempre.
     fn line_extra(&self) -> String {
-        format!("mutaciones extra (M33): variantes={} | descartadas: tdz={}", self.extra, self.tdz)
+        format!("mutaciones extra: variantes={} | descartadas: tdz={}", self.extra, self.tdz)
     }
 
     fn line(&self) -> String {
@@ -3538,7 +3538,7 @@ mod tests {
         assert_eq!((st.sensor_repetidos, st.divergences), (2, 1));
         let meta = std::fs::read_to_string(d.join("div/bug/meta.txt")).unwrap();
         assert!(
-            meta.contains("\nclasificacion:\n  sensor: A con el sensor a medias (sensor_tope: MAX_PAUSAS), B con el sensor -> A y B comparados sin el sensor (I3)\n"),
+            meta.contains("\nclasificacion:\n  sensor: A con el sensor a medias (sensor_tope: MAX_PAUSAS), B con el sensor -> A y B comparados sin el sensor\n"),
             "{meta}"
         );
         // Sin sensor por politica (swc) no hay nada que repetir.
@@ -3768,7 +3768,7 @@ mod tests {
         observe_epilogue(&ctx, &r, &cfg, None, &cli, &mut st, Path::new("x/input.js"), raw, false, false);
         assert_eq!((st.observed, st.bloques, st.bloques_unica, st.divergences, st.same), (1, 1, 0, 1, 0));
         let meta = std::fs::read_to_string(d.join("div/x/meta.txt")).unwrap();
-        assert!(meta.contains("pasada de bloques (R1-H14)"), "{meta}");
+        assert!(meta.contains("pasada de bloques: "), "{meta}");
         // Solo en bloques: antes mudos_sin_bindings, ahora observado.
         let mut st = Stats::default();
         observe_epilogue(&ctx, &r, &cfg, None, &cli, &mut st, Path::new("y/input.js"), "{ var b = 2; }\n", false, false);

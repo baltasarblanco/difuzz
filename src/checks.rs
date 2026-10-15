@@ -587,7 +587,7 @@ impl Analisis {
         .collect();
         // 10.2b (A-H8 de la revision A del bloque 10): si lo unico que no fue limpio es un fallo
         // de difuzz, la nota no habla del parser de SWC.
-        let cabecera = if self.solo_fallido() { "analisis de difuzz fallido (A6/R1-H12)" } else { "analisis con el parser de SWC (R1-H13)" };
+        let cabecera = if self.solo_fallido() { "analisis de difuzz fallido" } else { "analisis con el parser de SWC" };
         Some(format!("{cabecera}: {}", partes.join("; ")))
     }
 
@@ -746,7 +746,7 @@ mod tests {
         assert!(f.perdido() && !f.lint_valido() && !f.limpio());
         assert_eq!(Analisis::de_codigo(&f.codigo()), Some(f));
         // 10.2b (A-H8): la nota de un fallo no habla del parser de SWC; uno real si.
-        assert!(n.starts_with("analisis de difuzz fallido (A6/R1-H12): ") && f.solo_fallido(), "{n}");
-        assert!(a.nota().unwrap().starts_with("analisis con el parser de SWC (R1-H13): ") && !a.solo_fallido() && !limpio.solo_fallido());
+        assert!(n.starts_with("analisis de difuzz fallido: ") && f.solo_fallido(), "{n}");
+        assert!(a.nota().unwrap().starts_with("analisis con el parser de SWC: ") && !a.solo_fallido() && !limpio.solo_fallido());
     }
 }

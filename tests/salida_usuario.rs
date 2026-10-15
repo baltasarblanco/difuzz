@@ -299,7 +299,7 @@ fn crudo_va_a_codegen_y_sin_la_opcion_nada_cambia() {
     let total = |s: &str| s.lines().find(|l| l.starts_with("total=")).unwrap().to_string();
     assert_eq!(total(&sin), total(&con));
     assert!(!sin.contains("crudo") && !celda_sin.join("codegen").exists(), "{sin}");
-    let linea = con.lines().find(|l| l.starts_with("crudo (10.1): ")).unwrap_or_else(|| panic!("{con}"));
+    let linea = con.lines().find(|l| l.starts_with("crudo: ")).unwrap_or_else(|| panic!("{con}"));
     for (c, n) in [("comparados", 3), ("identicos", 0), ("iguales", 1), ("CODEGEN", 1), ("contenido", 1), ("no_determinista", 0), ("timeout", 0), ("runner", 0)] {
         assert_eq!(campo(linea, c), n, "{c}: {linea}");
     }
@@ -341,7 +341,7 @@ fn crudo_contenido_solo_si_el_contenido_explica() {
     let o = difuzz(&b, &[corpus.to_str().unwrap(), "--out", out.to_str().unwrap(), "--indice", ix.to_str().unwrap(), "--no-cache", "--jobs", "2", "--crudo"]);
     assert_eq!(rc(&o), Some(0), "{}", err(&o));
     let stdout = String::from_utf8_lossy(&o.stdout).into_owned();
-    let linea = stdout.lines().find(|l| l.starts_with("crudo (10.1): ")).unwrap_or_else(|| panic!("{stdout}"));
+    let linea = stdout.lines().find(|l| l.starts_with("crudo: ")).unwrap_or_else(|| panic!("{stdout}"));
     for (c, n) in [("comparados", 6), ("CODEGEN", 4), ("contenido", 2), ("no_determinista", 0), ("timeout", 0), ("runner", 0)] {
         assert_eq!(campo(linea, c), n, "{c}: {linea}\n{}", err(&o));
     }
@@ -399,7 +399,7 @@ fn crudo_timeout_es_timeout() {
     let o = difuzz(&b, &[corpus.to_str().unwrap(), "--out", out.to_str().unwrap(), "--no-cache", "--jobs", "7", "--timeout-ms", "1500", "--crudo"]);
     assert_eq!(rc(&o), Some(0), "{}", err(&o));
     let stdout = String::from_utf8_lossy(&o.stdout).into_owned();
-    let linea = stdout.lines().find(|l| l.starts_with("crudo (10.1): ")).unwrap_or_else(|| panic!("{stdout}"));
+    let linea = stdout.lines().find(|l| l.starts_with("crudo: ")).unwrap_or_else(|| panic!("{stdout}"));
     for (c, n) in [("comparados", 7), ("iguales", 0), ("CODEGEN", 4), ("contenido", 0), ("no_determinista", 2), ("timeout", 1), ("runner", 0)] {
         assert_eq!(campo(linea, c), n, "{c}: {linea}\n{}", err(&o));
     }
@@ -443,7 +443,7 @@ fn crudo_con_cache_vieja_de_a_sigue_con_el_fresco() {
         let o = difuzz(&b, &[corpus.to_str().unwrap(), "--out", out.to_str().unwrap(), "--cache", cache.to_str().unwrap(), "--jobs", "1", "--crudo"]);
         assert_eq!(rc(&o), Some(0), "{}", err(&o));
         let stdout = String::from_utf8_lossy(&o.stdout).into_owned();
-        let linea = stdout.lines().find(|l| l.starts_with("crudo (10.1): ")).unwrap_or_else(|| panic!("{stdout}")).to_string();
+        let linea = stdout.lines().find(|l| l.starts_with("crudo: ")).unwrap_or_else(|| panic!("{stdout}")).to_string();
         (linea, err(&o), out.join("oxc+carril_a+tal_cual/codegen/c1/meta.txt"))
     };
     let (linea, e, _) = correr("out1");
@@ -919,12 +919,12 @@ fn confirmacion_de_b_con_timeout_largo() {
     }
     for (i, por) in [("i01", "paso un tope de node"), ("i3-tope", "paso un tope de node"), ("i3-colgado", "no termino solo (Timeout)")] {
         let meta = std::fs::read_to_string(celda.join(format!("div/{i}/meta.txt"))).unwrap();
-        assert!(meta.contains(&format!("A repetido sin el sensor (I3) {por}")) && meta.contains("inconcluso, A y B se comparan como estaban"), "{i}: {meta}");
+        assert!(meta.contains(&format!("A repetido sin el sensor {por}")) && meta.contains("inconcluso, A y B se comparan como estaban"), "{i}: {meta}");
     }
     let meta = std::fs::read_to_string(celda.join("div/i3-tope2/meta.txt")).unwrap();
-    assert!(meta.contains("A otra vez (el de I3, sin el sensor) paso un tope de node: inconcluso, la divergencia sigue con el par de I3 (A y B sin el sensor)"), "{meta}");
+    assert!(meta.contains("A otra vez (el auxiliar, sin el sensor) paso un tope de node: inconcluso, la divergencia sigue con el par de A y B sin el sensor"), "{meta}");
     let meta = std::fs::read_to_string(celda.join("div/i3-nodet/meta.txt")).unwrap();
-    assert!(meta.contains("A otra vez (el de I3, sin el sensor) no se reproduce y el A del caso (con el sensor) si: inconcluso"), "{meta}");
+    assert!(meta.contains("A otra vez (el auxiliar, sin el sensor) no se reproduce y el A del caso (con el sensor) si: inconcluso"), "{meta}");
     let descartes = std::fs::read_to_string(celda.join("descartes.tsv")).unwrap();
     assert!(descartes.contains("i3-nodet2/input.js\tno_determinista\t"), "{descartes}");
     let meta = std::fs::read_to_string(celda.join("div/d01/meta.txt")).unwrap();
@@ -1057,7 +1057,7 @@ fn i3_con_una_entrada_vieja_de_la_cache_sigue_en_div() {
             assert_eq!(campo(stats, c), n, "corrida {i}, {c}: {stats}");
         }
         let meta = std::fs::read_to_string(out.join("oxc+carril_a+tal_cual/div/i3-cache/meta.txt")).unwrap();
-        assert!(meta.contains("A y B comparados sin el sensor (I3)"), "corrida {i}: {meta}");
+        assert!(meta.contains("A y B comparados sin el sensor"), "corrida {i}: {meta}");
         if i == 2 {
             assert!(meta.contains("salio de la cache y una corrida fresca dio otra cosa: lapida"), "{meta}");
         }

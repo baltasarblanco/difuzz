@@ -1631,7 +1631,7 @@ mod tests {
             let dir = if known_div.0 == 1 { "known" } else { "div" };
             let meta = std::fs::read_to_string(d.join(format!("{dir}/{rel}/meta.txt"))).unwrap();
             assert!(meta.contains(paso), "{rel}: {meta}");
-            let heredo = meta.contains("-> A y B comparados sin el sensor (I3); violaciones que vio el sensor (7.4): A tdz ");
+            let heredo = meta.contains("-> A y B comparados sin el sensor; violaciones que vio el sensor: A tdz ");
             assert_eq!(heredo, rel != "lim-despues", "{rel}: {meta}");
         }
         drop(r);

@@ -306,7 +306,7 @@ pub fn camino_sensor_i3(sin: &runner::Runner, con: &runner::Runner, minified: &s
     let c = con.sensor_entero().run_con_cobertura(&texto, &[], &con_ganchos(&[("DIFUZZ_MAX_PAUSAS", runner::MAX_PAUSAS_MAYOR)], ganchos));
     if let Some(d) = c.sensor_degradado() {
         return Camino::NoSe(format!(
-            "A y B se compararon sin el sensor (I3) y B con el sensor (tope {}) tampoco corrio entero ({d})",
+            "A y B se compararon sin el sensor y B con el sensor (tope {}) tampoco corrio entero ({d})",
             runner::MAX_PAUSAS_MAYOR
         ));
     }
