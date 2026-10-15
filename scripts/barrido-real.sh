@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # barrido-real.sh: corre difuzz sobre un corpus de codigo real con la configuracion que dio H1 y
-# H2 (oxc, carril_a, --invocar --stubs) y SIEMPRE con --sandbox-red (D2, 10-oct).
+# H2 (oxc, carril_a, --invocar --stubs) y SIEMPRE con --sandbox-red (decidido el 10-oct).
 #
 # uso: barrido-real.sh [opciones] CORPUS OUT [BIN]
 #      DIFUZZ_CORPUS=CORPUS barrido-real.sh [opciones] OUT

@@ -16,7 +16,7 @@
 //!
 //! Sin `fijar` (tests, `--emitir`) no se comprueba nada.
 //!
-//! M3 (revision-b456): entre `comprobar` y el spawn quedaba una ventana (TOCTOU), y un
+//! M3 (revision de los bloques 4-6): entre `comprobar` y el spawn quedaba una ventana (TOCTOU), y un
 //! `touch` o una recompilacion del propio binario cortaba la corrida aunque no
 //! hiciera falta. Ahora (solo Linux, como el subreaper):
 //! - Este mismo binario se lanza por `/proc/self/exe` (`propio`): el kernel ejecuta el

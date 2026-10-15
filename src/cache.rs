@@ -41,12 +41,12 @@ use std::time::Duration;
 use crate::known::fnv1a;
 use crate::runner::{Exec, Runner, Status};
 
-/// 11.2b (rev-b11b-B H4): lo que una entrada puede pesar ademas de la salida y el texto (encabezado,
+/// 11.2b: lo que una entrada puede pesar ademas de la salida y el texto (encabezado,
 /// canal de control, con la linea `exc` recortada a 64 Ki caracteres por el preload).
 const MARGEN_ENTRADA: u64 = 256 << 10;
 
 /// M10: v2 guarda tambien el canal de control (`Exec::ctl`).
-/// 11.2c (rev-b11-2b-A H1 = B-N3): v3 guarda los topes de node con que se grabo (`topes`). Las
+/// 11.2c: v3 guarda los topes de node con que se grabo (`topes`). Las
 /// entradas v2 no dicen con que topes corrio A: son un miss (A corre en fresco y se graba en v3).
 const MAGIC: &str = "difuzz-cache-a v3";
 
@@ -98,10 +98,10 @@ impl CacheA {
     /// hubo que ejecutar. M3: el `bool` dice si A salio de la cache (hit), para
     /// que una divergencia se confirme corriendo A en fresco.
     /// M28: el tag del runner (pasada observada del carril B) entra en la clave.
-    /// 11.2b (rev-b11b-B H4): una entrada que pesa mas que el tope de salida del runner (mas el texto
+    /// 11.2b: una entrada que pesa mas que el tope de salida del runner (mas el texto
     /// y `MARGEN_ENTRADA`) no se lee: es un miss y A corre en fresco, con los topes de esta corrida.
     /// Antes una entrada grabada sin tope (o con un `--max-salida` mayor) se cargaba entera.
-    /// 11.2c (rev-b11-2b-A H1 = B-N3, A-H4): la entrada lleva los topes de node con que corrio A
+    /// 11.2c: la entrada lleva los topes de node con que corrio A
     /// (RSS y salida) y solo sirve si los de esta corrida no son menores (`topes_alcanzan`): un A
     /// grabado con `--mem-node 2048` nunca se midio contra 300, y con la entrada se comparaba un B que
     /// pasa el tope contra un A que tambien lo pasaria (falso `div/`). El peso de arriba queda como
@@ -215,7 +215,7 @@ impl CacheA {
     }
 }
 
-/// 11.2c (rev-b11-2b-A H1 = B-N3): una entrada grabada con los topes `grabados` (RSS, salida; 0 = sin
+/// 11.2c: una entrada grabada con los topes `grabados` (RSS, salida; 0 = sin
 /// tope) sirve con los `actuales` si ninguno de los actuales es menor: A no paso los grabados, asi que
 /// tampoco pasa unos iguales o mayores. Con uno menor, A tiene que medirse en fresco.
 fn topes_alcanzan(actuales: (u64, u64), grabados: (u64, u64)) -> bool {
@@ -380,7 +380,7 @@ mod tests {
     }
 
     /// M3: una entrada envenenada queda como miss y no se vuelve a escribir.
-    /// 11.2b (rev-b11b-B H4): una entrada que pesa mas que el tope de salida del runner es un miss
+    /// 11.2b: una entrada que pesa mas que el tope de salida del runner es un miss
     /// (A corre en fresco, con los topes de esta corrida); con un tope mayor, la misma entrada es un hit.
     #[test]
     fn entrada_mas_grande_que_el_tope_es_miss() {
@@ -407,10 +407,10 @@ mod tests {
         std::fs::remove_dir_all(&d).unwrap();
     }
 
-    /// 11.2c (rev-b11-2b-A H1 = B-N3, A-H4): la entrada solo sirve si los topes de la corrida no son
+    /// 11.2c: la entrada solo sirve si los topes de la corrida no son
     /// menores que los con que se grabo. Un A grabado con `--mem-node 2048` no se usa con 300 (corre en
-    /// fresco y se mide contra 300); grabado con 300, sirve con 2048. Lo mismo con la salida (c06 de
-    /// rev-b11-2b-A: 1,1 MiB grabados con el tope de 16 no sirven con 1). 0 es sin tope.
+    /// fresco y se mide contra 300); grabado con 300, sirve con 2048. Lo mismo con la salida (un caso
+    /// de la revision: 1,1 MiB grabados con el tope de 16 no sirven con 1). 0 es sin tope.
     #[test]
     fn la_entrada_lleva_los_topes_con_que_se_grabo() {
         assert!(topes_alcanzan((300 << 20, 16 << 20), (300 << 20, 16 << 20)));

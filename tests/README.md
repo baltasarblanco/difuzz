@@ -42,7 +42,7 @@ tests/golden/verificar.sh [--jobs N] [BINARIO] [DIR_SALIDA]
 ## Aceptación de los re-chequeos — `tests/aceptacion/rechequeos/`
 
 181 casos que combinan un bug real de oxc con un flag de asunción (o con la forma en que se imprime), en las 4
-celdas de oxc (181 × 4 = 724 comparaciones): 21 de la revisión 1 (C4, `00-` a `10-`), 9 adversariales del revisor de la fase R (`r01` a
+celdas de oxc (181 × 4 = 724 comparaciones): 21 de la revisión 1 (C4, `00-` a `10-`), 9 adversariales de la revision de los bloques 4-6 (`r01` a
 `r10`, sin `r05`), `14-tdz-positivo`, 11 de los flags que antes no tenían re-chequeo (`15-` coerción, `16-`
 built-ins, `17-` contenido de `toString`/`.stack`, `18-` profundidad: positivos y adversariales con el Issue A),
 15 de la revisión de t-int (`19-`: el bug adentro del código que el re-chequeo neutraliza; r03, r06 y r13 son

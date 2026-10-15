@@ -599,7 +599,7 @@ struct Stats {
     /// M3: divergencia que no se confirma: A corrido otra vez en fresco da otra
     /// salida. No se reporta; cuenta dentro de `original=`.
     a_nondet: usize,
-    /// 11.2d (rev-b11-final B-F2): casos (y variantes) que se dejaron sin clasificar por una
+    /// 11.2d: casos (y variantes) que se dejaron sin clasificar por una
     /// SIGINT/SIGTERM mientras esperaban la repeticion de B con los topes mayores (descarte
     /// `interrumpido`; nota en CORRIDA.txt).
     interrumpidos: usize,
@@ -615,7 +615,7 @@ struct Stats {
     /// en el envoltorio de modulos, la que se repitio sin invocar. Va en una
     /// linea aparte (solo con `--invocar`).
     invocar_retry: usize,
-    /// I3/M1 (revision-b456): comparaciones donde A o B no corrieron enteros con
+    /// I3/M1 (revision de los bloques 4-6): comparaciones donde A o B no corrieron enteros con
     /// el sensor de violaciones y los dos se repitieron sin el. Ortogonal, como LINT.
     sensor_repetidos: usize,
     /// b7-8: casos (base, no variantes) que corrieron enteros sin el sensor por el
@@ -1069,7 +1069,7 @@ fn main() {
     }
     // 11.5 (I3): el tope de RSS de node, con los workers reales (tambien con --en-proceso).
     let (tope_node, de_donde) = subproceso::tope_node(jobs, cli.mem_node);
-    // 11.7 (I5): y el de la salida que se junta. 11.2c (rev-b11-2b-B N4): a recursos/ solo si los
+    // 11.7 (I5): y el de la salida que se junta. 11.2c: a recursos/ solo si los
     // pasa el original.
     eprintln!(
         "topes de node: {} MiB de RSS por ejecucion ({de_donde}) y {} MiB de salida (--max-salida); si los pasa el original, a recursos/ (node_memoria, node_salida); si los pasa el minificado, se repite con topes mayores (una repeticion a la vez), como un Timeout de B",
@@ -1230,7 +1230,7 @@ fn main() {
     if stats.fallos_analisis > 0 {
         linea!("analisis de difuzz (A6/R1-H12): casos_con_fallo={} descartados={}", stats.fallos_analisis, stats.descartes_analisis);
     }
-    // M1 (revision-b456): en una linea aparte, solo si paso (no cambia la de `total=`).
+    // M1 (revision de los bloques 4-6): en una linea aparte, solo si paso (no cambia la de `total=`).
     if stats.sensor_repetidos > 0 {
         linea!("sensor (I3): comparados_sin_sensor={}", stats.sensor_repetidos);
     }
@@ -2000,13 +2000,13 @@ fn recurso_de_node(ctx: &Ctx, stats: &mut Stats, rel: &Path, src: &str, x: &runn
         stats.recursos_node_memoria += 1;
     }
     // 11.2b: B y los re-chequeos no llegan aca (`correr_b`, `clasificar::sin_tope`): el que se paso
-    // es el original. 11.2c (rev-b11-2b-A H5): cual de sus pasadas, si la corrio `como_a`.
+    // es el original. 11.2c: cual de sus pasadas, si la corrio `como_a`.
     reportar_excedido(ctx, rel, src, x, x.quien.as_deref().unwrap_or(QUIEN_A));
 }
 
 /// 11.2b (A-H2/B-H3): que ejecucion paso el tope, en el meta.txt de `recursos/`.
 const QUIEN_A: &str = "el original (A) del caso: la pasada cruda, una observada (epilogo, bloques, --invocar, envoltorio de modulos) o su repeticion sin el sensor";
-/// 11.2c (rev-b11-2b-A H5): la pasada concreta (`como_a`); `QUIEN_A` queda si ninguna lo dijo.
+/// 11.2c: la pasada concreta (`como_a`); `QUIEN_A` queda si ninguna lo dijo.
 const QUIEN_A_CRUDA: &str = "el original (A) del caso, en la pasada cruda";
 const QUIEN_A_EPILOGO: &str = "el original (A) del caso, en la pasada observada (epilogo que imprime los bindings)";
 const QUIEN_A_BLOQUES: &str = "el original (A) del caso, en la pasada de los bindings en bloques";
@@ -2489,7 +2489,7 @@ fn compare_and_report(
         return false;
     }
     let b = b_previo.unwrap_or_else(|| correr_b(runner, minified));
-    // I3 (revision-b456): el sensor cambia lo que el programa observa (V8 formatea el
+    // I3 (revision de los bloques 4-6): el sensor cambia lo que el programa observa (V8 formatea el
     // stack al pausar: llama al toString del programa y congela `.stack`). Es simetrico
     // solo si A y B corrieron igual. Si alguno corrio sin el sensor (`sensor_caido`: se
     // repitio sin el tras una senal o un timeout) o a medias (`sensor_tope`: MAX_PAUSAS),
@@ -2507,7 +2507,7 @@ fn compare_and_report(
     // b7-8: un caso con el sensor omitido corre entero sin el (`con_sensor` es false).
     let mut paso_sensor = runner.sensor_omitido().then(|| SENSOR_OMITIDO_TRAZA.to_string());
     let (mut con_sensor_a, mut con_sensor_b) = (None, None);
-    // 11.2i (rev-b11-final vuelta 6, V6-H1 y V6-H2): el A repetido sin el sensor de I3 es una corrida
+    // 11.2i: el A repetido sin el sensor de I3 es una corrida
     // AUXILIAR (existe porque el sensor se degrado; el A del caso ya termino dentro de los topes). Si
     // pasa un tope o no termina solo, I3 queda inconcluso: no se cambia al runner sin el sensor y A y B
     // se comparan como estaban (el A del caso, con el sensor). Antes un tope mandaba el caso a
@@ -2588,14 +2588,14 @@ fn compare_and_report(
         }
         Confirmed::Divergence(ab) => *ab,
     };
-    // 11.2f (rev-b11-final-A vuelta 3, V3-H1): A y B quedaron sin el sensor (la repeticion de B con
+    // 11.2f: A y B quedaron sin el sensor (la repeticion de B con
     // topes mayores y A sin el sensor, `confirm`): los re-chequeos corren sin el sensor, como en I3,
     // para no mezclar la diferencia del sensor con la del bug.
     if a_sin_sensor {
         sin_sensor_mayor = runner.sin_sensor();
         runner = &sin_sensor_mayor;
     }
-    // 7.4 (Fase R I3): un positivo que atrapa mas de MAX_PAUSAS excepciones iba a div/: sin
+    // 7.4 (I3 de la revision de los bloques 4-6): un positivo que atrapa mas de MAX_PAUSAS excepciones iba a div/: sin
     // el sensor, A no tiene la violacion atrapada y el re-chequeo de violaciones no corria.
     // A y B (ya confirmados, sin el sensor) heredan lo que el sensor ubico antes de
     // degradarse (`Exec::heredar_violaciones`). Sound: la comparacion y los re-chequeos
@@ -2616,7 +2616,7 @@ fn compare_and_report(
             ));
         }
     }
-    // Integracion 7.1 + 7.4 (H3 de rev-7.1; rev-int H1/H2): si A y B se compararon sin el
+    // Integracion 7.1 + 7.4 (H3 de la revision de 7.1; H1/H2 de la de la integracion): si A y B se compararon sin el
     // sensor (I3), el camino de B que pide 7.1 no sale de las corridas con el sensor ya hechas
     // (un programa puede notar el sensor y tomar otro camino con el): el re-chequeo, solo si
     // todo lo demas ya daba Explica, corre B otra vez con el sensor (tope mayor) y sin el, con
@@ -2656,7 +2656,7 @@ fn compare_and_report(
             let mut flags_b: Vec<&str> = b.flags.iter().map(String::as_str).collect();
             clasificar::sin_repetidos(&mut flags_b);
             let clasificar::Clasificacion { flags, why, nota, mut traza, .. } = c;
-            // M1 (revision-b456): que el sensor no corrio entero queda en meta.txt.
+            // M1 (revision de los bloques 4-6): que el sensor no corrio entero queda en meta.txt.
             if let Some(p) = paso_sensor {
                 traza.anteponer("sensor", p);
             }
@@ -2695,7 +2695,7 @@ fn compare_and_report(
                 nota.as_deref(),
                 &flags,
                 &flags_b,
-                // 11.2c (rev-b11-2b-B N3): lo que dice `confirm`, no solo si salio de la cache.
+                // 11.2c: lo que dice `confirm`, no solo si salio de la cache.
                 a_cache,
                 &traza.texto(),
             );
@@ -2716,7 +2716,7 @@ enum Confirmed {
     /// 11.2f: el `bool`, si A y B quedaron sin el sensor (la repeticion de B con topes mayores y A
     /// sin el sensor): el resto del caso corre con el runner sin el sensor.
     Divergence(Box<(runner::Exec, runner::Exec, &'static str, bool)>),
-    /// 11.2d (rev-b11-final B-F2): difuzz se esta cerrando (primera SIGINT/SIGTERM) y faltaba la
+    /// 11.2d: difuzz se esta cerrando (primera SIGINT/SIGTERM) y faltaba la
     /// repeticion de B con los topes mayores: el caso no se clasifica (descarte `interrumpido`).
     Abandonado,
 }
@@ -2754,7 +2754,7 @@ fn confirm(
     if !diverges(&a, &b) {
         return Confirmed::Same { corto: corto_por_sandbox(runner, &a, &b) };
     }
-    // M3: el timeout largo de B. 11.2c (rev-b11-2b-A H2): tambien el de su repeticion con los topes
+    // M3: el timeout largo de B. 11.2c: tambien el de su repeticion con los topes
     // mayores (abajo), que antes corria con el timeout normal.
     let longer = (runner.timeout() * 4).max(a.elapsed * 20);
     if b.status == Status::Timeout {
@@ -2774,7 +2774,7 @@ fn confirm(
     // con los topes mayores (`Runner::con_topes_mayores`); si ahora termina, se compara con eso; si
     // se vuelve a pasar (o no termina a tiempo), la divergencia sigue con el B cortado (status
     // `Signal`: `oracle::compare` da ExitStatus, sin mirar la salida cortada).
-    // 11.2c (rev-b11-2b-A H1): con A de la cache, "A no" es que no los paso al grabarse, con topes
+    // 11.2c: con A de la cache, "A no" es que no los paso al grabarse, con topes
     // iguales o menores (`CacheA::run` no sirve otra entrada); se confirma en fresco abajo.
     let a_no = if a_cached { "y A no (A de la cache, grabado con topes iguales o menores; se confirma en fresco abajo)" } else { "y A no" };
     // 11.2e: B es la repeticion con topes mayores, que corrio sin el sensor (ver abajo y al final).
@@ -2782,7 +2782,7 @@ fn confirm(
     // 11.2g: la repeticion de B con topes mayores (sin el sensor) no termino por tiempo.
     let mut b_mayor_sin_sensor_timeout = false;
     if let Some(c) = b.tope() {
-        // 11.2e (rev-b11-final-A vuelta 2, V2-H1): la repeticion corre SIN el sensor, una sola vez. Con
+        // 11.2e: la repeticion corre SIN el sensor, una sola vez. Con
         // el sensor y sin reintento (11.2d), un B sin bug que pasa el tope y solo es lento con el
         // sensor (o al que el sensor tumba: SIGSEGV de V8) iba a un falso div/ ExitStatus; con el
         // reintento sin el sensor bajo el turno, el turno duraba dos timeouts largos (F2); y fuera del
@@ -2792,11 +2792,11 @@ fn confirm(
         let mayor = runner.con_topes_mayores(subproceso::techo_topes_mayores()).sin_sensor();
         let (rss, salida) = mayor.topes();
         let topes = format!("{} MiB de RSS, {} MiB de salida, sin el sensor, timeout {} ms", rss >> 20, salida >> 20, longer.as_millis());
-        // 11.2c (rev-b11-2b-B N1 = A-H6): una sola repeticion con los topes mayores a la vez en todo
+        // 11.2c: una sola repeticion con los topes mayores a la vez en todo
         // difuzz (`TOPES_MAYORES`): lo que corre junto queda en (workers - 1) x tope + el mayor. Antes
         // cada worker podia estar en la suya: workers x 2 x tope (con el default, toda la RAM). Y con el
-        // timeout largo (rev-b11-2b-A H2): un B mas lento y mas pesado que A no es un hallazgo.
-        // 11.2d (rev-b11-final B-F2): una sola ejecucion (sin la repeticion sin el sensor de
+        // timeout largo: un B mas lento y mas pesado que A no es un hallazgo.
+        // 11.2d: una sola ejecucion (sin la repeticion sin el sensor de
         // `run_inner`, que duplicaba lo que dura el turno), y con un SIGINT ya recibido no se toma ni
         // se usa el turno: el caso queda sin resultado (`Abandonado`) en vez de esperar la cola o
         // inventar un destino.
@@ -2840,7 +2840,7 @@ fn confirm(
     let mut fresh_ok = false;
     let mut a_cache = "miss";
     if a_cached {
-        // 11.2c (rev-b11-2b-A H1 = B-N3): un A fresco que pasa un tope es un A que pasa un tope: el
+        // 11.2c: un A fresco que pasa un tope es un A que pasa un tope: el
         // caso va a `recursos/` (desenrolla hasta el worker, como cualquier pasada de A). Antes quedaba
         // Inconcluso y seguia el A de la cache: falso `div/` con una entrada grabada con otros topes.
         let a1 = como_a(QUIEN_A_CACHE, || runner.run(original));
@@ -2874,7 +2874,7 @@ fn confirm(
                 }
             }
             OrigenA::I3SinSensor { del_caso, del_caso_cacheado, runner_con } => {
-                // 11.2j (rev-b11-final-B vuelta 7, V7-H1 y V7-H2): `a` es el A auxiliar de I3 (sin el
+                // 11.2j: `a` es el A auxiliar de I3 (sin el
                 // sensor) y `runner` el runner sin el sensor: repetirlo es una corrida AUXILIAR. Un tope
                 // deja el paso inconcluso (no recursos/). Si no se reproduce, se repite el A del caso
                 // (con el sensor, `runner_con`): si tampoco se reproduce, el programa es no determinista
@@ -2883,7 +2883,7 @@ fn confirm(
                     if !matches!(a2.status, Status::Failed(_)) && !same_exec(&a2, &a) {
                         let a3 = como_a(QUIEN_A_OTRA_VEZ, || runner_con.run(original));
                         if !matches!(a3.status, Status::Failed(_)) && !same_exec(&a3, del_caso) {
-                            // 11.2k (rev-b11-final-B vuelta 8, V8-H1): si el A del caso salio de la cache, la
+                            // 11.2k: si el A del caso salio de la cache, la
                             // entrada nunca se confirmo en fresco (I3 no corre el A fresco de la cache): que
                             // difiera de `a3` puede ser una entrada vieja. Lapida (como el "hit envenenado"
                             // sin I3) y otra corrida fresca: si da lo mismo que `a3`, el A del caso es
@@ -2913,20 +2913,20 @@ fn confirm(
     // Si el programa nota el sensor (I3), la diferencia puede ser solo esa: con A ya confirmado, A sin
     // el sensor (fuera del turno, con los topes de siempre; si los pasa, `recursos/`, como cualquier
     // A) y, si da lo mismo que B, iguales.
-    // 11.2f (rev-b11-final-B vuelta 3, V3-H1): `oracle::compare` no exige que A haya terminado (la
+    // 11.2f: `oracle::compare` no exige que A haya terminado (la
     // precondicion del oraculo lo garantiza para el A del caso, no para esta corrida nueva): A sin el
-    // sensor cuenta solo si termino solo, y dos veces igual (rev-b11-final-A: una corrida sola no dice
+    // sensor cuenta solo si termino solo, y dos veces igual (una corrida sola no dice
     // que sea determinista). Si no, inconcluso: la divergencia sigue con el A con el sensor. 11.2f
-    // (rev-b11-final-A vuelta 3, V3-H1): si A sin el sensor termino y tambien difiere de B, es el A de
+    // ademas: si A sin el sensor termino y tambien difiere de B, es el A de
     // la divergencia (A y B sin el sensor, como I3) y el resto del caso corre sin el sensor.
-    // 11.2g (rev-b11-final-A vuelta 4, V4-H1): la repeticion de B (sin el sensor) no termino a tiempo
+    // 11.2g: la repeticion de B (sin el sensor) no termino a tiempo
     // y A (con el sensor) si. Si A sin el sensor tampoco termina (con el mismo timeout largo, fuera del
     // turno, topes de siempre), la divergencia puede ponerla el sensor y no el minifier (g01: un
     // programa que sin el sensor gira sin fin). El caso sigue en div/ (conservador: no se cambia
     // ningun destino), pero la traza lo dice para el triage. Si A sin el sensor termina, la
     // divergencia no la explica el sensor: queda como estaba, con el A con el sensor (el B que se
     // guarda es el cortado con el sensor, y asi el par es del mismo modo).
-    // 11.2h (rev-b11-final-A vuelta 5, V5-H1): las corridas de A sin el sensor de aca abajo son
+    // 11.2h: las corridas de A sin el sensor de aca abajo son
     // AUXILIARES (no son el A del caso, que ya termino dentro de los topes y se confirmo): si pasan un
     // tope, el paso queda inconcluso (`auxiliar`) y la divergencia sigue con lo que habia. Antes pasaban
     // por `como_a` y mandaban el caso entero a recursos/ (g03, g04).
@@ -2973,7 +2973,7 @@ fn confirm(
     Confirmed::Divergence(Box::new((a, b, a_cache, sin_sensor)))
 }
 
-/// 11.2j (rev-b11-final-B vuelta 7): de donde sale el A que llega a `confirm`. De aca, y solo de aca,
+/// 11.2j: de donde sale el A que llega a `confirm`. De aca, y solo de aca,
 /// sale que corridas de A de `confirm` son del A del caso (regla C1: un tope -> recursos/; si no se
 /// reproduce -> no_determinista) y cuales auxiliares (un tope o no reproducirse -> inconcluso).
 enum OrigenA<'r> {
@@ -2995,14 +2995,14 @@ impl OrigenA<'_> {
     }
 }
 
-/// 11.2h (rev-b11-final-A vuelta 5, V5-H1): una corrida AUXILIAR (no el A del caso: solo el A del caso
+/// 11.2h: una corrida AUXILIAR (no el A del caso: solo el A del caso
 /// puede mandar el caso a recursos/ por un tope). Si pasa un tope de node, deja en `pasos` "<cual> paso un
 /// tope de node: inconcluso" y devuelve `None`; quien la llamo sigue con lo que tenia.
 /// 11.2k: textos de `auxiliar` para con que sigue la divergencia.
 const SIGUE_A_CON_SENSOR: &str = "con el A con el sensor";
 const SIGUE_PAR_I3: &str = "con el par de I3 (A y B sin el sensor)";
 
-/// 11.2k (rev-b11-final-A vuelta 8): `sigue`, con que par sigue la divergencia (para la traza).
+/// 11.2k: `sigue`, con que par sigue la divergencia (para la traza).
 fn auxiliar(pasos: &mut Vec<String>, cual: &str, sigue: &str, f: impl FnOnce() -> runner::Exec) -> Option<runner::Exec> {
     match sin_pasar_topes(f) {
         Ok(e) => Some(e),
@@ -3013,15 +3013,15 @@ fn auxiliar(pasos: &mut Vec<String>, cual: &str, sigue: &str, f: impl FnOnce() -
     }
 }
 
-/// 11.2c (rev-b11-2b-B N1 = A-H6): turno de la repeticion de B con los topes mayores (`confirm`): una a
+/// 11.2c: turno de la repeticion de B con los topes mayores (`confirm`): una a
 /// la vez en todo difuzz.
 static TOPES_MAYORES: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-/// 11.2c (rev-b11-2b-A H5): `quien` de las pasadas de A que se pasan de un tope (`como_a`).
+/// 11.2c: `quien` de las pasadas de A que se pasan de un tope (`como_a`).
 const QUIEN_A_CACHE: &str = "el original (A) en fresco, al confirmar una divergencia con el A de la cache";
 const QUIEN_A_OTRA_VEZ: &str = "el original (A) otra vez, al confirmar una divergencia (no determinismo)";
 
-/// 11.2c (rev-b11-2b-A H5): `f` corre el original; si una de sus ejecuciones pasa un tope de node, el
+/// 11.2c: `f` corre el original; si una de sus ejecuciones pasa un tope de node, el
 /// `Excedido` sigue hasta el worker (el caso va a `recursos/`) con `quien` dicho, si nadie lo dijo antes.
 fn como_a<T>(quien: &str, f: impl FnOnce() -> T) -> T {
     match sin_pasar_topes(f) {
@@ -3497,7 +3497,7 @@ mod tests {
         }
     }
 
-    /// I3 / M1 (revision-b456): el sensor cambia lo que el programa observa (al pausar,
+    /// I3 / M1 (revision de los bloques 4-6): el sensor cambia lo que el programa observa (al pausar,
     /// V8 formatea el stack y llama al toString del programa). A pasa MAX_PAUSAS antes
     /// del throw y B (sin el loop, que no hace nada visible) no: con el sensor, B
     /// imprime "toString llamado" y A no. Antes eso era una divergencia falsa; ahora los

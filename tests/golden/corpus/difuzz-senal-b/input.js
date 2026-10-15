@@ -1,4 +1,4 @@
-// 11.4 (I7 de rev-integral-1, como el repro senal/q1-b-muere): no es un bug del minifier, es una
+// 11.4 (I7): no es un bug del minifier, es una
 // prueba del oraculo. El programa lee su propio texto y se mata con SIGSEGV (como un crash de V8)
 // si ya no tiene el nombre de su variable local: el original impreso lo tiene, el minificado no
 // (el mangle de los nombres locales, o el inlining, se lo lleva en las 8 celdas). La regex no

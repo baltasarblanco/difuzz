@@ -30,7 +30,7 @@ use crate::minify::{Outcome, Preset, SourceKind};
 /// Sin backlog ni asunciones por ruta (las de terser son de SWC). Los flags
 /// estaticos `extends`, `global_conocido` y `with` (M13) se re-chequean antes
 /// de clasificar, y en el carril A una divergencia sin asuncion se prueba en
-/// estricto (M17: oxc no soporta sloppy, D1 del CLAUDE.md).
+/// estricto (M17: oxc no soporta sloppy: lo que solo pasa en sloppy no es un bug para oxc).
 pub const POLITICA: Politica = Politica {
     abreviatura: "oxc",
     razones: FLAG_REASONS_OXC,
@@ -66,7 +66,7 @@ pub const POLITICA: Politica = Politica {
 const FLAG_REASONS_OXC: &[(&str, &str)] = &[
     ("fn_tostring", "oxc: Function.prototype.toString is not relied on"),
     ("builtins", "oxc: No Monkey-Patching Built-ins"),
-    // I2 (revision-b456): la TDZ no atrapada tambien pasa por el re-chequeo de
+    // I2 (revision de los bloques 4-6): la TDZ no atrapada tambien pasa por el re-chequeo de
     // violaciones (recheck::FLAGS_VIOLACION); solo llega aca si dio Explica.
     ("tdz", "oxc: No TDZ Violation"),
     ("coercion", "oxc: Coercion Methods Are Pure"),

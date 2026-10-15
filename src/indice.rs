@@ -108,7 +108,7 @@ impl Index {
         // misma celda, al menos las lineas no se intercalan a la mitad.
         if let Err(e) = f.write_all(line.as_bytes()) {
             eprintln!("indice: no pude escribir: {e}");
-            // 10.4 (M1 de rev-b9-A): una linea perdida del indice es un hallazgo que `--cruce`
+            // 10.4 (M1): una linea perdida del indice es un hallazgo que `--cruce`
             // no ve; antes la corrida cerraba `completa` y con 0.
             crate::oracle::write_failed();
         }
@@ -586,7 +586,7 @@ mod tests {
         assert!(t.contains("identidad+carril_a+tal_cual: div=1"), "{t}");
     }
 
-    /// 10.4 (M1 de rev-b9-A): una linea del indice que no se pudo escribir (disco lleno) cuenta
+    /// 10.4 (M1): una linea del indice que no se pudo escribir (disco lleno) cuenta
     /// como escritura perdida (`oracle::write_errors`): la corrida no cierra `completa` ni con 0.
     #[test]
     fn linea_perdida_del_indice_cuenta() {

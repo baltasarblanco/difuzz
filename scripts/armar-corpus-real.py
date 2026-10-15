@@ -28,7 +28,7 @@ Criterios (cada rechazo se cuenta por causa en <out>/stats.tsv):
     externos (cualquier especificador; para correr con --stubs)
   - --minificados acepta .min.js y archivos con lineas largas (por defecto se descartan)
   - dedup por sha256 del contenido (despues de quitar el shebang)
-  - pre-filtro de sintaxis (D2, 10-oct): lo que node no compila (Flow, JSX, TypeScript, un
+  - pre-filtro de sintaxis (10-oct): lo que node no compila (Flow, JSX, TypeScript, un
     `import` en un archivo que es CJS...) no entra al corpus. Un solo proceso de node para todo
     el lote (no un node por archivo) que COMPILA sin ejecutar: CJS con vm.compileFunction y los
     parametros del envoltorio de modulos (como el carril A, .cjs), ESM con vm.SourceTextModule

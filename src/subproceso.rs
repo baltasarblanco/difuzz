@@ -141,7 +141,7 @@ fn presupuesto(mem_total: Option<u64>, jobs: usize, mem_hijo_mib: Option<u64>) -
     (p, format!("MemTotal/2 / {jobs} workers"))
 }
 
-/// 11.2c (rev-b11-2b-B N1 = A-H6): techo del tope de RSS con que se repite un B que paso el suyo
+/// 11.2c: techo del tope de RSS con que se repite un B que paso el suyo
 /// (`Runner::con_topes_mayores`): MemTotal/2, el presupuesto entero de node. Sin /proc/meminfo, sin
 /// techo. Se lee una vez.
 pub fn techo_topes_mayores() -> u64 {
@@ -316,7 +316,7 @@ impl Remoto {
     /// (`Drop for Hijo`): asi no queda un hijo ocioso cuyo RSS cuente contra el presupuesto de
     /// los otros. MEDIDO: lanzar el hijo y minificar un programa chico cuesta ~3 ms (20
     /// lanzamientos, carga ~43), contra la corrida de node de B0 que el re-chequeo paga igual
-    /// (~180 ms una corrida de node en la meta de c03 de rev-b8-A).
+    /// (~180 ms una corrida de node en el meta.txt de un caso de la aceptacion, 25-b93-p03).
     pub fn sin_mangle(minifier: Minifier, preset: Preset, kind: SourceKind) -> Option<Remoto> {
         minifier.build_sin_mangle(preset, kind)?;
         let exe = crate::binario::propio();
@@ -459,8 +459,8 @@ pub fn configurar_oraculo() -> Result<Option<PathBuf>, String> {
     configurar_oraculo_desde(std::env::var_os("DIFUZZ_ORACULO"))
 }
 
-/// `configurar_oraculo` con el valor de `DIFUZZ_ORACULO` dado. 11.2a (B-O2 de rev-b11a-B): el test
-/// lo llama con `None`, asi no depende de que el usuario tenga la variable exportada (el README la
+/// `configurar_oraculo` con el valor de `DIFUZZ_ORACULO` dado. 11.2a (B-O2): el test
+/// lo llama con `None`, asi no depende de que el usuario tenga la variable exportada (tests/README.md la
 /// sugiere para el golden).
 fn configurar_oraculo_desde(env: Option<std::ffi::OsString>) -> Result<Option<PathBuf>, String> {
     if !cfg!(debug_assertions) {
@@ -824,7 +824,7 @@ pub(crate) fn intern_flag(s: &str) -> &'static str {
 pub fn serve(args: &[String]) -> i32 {
     // R1-H05: `--preparar --info`, la identidad que valida `configurar_oraculo`.
     if args == ["--info"] {
-        // 10.5 (M2 de rev-b9-A): sin `println!`, que hace panic (rc 101) si stdout no se puede
+        // 10.5 (M2): sin `println!`, que hace panic (rc 101) si stdout no se puede
         // escribir. Un pipe cerrado no es error (el padre ya no lee); otro (disco lleno), 1.
         return match crate::a_stdout(&format!("{}\n", info(cfg!(debug_assertions)))) {
             Ok(()) => 0,
@@ -1064,7 +1064,7 @@ pub(crate) mod tests {
         assert_eq!(serve_con_pila(&keep, 8 << 20, &b""[..], Vec::new()), 2);
     }
 
-    /// 9.3 (M3, rev-b8-A): el hijo sin mangle tiene los mismos limites que el minificador del
+    /// 9.3 (M3): el hijo sin mangle tiene los mismos limites que el minificador del
     /// worker: `presupuesto: None` es el presupuesto del worker (`configurar_memoria`, sondeado
     /// en `esperar` junto con los otros hijos del hilo, y RLIMIT_AS en `lanzar`), no "sin
     /// presupuesto"; y el mismo timeout.

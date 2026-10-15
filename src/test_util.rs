@@ -120,7 +120,7 @@ mod tests {
         }
     }
 
-    /// M4 (revision-b456): el segundo argumento de cada `Runner::new(` de un fuente,
+    /// M4 (revision de los bloques 4-6): el segundo argumento de cada `Runner::new(` de un fuente,
     /// con su linea, aunque la llamada este partida en varias lineas (se lee hasta el
     /// `)` que la cierra, contando parentesis, corchetes y llaves). Se saltean las
     /// apariciones dentro de un comentario `//` de la misma linea.

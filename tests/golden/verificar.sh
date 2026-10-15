@@ -111,7 +111,7 @@ clase_caso() { # $1 = --out de la celda, $2 = caso
   [ -d "$o/asserts/$c" ] && { echo asserts; return; }
   [ -d "$o/known/$c" ] && { echo known; return; }
   [ -d "$o/lint/$c" ] && { echo lint; return; }
-  # M7 (revision-b456): comparacion exacta del nombre del caso (antes iba sin escapar en una regex).
+  # M7 (revision de los bloques 4-6): comparacion exacta del nombre del caso (antes iba sin escapar en una regex).
   k=
   if [ -f "$o/descartes.tsv" ]; then
     while IFS=$'\t' read -r ca cau _; do

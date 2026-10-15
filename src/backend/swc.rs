@@ -92,7 +92,7 @@ impl Swc {
     ///   al ejecutar un `.cjs`.
     /// - `compress.top_level = Some(..)`: sin esto `top_level()` da false y el
     ///   DCE top-level no corre; swc#12029 y swc#11963 son invisibles
-    ///   (lecciones-pr-12029 §5).
+    ///   sin eso.
     /// - `mangle.eval` queda en su default `false`: en el codigo es
     ///   `ignore_eval`, un opt-in que asume que ningun eval referencia
     ///   nombres locales. Prenderlo fabrica divergencias esperadas.

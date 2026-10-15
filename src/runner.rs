@@ -38,7 +38,7 @@ pub const DEEP_STACK: &str = "--stack-size=1968";
 /// THROW_EXIT porque no es un throw comparable.
 pub const LINK_EXIT: i32 = 71;
 
-/// I3 (revision-b456): lineas del canal de control cuando el sensor de
+/// I3 (revision de los bloques 4-6): lineas del canal de control cuando el sensor de
 /// violaciones no corrio entero (`Exec::sensor_degradado`).
 pub const SENSOR_CAIDO: &str = "sensor_caido";
 pub const SENSOR_TOPE: &str = "sensor_tope";
@@ -51,10 +51,10 @@ pub const SENSOR_OMITIDO: &str = "sensor_omitido";
 /// atrapada solo los ve el sensor; `coercion_symbol` tambien sale de un Symbol no atrapado.
 pub const FLAGS_DEL_SENSOR: [&str; 3] = ["tdz_atrapada", "coercion_symbol", "extends_atrapado"];
 
-/// Integracion 7.1 + 7.4 (H3 de rev-7.1): el tope de pausas del sensor (`DIFUZZ_MAX_PAUSAS`,
+/// Integracion 7.1 + 7.4 (H3 de la revision de 7.1): el tope de pausas del sensor (`DIFUZZ_MAX_PAUSAS`,
 /// preload.js) de la corrida de B con el sensor que da su camino cuando A y B se compararon sin
 /// el (`recheck::camino_sensor_i3`). 0,5-1,4 ms por pausa (MEDIDO por 7.4): 2-6 s; con muchos
-/// marcos puede llegar al timeout (rev-int H2), y entonces el camino no se sabe.
+/// marcos puede llegar al timeout (H2 de la revision de la integracion), y entonces el camino no se sabe.
 pub const MAX_PAUSAS_MAYOR: &str = "4096";
 
 /// n-sandbox: linea del canal de control cuando la ejecucion toco el sandbox (un permiso
@@ -114,7 +114,7 @@ pub enum Status {
 pub const TOPE_RSS_SIN_CONFIGURAR: u64 = 4 << 30;
 
 /// 11.5 (I3): cada cuanto se mira el RSS de node mientras corre (el bucle de espera de
-/// `run_file` ya despierta cada 5 ms; se lee cada 2 vueltas). 11.2b (rev-b11b-A H3): se lee el pico
+/// `run_file` ya despierta cada 5 ms; se lee cada 2 vueltas). 11.2b: se lee el pico
 /// de node solo (`VmHWM`, `pico_rss`): ve tambien lo que subio y bajo entre dos lecturas, mientras
 /// node siga vivo en la siguiente; lo que pasa despues de la ultima lectura, justo antes de
 /// terminar, no se ve. Antes se usaba ademas `ru_maxrss` de `wait4`, que cuenta a los hijos del
@@ -127,7 +127,7 @@ pub const NODE_MEMORIA: &str = "node_memoria";
 
 /// 11.7 (I5): tope por defecto de la salida que difuzz junta de una ejecucion de node (stdout mas
 /// stderr), en MiB (`--max-salida`). MEDIDO: la entrada mas grande de las 77 caches de A de las
-/// corridas del 7 al 12 de octubre (254 442 entradas: sintetico, corpus SWC y corpus real de D2)
+/// corridas del 7 al 12 de octubre (254 442 entradas: sintetico, corpus SWC y corpus de codigo real)
 /// pesa 1,4 MiB con el programa incluido. difuzz copia la salida unas 5 veces (decodificar,
 /// normalizar, comparar; MEDIDO en I5: 512 MiB de stdout, 2,6 GB de RSS): con 32 workers, 16 MiB
 /// son ~2,5 GB en el peor caso.
@@ -171,14 +171,14 @@ pub struct Excedido {
     pub ext: &'static str,
     /// 11.2b: lo que se junto (cortado), con status `Signal` y la causa en el canal (`Exec::tope`).
     /// Nunca se compara su salida: solo dice que la ejecucion no termino dentro de los topes.
-    /// 11.2c (rev-b11-2b-B N2): stdout y stderr recortados a `PREFIJO_PARCIAL` bytes, con una marca.
+    /// 11.2c: stdout y stderr recortados a `PREFIJO_PARCIAL` bytes, con una marca.
     pub parcial: Exec,
-    /// 11.2c (rev-b11-2b-A H5): que ejecucion del original fue, si quien la corrio lo sabe (la pasada
+    /// 11.2c: que ejecucion del original fue, si quien la corrio lo sabe (la pasada
     /// cruda, la observada, `--invocar`, la confirmacion de `confirm`, ...). `None`: lo pone `main`.
     pub quien: Option<String>,
 }
 
-/// 11.2c (rev-b11-2b-B N2): cuanto de stdout y de stderr se guarda de una ejecucion que paso un tope
+/// 11.2c: cuanto de stdout y de stderr se guarda de una ejecucion que paso un tope
 /// (`Excedido::parcial`). Esa salida no se compara (status `Signal`): solo se guarda en `div/` para
 /// ver donde empezo a divergir. Antes se decodificaba entera (hasta 64 MiB con los topes mayores, y
 /// `decode_lossless` hace 5 bytes de cada byte invalido: 496 MB de difuzz con un B que escribe 0xff).
@@ -221,7 +221,7 @@ impl Exec {
         self.status == Status::Exited(LINK_EXIT) && self.ctl_count("link ") > 0
     }
 
-    /// I3 (revision-b456): esta ejecucion no corrio entera con el sensor de
+    /// I3 (revision de los bloques 4-6): esta ejecucion no corrio entera con el sensor de
     /// violaciones: `SENSOR_CAIDO` (se repitio sin el tras una senal o un
     /// timeout, `run_inner`) o `SENSOR_TOPE` (el preload llego a MAX_PAUSAS y lo
     /// apago a mitad). `None`: entera con el sensor, o sin el por politica.
@@ -245,7 +245,7 @@ impl Exec {
         self.ctl.lines().nth(1)?.strip_prefix(TOPE_MENSAJE)
     }
 
-    /// 7.4 (Fase R I3): `self` es el mismo programa repetido sin el sensor porque el sensor
+    /// 7.4 (I3 de la revision de los bloques 4-6): `self` es el mismo programa repetido sin el sensor porque el sensor
     /// se degrado (`compare_and_report`), y `con` su corrida con el sensor (entera, o a
     /// medias: `SENSOR_TOPE`). Le suma lo que el sensor ubico en `con`: las lineas `viol`
     /// que `self` no tiene y los `FLAGS_DEL_SENSOR`. Devuelve las lineas `viol` agregadas,
@@ -318,7 +318,7 @@ impl Exec {
             .count()
     }
 
-    /// 11.2 (I2 de rev-integral-1): el codigo con el que el programa eligio terminar
+    /// 11.2 (I2): el codigo con el que el programa eligio terminar
     /// (`process.exit(k)`, `process.exitCode = k`) si no es 0, sin lanzar y sin ser el fallo
     /// de enlace del preload (`link_failed`). `None`: exit 0, un throw (THROW_EXIT con su
     /// linea en el canal), timeout, senal o falla del runner.
@@ -575,7 +575,7 @@ impl Runner {
     /// 11.2b (A-H1): el mismo runner (mismos archivos) con los topes mayores con que se confirma un B
     /// que paso uno (`main::confirm`, como el timeout largo de un B en Timeout): el doble de RSS y
     /// cuatro veces la salida. Un tope en 0 (sin tope) queda en 0.
-    /// 11.2c (rev-b11-2b-B N1 = A-H6): el de RSS, con techo `techo_rss` (`main` pasa MemTotal/2: el
+    /// 11.2c: el de RSS, con techo `techo_rss` (`main` pasa MemTotal/2: el
     /// presupuesto entero de node), salvo que el tope solo ya lo pase (entonces queda el tope).
     pub fn con_topes_mayores(&self, techo_rss: u64) -> Runner {
         let mut r = self.prestar();
@@ -628,7 +628,7 @@ impl Runner {
         self.sensor
     }
 
-    /// I3 (revision-b456): el mismo runner (mismos archivos) sin el sensor, para
+    /// I3 (revision de los bloques 4-6): el mismo runner (mismos archivos) sin el sensor, para
     /// repetir A y B sin el cuando uno de los dos corrio sin el (o a medias).
     pub fn sin_sensor(&self) -> Runner {
         let mut r = self.prestar();
@@ -761,7 +761,7 @@ impl Runner {
         self.run_inner(js, Opts { timeout: Some(timeout), ..Opts::default() })
     }
 
-    /// 11.2c/11.2d (rev-b11-final B-F2): `run_with_timeout` de una sola ejecucion: si con el sensor
+    /// 11.2c/11.2d: `run_with_timeout` de una sola ejecucion: si con el sensor
     /// da senal o Timeout, no se repite sin el. Para la repeticion de B con los topes mayores
     /// (`main::confirm`), que corre bajo un turno global: con la repeticion, el turno duraba dos
     /// timeouts largos.
@@ -932,7 +932,7 @@ struct Opts<'a> {
     perezoso: bool,
     /// b7-1: con la cobertura de bloques del preload (`run_con_cobertura`).
     cobertura: bool,
-    /// 11.2d (rev-b11-final B-F2): sin la repeticion sin el sensor de `run_inner` ante senal o
+    /// 11.2d: sin la repeticion sin el sensor de `run_inner` ante senal o
     /// timeout (`run_sin_reintento`).
     sin_reintento: bool,
 }
@@ -1223,7 +1223,7 @@ fn run_file(r: &Runner, script: &Path, start: Instant, timeout: Duration, opts: 
     let take = |b: &Arc<Mutex<Vec<u8>>>| std::mem::take(&mut *b.lock().unwrap_or_else(|e| e.into_inner()));
     let stdout = take(&out_buf);
     let stderr = take(&err_buf);
-    // 11.2b (rev-b11b-B H1): el canal de control tambien lo lee difuzz entero y el programa elige
+    // 11.2b: el canal de control tambien lo lee difuzz entero y el programa elige
     // parte de lo que se escribe ahi (el mensaje de un throw, que el preload recorta a `EXC_MAX`; los
     // nombres de archivo de los marcos). Si pesa mas que el tope de salida no se lee: cuenta como
     // pasarse de salida.
@@ -1244,21 +1244,21 @@ fn run_file(r: &Runner, script: &Path, start: Instant, timeout: Duration, opts: 
             format!("escribio por stdout y stderr {} MiB o mas: paso el tope de salida de {} MiB (lo de mas no se junto; matada al verlo)", n >> 20, r.tope_salida >> 20),
         ))
     } else if por_memoria {
-        // 11.2c (rev-b11-2b-B N5): el pico redondeado hacia arriba (con `>> 20` decia "300 MiB > 300 MiB").
+        // 11.2c: el pico redondeado hacia arriba (con `>> 20` decia "300 MiB > 300 MiB").
         Some((NODE_MEMORIA, format!("paso el tope de RSS de node: {} MiB > {} MiB (pico de node solo, VmHWM; matada al pasarlo)", pico.div_ceil(1 << 20), r.tope_rss >> 20)))
     } else {
         None
     };
 
     let mut ctl = if ctl_excedido { String::new() } else { std::fs::read(&r.ctl).map(|b| decode_lossless(&b)).unwrap_or_default() };
-    // 11.2c (rev-b11-2b-B N2): lo crudo se suelta apenas se decodifica (antes seguia vivo, sombreado,
+    // 11.2c: lo crudo se suelta apenas se decodifica (antes seguia vivo, sombreado,
     // hasta el final). Si la ejecucion paso un tope, su salida no se compara: se decodifica solo un
     // prefijo, con una marca de cuanto se recorto.
     let decodificar = |v: Vec<u8>| {
         if excedida.is_none() || v.len() <= PREFIJO_PARCIAL {
             return decode_lossless(&v);
         }
-        // 11.2d (rev-b11-final B-F3): el corte retrocede (hasta 3 bytes) al principio del caracter
+        // 11.2d: el corte retrocede (hasta 3 bytes) al principio del caracter
         // UTF-8 que parte; si no, un caracter partido se veia como un byte invalido del programa.
         let mut fin = PREFIJO_PARCIAL;
         while fin > PREFIJO_PARCIAL - 3 && v[fin] & 0xC0 == 0x80 {
@@ -1884,7 +1884,7 @@ pub fn matar_vivos() {
     }
 }
 
-/// 11.2b (rev-b11b-A H3): el pico de RSS de node solo (`VmHWM` de `/proc/<pid>/status`), en bytes;
+/// 11.2b: el pico de RSS de node solo (`VmHWM` de `/proc/<pid>/status`), en bytes;
 /// 0 si ya no esta. No cuenta a los procesos que lance el programa.
 fn pico_rss(pid: u32) -> u64 {
     std::fs::read_to_string(format!("/proc/{pid}/status"))
@@ -2673,7 +2673,7 @@ mod tests {
             // El pico que vio difuzz: lejos de los 3 GiB pedidos (la mato a tiempo).
             let pico: u64 = x.mensaje.split("RSS de node: ").nth(1).and_then(|s| s.split(' ').next()).and_then(|n| n.parse().ok()).unwrap();
             assert!(pico < 1024, "pico {pico} MiB: {}", x.mensaje);
-            // 11.2c (rev-b11-2b-B N5): redondeado hacia arriba, nunca "256 MiB > 256 MiB".
+            // 11.2c: redondeado hacia arriba, nunca "256 MiB > 256 MiB".
             assert!(pico > 256, "pico {pico} MiB: {}", x.mensaje);
         }
     }
@@ -2724,7 +2724,7 @@ mod tests {
         }
     }
 
-    /// 11.2c (rev-b11-2b-B N2): el parcial de una ejecucion que paso el tope de salida guarda un
+    /// 11.2c: el parcial de una ejecucion que paso el tope de salida guarda un
     /// prefijo de `PREFIJO_PARCIAL` bytes con una marca, no todo lo juntado decodificado (un B que
     /// escribe 0xff sin fin dejaba 5 bytes por cada uno: 80 MiB en `b.stdout` y 496 MB de difuzz).
     /// Lo que entra en el tope no se recorta.
@@ -2748,7 +2748,7 @@ mod tests {
         assert!(out.starts_with("\u{FFFD}ff") && out.contains("[... difuzz recorto ") && out.contains("la ejecucion paso un tope de node]"), "{}", &out[out.len() - 200..]);
         let e = r.run("console.log(\"x\".repeat(200 * 1024));\n");
         assert_eq!(e.stdout.len(), 200 * 1024 + 1);
-        // 11.2d (rev-b11-final B-F3): el corte cae en medio de un `€` (3 bytes, del 65535 al 65537):
+        // 11.2d: el corte cae en medio de un `€` (3 bytes, del 65535 al 65537):
         // retrocede al principio del caracter, sin U+FFFD.
         let js = "const fs = require(\"fs\");\nfs.writeSync(1, \"a\".repeat(65535));\nconst s = \"€\".repeat(1 << 16);\nfor (;;) fs.writeSync(1, s);\n";
         let Err(p) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| r.run(js))) else {
@@ -2758,7 +2758,7 @@ mod tests {
         assert!(out.starts_with(&format!("{}\n[... difuzz recorto ", "a".repeat(65535))) && !out.contains('\u{FFFD}'), "{:?}", &out[65530..65600]);
     }
 
-    /// 11.2d (rev-b11-final A-N1 = B-F1): con los pipes bloqueantes, lo que el programa escribe por
+    /// 11.2d: con los pipes bloqueantes, lo que el programa escribe por
     /// `process.stdout.write` (4 MiB, mas de lo que entra en el pipe) y despues por `fs.writeSync(2)`
     /// sale entero y en ese orden, el `fs.writeSync(2)` devuelve lo que escribio, y nada se pierde si
     /// el programa sale enseguida (`process.exit`, un throw o `exitCode`). Con 26c5239 (fd 1 no
@@ -2789,7 +2789,7 @@ mod tests {
         assert_eq!((e.status, e.stdout.as_str(), e.stderr.len()), (Status::Exited(0), "ok\n", 1 << 20));
     }
 
-    /// 11.2d (rev-b11-final B-F2): `run_sin_reintento` corre una sola vez: un Timeout con el sensor no
+    /// 11.2d: `run_sin_reintento` corre una sola vez: un Timeout con el sensor no
     /// se repite sin el (con `run_with_timeout` dura dos timeouts y lleva `sensor_caido`).
     #[test]
     fn sin_reintento_corre_una_vez() {
@@ -2813,7 +2813,7 @@ mod tests {
         assert!(t0.elapsed() > una + Duration::from_millis(1000), "{una:?} {:?}", t0.elapsed());
     }
 
-    /// 11.2c (rev-b11-2b-B N6): el archivo de un marco lo puede elegir el programa (`//# sourceURL=` de
+    /// 11.2c: el archivo de un marco lo puede elegir el programa (`//# sourceURL=` de
     /// un eval). Uno de 1 MiB no va al canal (`marco`): antes el canal pasaba un tope de salida de
     /// 512 KiB y el programa, que imprime una linea, iba a recursos/. Uno corto si va.
     #[test]
@@ -2833,7 +2833,7 @@ mod tests {
         assert!(e.ctl.lines().any(|l| l == "marco ffffffffff"), "{}", e.ctl);
     }
 
-    /// 11.2c (rev-b11-2b-B N1 = A-H6): los topes mayores (×2 de RSS, ×4 de salida) con techo de RSS: el
+    /// 11.2c: los topes mayores (×2 de RSS, ×4 de salida) con techo de RSS: el
     /// doble del tope si entra en el techo; si no, el techo; si el tope solo ya lo pasa, el tope. Sin
     /// tope (0), sin tope.
     #[test]
@@ -2849,7 +2849,7 @@ mod tests {
         assert_eq!(r(0).con_topes_mayores(100 << 20).topes(), (0, 64 << 20));
     }
 
-    /// N1 de rev-b11a-B vuelta 2 (integracion del bloque 11): una escritura vacia a stderr no deja un
+    /// N1 de la integracion del bloque 11: una escritura vacia a stderr no deja un
     /// `[stderr] ` suelto pegado a la linea siguiente (node la hace al terminar cada `execFileSync`).
     /// Las no vacias, por las tres vias, siguen con el prefijo.
     #[test]
@@ -2866,7 +2866,7 @@ mod tests {
         assert_eq!((e.status, e.stdout.as_str()), (Status::Exited(0), "x\n[stderr] y\n[stderr] w\n[stderr] r\nhijo: 1\n"), "{}", e.stderr);
     }
 
-    /// 11.2b (rev-b11b-B H1): el mensaje de un throw lo elige el programa y va al canal de control
+    /// 11.2b: el mensaje de un throw lo elige el programa y va al canal de control
     /// (linea `exc`). El preload lo recorta a 64 Ki caracteres (el throw sigue siendo el mismo para
     /// el oraculo: `throw Error` en stdout y en el canal); y un canal que pesa mas que el tope de
     /// salida no se lee: cuenta como pasarse de salida.
@@ -2998,7 +2998,7 @@ mod tests {
         assert!(!registrados().contains(&pid), "sigue registrado despues de cosecharlo");
     }
 
-    /// 11.2b (rev-b11b-A H3): el tope de RSS mide a node solo (`VmHWM`). Un hijo del programa que
+    /// 11.2b: el tope de RSS mide a node solo (`VmHWM`). Un hijo del programa que
     /// reserva 400 MiB (`execFileSync` de otro node) no pasa un tope de 256 MiB de node; node que
     /// reserva lo mismo, si. `Cosecha` sigue cosechando con `waitpid` (status y una vez sola).
     #[test]

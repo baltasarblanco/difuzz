@@ -128,8 +128,8 @@ impl Minifier {
     /// (subproceso.rs: el oraculo tiene que tener los mismos).
     pub const TODOS: &'static [Minifier] = &[Minifier::Swc, Minifier::Oxc];
 
-    /// B5 (decision del usuario, 09-oct): el default de `--minifier` es oxc, el
-    /// objetivo (D1). Cambia el nombre de la celda por defecto.
+    /// B5 (decision del 09-oct): el default de `--minifier` es oxc, el backend
+    /// principal de difuzz. Cambia el nombre de la celda por defecto.
     pub const POR_DEFECTO: Minifier = Minifier::Oxc;
 
     pub fn name(self) -> &'static str {

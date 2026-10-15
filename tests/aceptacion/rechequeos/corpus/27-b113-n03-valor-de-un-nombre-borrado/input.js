@@ -1,4 +1,4 @@
-// 11.2a (B-H3 de rev-b11a-B): el camino nuevo de I6 de punta a punta. Es fixture/issues/12306 de
+// 11.2a (B-H3): el camino nuevo de I6 de punta a punta. Es fixture/issues/12306 de
 // SWC: oxc core_defaults inlinea la expresion de funcion y borra su nombre (`true` contra `false`).
 // Con keep_names la divergencia desaparece, pero B no difiere de A en un nombre (`false` es un valor)
 // y el minificado sin mangle tampoco da lo mismo que A: div/ con `nombres_inconcluso`. Es el costo

@@ -446,8 +446,8 @@ casos) el costo es despreciable.
 
 **Qué cubre y qué no.** El punto ciego queda cubierto solo donde se usa la opción y solo para lo
 que el corpus ejercita. `--crudo` corrió sobre los fixtures de SWC (oxc, carriles A y B: 0
-`CODEGEN`, ver arriba) y no sobre el corpus real: el 0 de ese corpus es del arnés aparte del
-agente codegen-fidelidad (24 933 ejecuciones de los fixtures de SWC y del corpus real, 11-oct;
+`CODEGEN`, ver arriba) y no sobre el corpus real: el 0 de ese corpus es de un arnés aparte, el del
+agente de IA que escribió esas formas (24 933 ejecuciones de los fixtures de SWC y del corpus real, 11-oct;
 ver [`tests/codegen/README.md`](tests/codegen/README.md)), no de esta opción. El bug de los
 paréntesis salió de formas escritas a propósito, que están en `tests/codegen/` (ver
 [Tests y verificaciones](#tests-y-verificaciones)). No mira la pasada observada (el epílogo de un
@@ -789,7 +789,7 @@ Principios:
     misma línea, antes o después del valor
     (`console.log("valor:", [0, bug.length][i])`, `console.log([true, bug][i], "es entero")`,
     `"n=".concat(...)`): la sal llegaba a la línea por la etiqueta, `sal_alcanza` la daba por
-    alcanzada y el caso iba a `known/` (MEDIDO en la revisión del bloque 9, rev-b9-A s01 y s02, y
+    alcanzada y el caso iba a `known/` (MEDIDO en la revisión del bloque 9 y
     con `c9eab79` en los `26-b102-n`); desde 10.2 la sal tiene que caer en un token que difiere de
     A y van a `div/`. El costo, del lado seguro: un positivo cuyo valor elegido es una cadena vacía
     (`''` contra `'bc'`: la sal cae después de la comilla, que A también imprime) o cuya línea la
@@ -813,7 +813,7 @@ Principios:
     "otro")` con `t = [0, bug.length]` (A: `otro`; B y A con más pila: `cero`), o el mismo valor en
     un `if` que imprime una línea que A no tiene (`if (t[i] === 0) console.log("cero")`). La sal
     llega a `cero`, el token que difiere, y el salado también coincide: `known/` (MEDIDO en la
-    revisión A del bloque 10 con oxc 0.153.0 y el bug F, `rev-b10-A/corpus-sal` x02, x03 y x05,
+    revisión A del bloque 10 con oxc 0.153.0 y el bug F, en tres programas de ese tipo,
     en las 4 celdas de oxc; igual con `c9eab79`). Por la salida no se distingue de un positivo de
     verdad (`rec(4800) ? "desbordo" : "cupo"`, que sigue en `known/`): la sal no lo puede cerrar.
     Caso fijo `26-b102b-l01` en la aceptación, con su destino actual.
@@ -894,8 +894,8 @@ Principios:
   exporta, observa o devuelve el programa pasa por `ser` del preload (`src/preload.js`,
   `serFuncion`), que hasta 10.3 escribía toda función como `fn`, sin nombre: un bug de keep_names
   que solo se veía en lo que exporta un módulo mudo quedaba en `iguales` también en carril_a
-  (MEDIDO en la revisión del bloque 9, rev-b9-A `corpus-obs`: `export function make(handler = ()
-  => {}) { return handler; }` con `--invocar`, o01, y un objeto exportado con esa función, o02).
+  (MEDIDO en la revisión del bloque 9: `export function make(handler = ()
+  => {}) { return handler; }` con `--invocar`, y un objeto exportado con esa función).
   Ahora la escribe como `util.inspect`, `[Function: handler]` o `[Function (anonymous)]`, y la
   comparación la trata como al resto de los nombres (arriba): borrada en core_defaults, cruda en
   carril_a (o02 va a `div/` en oxc carril B carril_a, caso `26-b103-o02`; o01 con `--invocar`, el
@@ -1211,7 +1211,7 @@ corte, el mismo comando sigue desde el primer paso sin terminar.
 ## Corpus
 
 difuzz recibe un directorio con archivos `input.js`. Los corpus de `tests/` sirven para verificar
-difuzz, no para buscar bugs; para eso se usan tres, cada uno con un rol (decisión D2,
+difuzz, no para buscar bugs; para eso se usan tres, cada uno con un rol (decidido el
 10-oct-2026):
 
 | Corpus | Rol | De dónde sale | Cuándo se corre |

@@ -56,8 +56,8 @@ fn con_salto(mut s: String) -> String {
 mod tests {
     use super::*;
 
-    /// Aceptacion de M29 con el reducido de O1 (reconstruido: el original de
-    /// `$F/agente-1/reducidos/` ya no existe).
+    /// Aceptacion de M29 con el reducido de O1 (reconstruido: el reducido original
+    /// no se conservo).
     #[test]
     fn emite_o1_de_oxc() {
         let d = std::env::temp_dir().join(format!("difuzz-test-emitir-{}", std::process::id()));

@@ -58,7 +58,7 @@ impl Traza {
         self.pasos.push((nombre, resultado.into()));
     }
 
-    /// M1 (revision-b456): un paso previo a clasificar (hoy: A y B repetidos sin
+    /// M1 (revision de los bloques 4-6): un paso previo a clasificar (hoy: A y B repetidos sin
     /// el sensor, main::compare_and_report), primero en la seccion.
     pub fn anteponer(&mut self, nombre: &'static str, resultado: impl Into<String>) {
         self.pasos.insert(0, (nombre, resultado.into()));
@@ -379,7 +379,7 @@ pub fn clasificar<'a>(
                 let par = match f {
                     "tdz_atrapada" => ("tdz_atrapada_irrelevante", "tdz_atrapada_inconcluso"),
                     "coercion_symbol" => ("coercion_symbol_irrelevante", "coercion_symbol_inconcluso"),
-                    // I2 (revision-b456): la TDZ no atrapada.
+                    // I2 (revision de los bloques 4-6): la TDZ no atrapada.
                     "tdz" => ("tdz_irrelevante", "tdz_inconcluso"),
                     _ => ("extends_atrapado_irrelevante", "extends_atrapado_inconcluso"),
                 };
@@ -592,7 +592,7 @@ fn names_visible(original: &str, a_stdout: &str) -> bool {
 /// el costo de keep_* apagado (`f.name`, `Foo { x: 7 }` impreso como `{ x: 7 }`),
 /// no un bug. Se minifica el original ya impreso: es el mismo programa.
 ///
-/// 11.3 (I6 de rev-integral-1, la regla de t-principio): con eso solo no alcanza. keep_names
+/// 11.3 (I6, la regla de t-principio): con eso solo no alcanza. keep_names
 /// tambien apaga pasadas de oxc (el inlining de una funcion o clase anonima de un solo uso, su
 /// borrado si no se usa, el borrado del nombre de una expresion de funcion): un bug real en una de
 /// ellas desaparece igual con keep_names y, en un programa que nombra `.name` en cualquier lado
@@ -694,14 +694,14 @@ pub(crate) fn difiere_solo_en_nombres(a: &runner::Exec, b: &runner::Exec, origin
     let (mut ids_a, mut ids_b) = (None, None);
     let nombre = |t: &str, conocidos: &std::collections::HashSet<String>| es_identificador(t) && !NO_SON_NOMBRES.contains(&t) && conocidos.contains(t);
     if la.len() != lb.len() {
-        // 11.2a (A-H1 de rev-b11a-A): util.inspect corta una instancia en varias lineas segun el
+        // 11.2a (A-H1): util.inspect corta una instancia en varias lineas segun el
         // largo del texto, y un nombre largo en A y mangleado en B cambia el corte
         // (`ConfiguracionDelServidorPrincipal {` en 5 lineas contra `t {` en una). Con otra cantidad
         // de lineas se compara la salida entera sin espacios ni saltos, token por token en la misma
         // posicion (sin alinear: un token de mas o de menos, como una linea repetida, no pasa), y
         // cada par distinto tiene que ser un nombre de cada lado. Un cambio solo de espacios o de
         // saltos no pasa.
-        // H4 de rev-b11a-A vuelta 2 (integracion del bloque 11): util.inspect corta DENTRO de una
+        // H4 de la integracion del bloque 11: util.inspect corta DENTRO de una
         // instancia (o de un arreglo, de un Map, ...), nunca entre dos valores de primer nivel. Los
         // saltos de linea fuera de `{`/`[`/`(` se conservan como token: un `join("\n")` contra un
         // `join(" ")` (A `handler\n1`, B `e 1`) ya no pasa por el nombre que cambia al lado. Con
@@ -748,7 +748,7 @@ pub(crate) fn difiere_solo_en_nombres(a: &runner::Exec, b: &runner::Exec, origin
                 (v, quitados)
             };
             let ((px, qa), (py, qb)) = (sin_prefijos(&tx, &ca), sin_prefijos(&ty, &cb));
-            // H4 (D5/D7 de rev-b11a-A vuelta 2): minificar puede dejar anonima una clase (c14), no
+            // H4 (D5/D7): minificar puede dejar anonima una clase (c14), no
             // darle nombre a un objeto plano. B con mas prefijos que A (`{ x: 1 }` contra
             // `t { x: 1 }`, o `console {}`) no pasa.
             if qb > qa {
@@ -779,7 +779,7 @@ pub(crate) fn difiere_solo_en_nombres(a: &runner::Exec, b: &runner::Exec, origin
         // Los espacios que cambian no cuentan (`Foo { x: 7 }` contra `{ x: 7 }`: util.inspect no
         // pone el prefijo ni su espacio de una instancia sin nombre), pero una linea en que solo
         // cambian espacios no difiere en un nombre.
-        // H5 de rev-b11a-A vuelta 2 (integracion del bloque 11): la LCS deja pasar un token de B sin
+        // H5 de la integracion del bloque 11: la LCS deja pasar un token de B sin
         // par en A (A `Object`, B `Object Object`). Lo que B cambia tiene que reemplazar algo de A o
         // faltar (`Foo { x: 7 }` contra `{ x: 7 }`, `name: handler` contra `name: `): B con mas
         // tokens cambiados que A en la linea no pasa.
@@ -974,7 +974,7 @@ fn depth_recheck(
     Some(recheck::veredicto_neutralizado(a, b, deep, &b2, None, || camino(&b2)))
 }
 
-/// M17: oxc no soporta sloppy (D1 del CLAUDE.md). Ante una divergencia de oxc
+/// M17: oxc no soporta sloppy (lo que solo pasa en sloppy no es un bug para oxc). Ante una divergencia de oxc
 /// en el carril A: si el original con `"use strict"` es valido para node y la
 /// divergencia desaparece al minificarlo asi, es "solo sloppy" (`Ok(true)`). Si
 /// no es estricto-valido, `Err(nota)`: queda en div/ para confirmar en el
@@ -988,7 +988,7 @@ fn depth_recheck(
 /// (`recheck::rename_arguments`) y rige el mismo `veredicto`: solo si la
 /// divergencia desaparece y el camino se sostiene es "solo sloppy"
 /// (`SiRenombrando`). Si renombrar no alcanza para que compile, sigue `Err`.
-/// B1 (revision-b456): ademas el renombre solo (en sloppy) tiene que dar lo mismo
+/// B1 (revision de los bloques 4-6): ademas el renombre solo (en sloppy) tiene que dar lo mismo
 /// que A; si no, `Err` (el renombre cambio el programa, p. ej. `var arguments;`).
 /// n-principio: rige `recheck::veredicto_neutralizado` (B == A'): con `veredicto`, un
 /// bug en la rama que solo corre en sloppy (n33: `f() === undefined ? "estricto" :
@@ -1025,7 +1025,7 @@ fn sloppy_only(
         let variante = renombrado.as_ref().map(|r| format!("\"use strict\";\n{r}"));
         match variante {
             Some(v) if runner.node_accepts(&v) => {
-                // B1 (revision-b456, r01-args-getter): el renombre tiene que ser neutro.
+                // B1 (revision de los bloques 4-6, r01-args-getter): el renombre tiene que ser neutro.
                 // `var arguments;` sin inicializador conserva el objeto `arguments` en
                 // sloppy; renombrado vale `undefined`, A' lanza en la linea del bug y la
                 // tapa. Se corre el renombrado SIN "use strict": si no da lo mismo que A,
@@ -1120,7 +1120,7 @@ mod tests {
         assert!(v.is_empty());
     }
 
-    /// 11.3 (I6 de rev-integral-1): el re-chequeo de nombres solo explica una divergencia en que
+    /// 11.3 (I6): el re-chequeo de nombres solo explica una divergencia en que
     /// B difiere de A en nombres de su texto. El bug E de oxc (`-2` contra `NaN`), un `typeof` que
     /// cambia o un nombre que no esta en el minificado no son nombres.
     #[test]
@@ -1158,7 +1158,7 @@ mod tests {
         assert!(solo(&ok("handler\n"), &ok("otro\n"), o, m).is_err(), "`otro` no esta en el minificado");
         assert!(solo(&ok("handler\n"), &ok("e\nhandler\n"), o, m).is_err(), "otra cantidad de lineas");
         assert!(solo(&ok("handler\n"), &ex(Status::Exited(1), "e\n"), o, m).is_err(), "otro estado");
-        // 11.2a (A-H1 de rev-b11a-A, caso c14): util.inspect corta en otro lugar porque el nombre
+        // 11.2a (A-H1): util.inspect corta en otro lugar porque el nombre
         // cambia de largo. Con otra cantidad de lineas se comparan los tokens sin blancos, en la
         // misma posicion: pasa si lo distinto son nombres; no pasa si solo cambian saltos, si hay
         // un token de mas (una linea repetida) o si ademas cambia un valor.
@@ -1174,7 +1174,7 @@ mod tests {
         assert!(solo(&ok(largo), &ok("t { puerto: 8081, anfitrion: 'localhost' }\n"), o3, m3).is_err(), "el corte y un valor");
         assert!(solo(&ok("t {\n  puerto: 8080\n}\n"), &ok("t { puerto: 8080 }\n"), o3, m3).is_err(), "solo saltos");
         assert!(solo(&ok("handler\n"), &ok("handler\nhandler\n"), o, m).is_err(), "una linea repetida");
-        // H4 de rev-b11a-A vuelta 2: con otra cantidad de lineas, un salto de primer nivel que pasa
+        // H4 (integracion del bloque 11): con otra cantidad de lineas, un salto de primer nivel que pasa
         // a espacio (D1) o un prefijo que B pierde con un salto (D3) no pasan por el nombre de al
         // lado; B que gana un prefijo de instancia (D5, `t {`; D7, `console {`) tampoco.
         assert!(solo(&ok("handler\n1\n"), &ok("e 1\n"), o, m).is_err(), "D1");
@@ -1182,7 +1182,7 @@ mod tests {
         assert!(solo(&ok("{ x: 1 }\nhandler\n"), &ok("t { x: 1 } e\n"), o, m).is_err(), "D5");
         assert!(solo(&ok("{}\nhandler\n"), &ok("console {} e\n"), o, m).is_err(), "D7");
         assert!(solo(&ok("{\n  puerto: 8080\n}\n"), &ok("t { puerto: 8080 }\n"), o3, m3).is_err(), "B gana el prefijo");
-        // H5 de rev-b11a-A vuelta 2: en la misma linea, un nombre de mas en B (D6) no pasa; uno
+        // H5 (integracion del bloque 11): en la misma linea, un nombre de mas en B (D6) no pasa; uno
         // reemplazado o uno que falta en B, si (arriba).
         assert!(solo(&ok("Object\n"), &ok("Object Object\n"), o, m).is_err(), "D6");
         assert!(solo(&ok("handler Object\n"), &ok("e e Object\n"), o, m).is_err(), "D6 con un reemplazo");
@@ -1366,9 +1366,9 @@ mod tests {
         assert_eq!(a.stdout, "1\nrest\nfin\n");
         assert_ne!(b.stdout, a.stdout, "oxc ya no tiene el bug de 9460: buscar otro");
         assert_eq!(sloppy_only(&r, (Minifier::Oxc, Preset::CoreDefaults), &o, &m, &a, &b), Ok(Sloppy::No));
-        // B1 (revision-b456, r01-args-getter): `var arguments;` sin inicializador conserva
+        // B1 (revision de los bloques 4-6, r01-args-getter): `var arguments;` sin inicializador conserva
         // el objeto `arguments`; renombrado vale `undefined` y A' lanza en la linea del
-        // bug (Issue A de ENVIAR.md: el spread con getter se mueve). Antes: SiRenombrando
+        // bug (el bug A de oxc: el spread con getter se mueve). Antes: SiRenombrando
         // (known/). Ahora el renombre solo ya cambia A: inconcluso (div/).
         let r01 = "function f() {\n  var arguments;\n  let result = \"FAIL\";\n  const o = { ...{ get prop() { result = \"PASS\"; } } };\n  console.log(arguments.length, result);\n  return o;\n}\nf(1, 2);\n";
         for preset in [Preset::CoreDefaults, Preset::CarrilA] {
@@ -1503,9 +1503,9 @@ mod tests {
         let r = runner::Runner::new(&preload, crate::test_util::id_runner(), std::time::Duration::from_secs(20));
         let cfg = preset.build(Minifier::Oxc, kind);
         let tdz = "try { x; console.log(\"sin tdz\"); } catch (e) { console.log(\"tdz\"); }\nlet x = 1;\n";
-        // I2 (revision-b456): la TDZ NO atrapada tambien pasa por el re-chequeo. oxc borra
-        // `x;` (asume que no hay TDZ): known/. r09-tdz-final-getter: el Issue A de
-        // ENVIAR.md (el spread con getter se mueve) y `x; let x;` al final: antes known/
+        // I2 (revision de los bloques 4-6): la TDZ NO atrapada tambien pasa por el re-chequeo. oxc borra
+        // `x;` (asume que no hay TDZ): known/. r09-tdz-final-getter: el bug A de
+        // oxc (el spread con getter se mueve) y `x; let x;` al final: antes known/
         // ("No TDZ Violation") sin re-chequeo, ahora div/ (`tdz_irrelevante`).
         let nc = "console.log(\"a\");\nx;\nlet x = 1;\n";
         let r09 = "let result = \"FAIL\";\nconst o = { ...{ get prop() { result = \"PASS\"; } } };\nconsole.log(result);\nconsole.log(o);\nx;\nlet x;\n";
@@ -1579,7 +1579,7 @@ mod tests {
         std::fs::remove_dir_all(&d).unwrap();
     }
 
-    /// 7.4 (Fase R I3): con mas de MAX_PAUSAS (256) excepciones atrapadas el sensor se
+    /// 7.4 (I3 de la revision de los bloques 4-6): con mas de MAX_PAUSAS (256) excepciones atrapadas el sensor se
     /// apaga y A y B se comparan sin el (`sensor_tope`). Antes los positivos iban a div/
     /// (sin el sensor no hay `tdz_atrapada`); ahora A hereda lo que el sensor vio antes del
     /// tope y el re-chequeo de violaciones (sin el sensor, B == A') decide. Los negativos
@@ -1638,9 +1638,9 @@ mod tests {
         std::fs::remove_dir_all(&d).unwrap();
     }
 
-    /// Integracion 7.1 + 7.4 (H3 de rev-7.1; rev-int H1), de punta a punta con oxc: casos de
+    /// Integracion 7.1 + 7.4 (H3 de la revision de 7.1; H1 de la de la integracion), de punta a punta con oxc: casos de
     /// aceptacion de 7.4 (`23-t01`, `23-t02`), de 7.1 (`23-b71-r01`, con el ruido de 7.4 para que
-    /// A y B pasen el tope) y de rev-int (`23-i01`, `23-i02`: el programa nota el sensor). A y B
+    /// A y B pasen el tope) y de la revision de la integracion (`23-i01`, `23-i02`: el programa nota el sensor). A y B
     /// se comparan sin el sensor (I3) y el camino de B (7.1) sale de una corrida de B con el sensor
     /// (tope 4096) que tiene que correr entera, dar lo mismo que B y tener la misma cobertura de
     /// V8 que B sin el sensor (`recheck::camino_sensor_i3`): t01/t02 known/; r01 div/ (B todavia
@@ -1702,8 +1702,8 @@ mod tests {
 
     /// t-principio: "un bug real nunca termina en known/; solo un re-chequeo
     /// concluyente manda ahi". `coercion`, `builtins`, `fn_tostring`/`stack` (paso
-    /// contenido) y `profundidad` (bug en la misma linea) iban a known/ con el Issue A
-    /// de ENVIAR.md al lado (MEDIDO con el binario de la fase R). Por flag: el
+    /// contenido) y `profundidad` (bug en la misma linea) iban a known/ con el bug A
+    /// de oxc al lado (MEDIDO con el binario de la revision de los bloques 4-6). Por flag: el
     /// positivo legitimo sigue en known/ y el adversarial va a div/ con el paso en la traza.
     #[test]
     fn flags_sin_rechequeo_de_punta_a_punta() {
@@ -1726,7 +1726,7 @@ mod tests {
         let preload = runner::Preload::write_tagged("principio").unwrap();
         let r = runner::Runner::new(&preload, crate::test_util::id_runner(), std::time::Duration::from_secs(20));
         let cfg = preset.build(Minifier::Oxc, kind);
-        // Issue A de ENVIAR.md: el spread con getter se mueve (oxc imprime "FAIL").
+        // Bug A de oxc: el spread con getter se mueve (oxc imprime "FAIL").
         let bug = "let result = \"FAIL\";\nconst o = { ...{ get prop() { result = \"PASS\"; } } };\nconsole.log(result);\nconsole.log(o);\n";
         let casos: [(&str, String, bool, &str); 22] = [
             // n-principio (noche2/n-principio/corpus-ataque): el bug en la rama que solo corre con
@@ -1777,7 +1777,7 @@ mod tests {
         std::fs::remove_dir_all(&d).unwrap();
     }
 
-    /// 11.2c (rev-b11-2b-A H3, MUT-e): cada re-chequeo que corre node (salvo profundidad, que prueba
+    /// 11.2c: cada re-chequeo que corre node (salvo profundidad, que prueba
     /// `salida_usuario::tope_de_memoria_de_node_va_a_recursos`) y pasa un tope de node queda
     /// Inconcluso, con la nota del tope, y el caso sigue en div/: el `Excedido` no sale de `clasificar`
     /// (si saliera, el caso iria entero a recursos/ y el test paniquea con ese payload). Los casos son

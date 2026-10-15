@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # barrido-sintetico.sh: genera una tanda con scripts/generar.cjs y la corre con difuzz (oxc).
-# D2, 10-oct: el corpus sintetico es la fuente de exploracion y la regresion de lo ya reportado.
+# Desde el 10-oct (MANUAL.md, Corpus) el corpus sintetico es la fuente de exploracion y la regresion de lo ya reportado.
 #
 # uso: barrido-sintetico.sh --semilla N [opciones] regresion OUT [BIN]
 #      barrido-sintetico.sh --semilla N [opciones] explorar FAMILIA OUT [BIN]

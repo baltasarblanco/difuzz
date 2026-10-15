@@ -20,7 +20,7 @@ Por qué cada clase esperada:
 - `oxc-o1`, `oxc-o3*`: el minificado de oxc es un SyntaxError en script y en módulo, así que ThrowNew en las 4 celdas de oxc.
 - `oxc-o2-casos` (imprime `"ok"`): en sloppy, asignar al nombre de una function expression se ignora sin error. Solo
   diverge en módulo (TypeError).
-- `oxc-o2-typeof` (texto de ENVIAR): `number` contra `function` en A (Stdout) y TypeError en B.
+- `oxc-o2-typeof` (la forma del texto de reporte a oxc): `number` contra `function` en A (Stdout) y TypeError en B.
 - `oxc-n6422-2-log`: `PASS` contra `FAIL` (Stdout) en las 4 celdas de oxc.
 - `oxc-n6422-2-fixture`: tiene `import`, así que en carril A es `parse_esm` (descarte). En B, AssertionError
   (ThrowNew) en oxc **y en swc**: `@swc/core` 1.16.2 también borra el spread con getter (verificado a mano).

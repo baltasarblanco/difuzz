@@ -280,7 +280,7 @@ pub fn camino_sensor(b: &runner::Exec, con_sensor: bool, clases: Option<&[&str]>
     }
 }
 
-/// Integracion 7.1 + 7.4 (H3 de rev-7.1, H1/H2 de rev-int): el camino de B cuando A y B se
+/// Integracion 7.1 + 7.4 (H3 de la revision de 7.1, H1/H2 de la de la integracion): el camino de B cuando A y B se
 /// compararon sin el sensor (I3: alguno paso el tope o se cayo con el). B (`b`, sin el sensor)
 /// no tiene sensor que mirar, asi que se corre B otra vez CON el sensor (tope
 /// `runner::MAX_PAUSAS_MAYOR`) y cobertura, y otra SIN el sensor con cobertura. La corrida con el
@@ -288,7 +288,7 @@ pub fn camino_sensor(b: &runner::Exec, con_sensor: bool, clases: Option<&[&str]>
 /// como `b` (salida y estado, `oracle::compare`), la de sin sensor tambien, y las dos tienen la
 /// MISMA cobertura de bloques de V8. Si no, no se sabe (div/): un programa que nota el sensor
 /// (cada pausa llama a su `Error.prepareStackTrace`) y toma otro camino con el no puede
-/// prestarle a B un camino que B sin el sensor no toma (rev-int H1, MEDIDO). 2 node, y solo
+/// prestarle a B un camino que B sin el sensor no toma (H1 de la revision de la integracion, MEDIDO). 2 node, y solo
 /// cuando todo lo demas ya daba Explica (closure de `veredicto_neutralizado`).
 /// Integracion 7.1b: las dos corridas son del minificado con los contadores de rama de 7.1b
 /// (`texto_instrumentado` + `analisis::ramas`, lo mismo que `camino_entorno`): la cobertura de V8
@@ -1297,7 +1297,7 @@ pub fn neutralize_coercion(src: &str, kind: SourceKind) -> Option<String> {
 
 /// b4-a: los flags del sensor de violaciones (preload.js) que re-chequea
 /// `violaciones_matter`, cada uno con la clase de su linea `viol`.
-/// I2 (revision-b456): `tdz` (la no atrapada) tambien: antes iba a known/ sin
+/// I2 (revision de los bloques 4-6): `tdz` (la no atrapada) tambien: antes iba a known/ sin
 /// re-chequeo (r09-tdz-final-getter: un bug ajeno y `x; let x;` al final). El
 /// `extends` no atrapado no esta aca: es el flag `extends`, que ya re-chequea
 /// `Rechequeo::Extends` (clasificar::extends_matters).
@@ -1378,7 +1378,7 @@ pub fn violaciones_matter(
 /// `None` si no parsea o si alguna violacion no se ubica (V8 da 0:0 para un
 /// heredero literal, p. ej.): un re-chequeo a medias no es concluyente.
 ///
-/// n-principio (MEJORAS, Fase R I2): V8 ubica una TDZ dentro de `return`/`throw` en la
+/// n-principio (I2 de la revision de los bloques 4-6): V8 ubica una TDZ dentro de `return`/`throw` en la
 /// SENTENCIA, no en el identificador (`function g() { return x; }` da la columna de
 /// `return`). Si una `tdz` no cae en un identificador, se busca un `return`/`throw` que
 /// empiece justo ahi y se cuentan sus candidatos: identificadores de su argumento cuyo
@@ -2274,7 +2274,7 @@ impl Salado {
 /// `util.inspect` tambien difiere, y la sal no llega a un nombre: Inconcluso, como un numero (lado
 /// seguro; MEDIDO: el positivo b9-int/sonda-sal k2, la funcion impresa elegida por el desborde, pasa
 /// de known/ a div/ en carril_a). Sin keep_names los nombres se borran, como antes.
-/// 10.2 (R1 de rev-b9-A): ademas, en cada una de esas lineas, B salado tiene que ser B con `dz`
+/// 10.2 (R1): ademas, en cada una de esas lineas, B salado tiene que ser B con `dz`
 /// insertados (`inserciones_de_sal`) y al menos una insercion tiene que caer dentro o al final de
 /// un token de B que difiere de A (`tokens_cambiados`; tokens: corridas de letras, corridas de
 /// digitos y cada signo suelto). Antes alcanzaba con mas `dz` en la linea, y una etiqueta salable
@@ -2732,7 +2732,7 @@ mod tests {
         assert!(matches!(camino_sensor(&b, false, None), Camino::NoSe(_)));
         b.ctl = "viol extends 0:10\nsensor_tope\n".into();
         assert!(matches!(camino_sensor(&b, true, Some(&["extends"])), Camino::NoSe(ref n) if n.contains("sensor_tope")));
-        // Integracion 7.1 + 7.4 (rev-int H1): heredar las violaciones de la corrida con el
+        // Integracion 7.1 + 7.4 (H1 de la revision de la integracion): heredar las violaciones de la corrida con el
         // sensor (7.4) no le da a B sin el sensor un camino: sigue sin saberse.
         let mut sin = ex(Status::Exited(0), "");
         sin.heredar_violaciones(&ex(Status::Exited(0), ""));
@@ -2788,7 +2788,7 @@ mod tests {
         //   cambia (`localizada`). Con la misma forma pasaba n23 (el bug en la rama del scope).
         assert!(inconcluso(v(&ok("u\n3\n"), &ok("u\n4\n"), &ok("u\nu\n"), &ok("u\nu\n"), None)));
         assert!(inconcluso(v(&ok("-2\n"), &ok("NaN\n"), &ok("nok\n"), &ok("nok\n"), None)));
-        // I1 (revision-b456, r08-readonly-getter): A' lanza en la linea donde B difiere.
+        // I1 (revision de los bloques 4-6, r08-readonly-getter): A' lanza en la linea donde B difiere.
         assert!(inconcluso(v(&ok("1 PASS\n"), &ok("1 FAIL\n"), &th("!dz throw TypeError\n"), &th("!dz throw TypeError\n"), None)));
         // La divergencia sigue con la asuncion neutralizada.
         assert_eq!(v(&ok("1\n"), &ok("2\n"), &ok("1\n"), &ok("2\n"), None), Recheck::NoExplica);
@@ -3021,7 +3021,7 @@ mod tests {
         // Una linea que A no tiene tambien tiene que traer la sal.
         assert_eq!(sal_alcanza(&ok("a\n"), &ok("a\ncupo\n"), &ok("adz\ncupodz\n")), Ok(()));
         assert!(sal_alcanza(&ok("a\n"), &ok("a\n7\n"), &ok("adz\n7\n")).is_err());
-        // 10.2 (R1 de rev-b9-A): la sal tiene que caer en lo que difiere, no en una etiqueta de la
+        // 10.2 (R1): la sal tiene que caer en lo que difiere, no en una etiqueta de la
         // misma linea (s01: antes, despues; concatenada). Las salidas son las de node con oxc 0.153.0.
         let r1 = |a: &str, b: &str, bs: &str| sal_alcanza(&ok(a), &ok(b), &ok(bs));
         for (a, b, bs) in [("valor: 2\n", "valor: 0\n", "valor:dz 0\n"), ("false es entero\n", "true es entero\n", "true es enterodz\n"), ("n=2\n", "n=0\n", "n=dz0\n")] {
@@ -3326,7 +3326,7 @@ mod tests {
         let g = "console.log(typeof __difuzzNeutroRama, typeof __difuzzNeutroThis);\n";
         assert_eq!(r.run_con_cobertura(g, &[], &[]).stdout, "undefined undefined\n");
         assert_eq!(r.run_con_cobertura(g, &[], &[GANCHOS]).stdout, "function function\n");
-        // S2: lo que el programa pisa al final no vacia ni aplana la cobertura (rev-7.1b x8, x8b).
+        // S2: lo que el programa pisa al final no vacia ni aplana la cobertura (revision de 7.1b).
         for pisa in [
             "String.prototype.startsWith = function () { return true; };",
             "Object.getPrototypeOf([][Symbol.iterator]()).next = function () { return { done: true }; };",
@@ -3366,7 +3366,7 @@ mod tests {
         assert!(neutralize_violaciones("try { class A extends [] {} } catch (e) {}\n", k, "extends 0:0").is_none());
         assert!(neutralize_violaciones("try { x; } catch (e) {}\nlet x;\n", k, "tdz 0:6\nsymbol -").is_none());
         assert!(neutralize_violaciones("x;\n", k, "tdz 5:0").is_none());
-        // n-principio (Fase R I2): V8 da la columna del `return`/`throw`. Un solo candidato
+        // n-principio (I2 de la revision de los bloques 4-6): V8 da la columna del `return`/`throw`. Un solo candidato
         // (ligado con let/const/class): solo el pasa a `void 0`; el resto de la sentencia queda.
         let out = neutralize_violaciones("function g() { return x; }\nlet x = 1;\n", k, "tdz 0:15").unwrap();
         assert!(out.contains("return void 0") && out.contains("let x = 1"), "{out}");
@@ -3431,7 +3431,7 @@ mod tests {
             assert_eq!((a.stdout.as_str(), b.stdout.as_str()), ("-2\n", "NaN\n"), "oxc ya no pliega mal Math.cbrt(-8): {prog}");
             assert!(matches!(rc, Recheck::Inconcluso(ref n) if n.contains("B != A'")), "{prog}: {rc:?}");
         }
-        // n-principio (Fase R I2): la TDZ en un `return` (V8 la ubica en la sentencia). Antes
+        // n-principio (I2 de la revision de los bloques 4-6): la TDZ en un `return` (V8 la ubica en la sentencia). Antes
         // inconcluso por "no pude ubicar"; ahora se neutraliza el unico candidato.
         // - Positivo: oxc borra la llamada (asume que no hay TDZ) y B se comporta como A'.
         // - n15 (el bug en el catch): B != A', inconcluso. n16 (el bug en la misma sentencia,
@@ -3509,7 +3509,7 @@ mod tests {
         let e = m.run("x;\nexport let x;\n");
         assert!(e.flags.iter().any(|f| f == "tdz") && !e.flags.iter().any(|f| f == "tdz_atrapada"), "{:?}", e.flags);
         assert_eq!(super::violaciones(&e), ["tdz 0:0"], "{}", e.ctl);
-        // I3 (revision-b456): tras MAX_PAUSAS (256) el sensor se apaga y el canal lo dice.
+        // I3 (revision de los bloques 4-6): tras MAX_PAUSAS (256) el sensor se apaga y el canal lo dice.
         let e = r.run("let n = 0;\nfor (let i = 0; i < 300; i++) { try { null.x; } catch (e) { n++; } }\nconsole.log(n);\n");
         assert_eq!(e.stdout, "300\n");
         assert_eq!(e.sensor_degradado(), Some(crate::runner::SENSOR_TOPE), "{}", e.ctl);
@@ -3579,7 +3579,7 @@ mod mensaje_nombre_tests {
     fn linea_con_nombre_llamadas_v8() {
         let si = |x: &str, y: &str| assert!(linea_con_nombre(x, y), "{x} | {y}");
         let no = |x: &str, y: &str| assert!(!linea_con_nombre(x, y), "{x} | {y}");
-        // c03 de rev-b8-A: `f()()`, con o sin argumentos.
+        // El caso de 25-b93-p03: `f()()`, con o sin argumentos.
         si("TypeError: f(...) is not a function", "TypeError: t(...) is not a function");
         si("f(...)(...) is not a function", "e(...)(...) is not a function");
         si("o.f(...) is not a function", "e.f(...) is not a function");

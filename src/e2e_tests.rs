@@ -85,7 +85,7 @@ enum Back {
     PanicaConOraculo,
     /// El hijo minificador real (subproceso.rs) que duerme mas que su timeout.
     HijoLento,
-    /// M5 (revision-b456): el backend de la celda de verdad (`--minifier`,
+    /// M5 (revision de los bloques 4-6): el backend de la celda de verdad (`--minifier`,
     /// `--config` de la fila), con `Ctx::medido` como en produccion: corren los
     /// re-chequeos de su politica (los backends falsos no se pueden re-minificar).
     Celda,
@@ -173,7 +173,7 @@ fn tabla() -> Vec<Fila> {
             destino: Destino::Div,
             meta: &["kind: Stdout\n", "\nobserved: true\n", "\nknown: no\n", TRAZA_DIV],
         },
-        // 11.4 (I7 de rev-integral-1): el minificado muere por senal (SIGSEGV, como un crash de
+        // 11.4 (I7): el minificado muere por senal (SIGSEGV, como un crash de
         // V8) y el original no: ExitStatus en div/. Con `Signal => Same` en `oracle::compare` (la
         // mutacion m3 de la revision) daba iguales. B se repite sin el sensor (`sensor_caido`) y
         // A y B se comparan sin el (I3): la traza lo dice.
@@ -185,7 +185,7 @@ fn tabla() -> Vec<Fila> {
             destino: Destino::Div,
             meta: &["kind: ExitStatus\n", "\nobserved: false\n", "\nknown: no\n", "\nminificado: Signal en ", TRAZA_SENAL],
         },
-        // 11.1 (I1 de rev-integral-1): lo que el programa escribe directo a stderr se compara (el
+        // 11.1 (I1): lo que el programa escribe directo a stderr se compara (el
         // preload lo pasa a stdout como `[stderr] ...`). Antes: iguales (con algo en stdout) o
         // descarte `mudo_sin_bindings` (sin nada).
         Fila {
@@ -241,7 +241,7 @@ fn tabla() -> Vec<Fila> {
             meta: &["\nknown: sensor, asuncion: oxc: No Monkey-Patching Built-ins\n", "\nflags_a: builtins\n", TRAZA_BUILTINS],
         },
         // b4-a (R1-H04 / C3): flag del sensor de violaciones atrapadas (preload.js,
-        // inspector) -> asuncion de la tabla de oxc. M5 (revision-b456): por el camino de
+        // inspector) -> asuncion de la tabla de oxc. M5 (revision de los bloques 4-6): por el camino de
         // produccion (oxc de verdad, `Ctx::medido` y el runner de la celda, con el sensor
         // por la politica de oxc), asi corre el re-chequeo de violaciones. Antes: `Rompe`
         // y `medido = None` (sin re-chequeo) y `flags_b: stack,...`, un detalle de V8.
@@ -253,7 +253,7 @@ fn tabla() -> Vec<Fila> {
             destino: Destino::Known,
             meta: &["\nknown: sensor, asuncion: oxc: No TDZ Violation (atrapada)\n", TRAZA_TDZ_ATRAPADA],
         },
-        // 11.3 (I6 de rev-integral-1): el re-chequeo de nombres de core_defaults, por el camino de
+        // 11.3 (I6): el re-chequeo de nombres de core_defaults, por el camino de
         // produccion (oxc de verdad). Positivo: el `.name` de una funcion que oxc manglea va a
         // known/. Negativo: el bug E de oxc (`Math.cbrt(-8)` -> NaN) en un programa que nombra
         // `.name` va a div/: con keep_names el bug sigue (NoExplica). Si el paso de nombres diera
@@ -276,7 +276,7 @@ fn tabla() -> Vec<Fila> {
             destino: Destino::Known,
             meta: &["kind: Stdout\n", TRAZA_NOMBRES_RENOMBRE],
         },
-        // 11.2a (B-H3 de rev-b11a-B): el camino nuevo de I6 por el destino. 12306 de SWC: keep_names
+        // 11.2a (B-H3): el camino nuevo de I6 por el destino. 12306 de SWC: keep_names
         // arregla la divergencia, pero `true` contra `false` no es un nombre y el minificado sin mangle
         // tampoco da lo mismo que A: div/ (costo declarado). Con m1b iria a known/.
         Fila {
@@ -287,7 +287,7 @@ fn tabla() -> Vec<Fila> {
             destino: Destino::Div,
             meta: &["kind: Stdout\n", "\nknown: no\n", "\nflags_a: nombres_inconcluso\n", TRAZA_NOMBRES_VALOR_BORRADO],
         },
-        // 11.2a (A-H1 de rev-b11a-A, c14): swc core_defaults deja la clase anonima y util.inspect corta
+        // 11.2a (A-H1): swc core_defaults deja la clase anonima y util.inspect corta
         // la instancia en otra cantidad de lineas; lo unico distinto es el nombre: known/.
         Fila {
             caso: "known-nombres-corte",
@@ -430,7 +430,7 @@ fn tabla() -> Vec<Fila> {
             destino: Destino::Descarte("timeout"),
             meta: &[],
         },
-        // 11.2 (I2 de rev-integral-1): un original que sale con un codigo propio se compara (antes:
+        // 11.2 (I2): un original que sale con un codigo propio se compara (antes:
         // descarte `exit`). Un mudo (`process.exit(3)`) sigue como cualquier mudo: aca, sin
         // bindings que observar.
         Fila {
@@ -522,7 +522,7 @@ fn clasificacion_de_punta_a_punta() {
     let comunes = [corpus.to_str().unwrap(), "--out", out.to_str().unwrap(), "--no-cache", "--jobs", "1", "--timeout-ms", "10000"];
     let cli_de = |extra: &[&str]| crate::Cli::parse(comunes.iter().chain(extra).map(|s| s.to_string()).collect()).unwrap();
     let reporter = crate::oracle::Reporter::new(&out, cli_de(&[]).cell(), crate::runner::PRELOAD);
-    // La tabla de asunciones de oxc (el objetivo, D1).
+    // La tabla de asunciones de oxc (el backend por defecto).
     let known = crate::known::Known::load(&corpus, &out, 0, Minifier::Oxc);
     let cache = crate::cache::CacheA::new(None, &[]);
     let triage = crate::triage::Triage::load(&out);
@@ -639,7 +639,7 @@ fn sensor_omitido_de_punta_a_punta() {
     let _ = std::fs::remove_dir_all(&base);
 }
 
-/// 10.3 (R2 de rev-b9-A): con `--invocar`, la funcion que devuelve una funcion observada se
+/// 10.3 (R2): con `--invocar`, la funcion que devuelve una funcion observada se
 /// serializa con su `.name` (antes `fn`). El bug de keep_names de oxc 0.153.0 (parametro con default
 /// anonimo: `handler` -> `e`, 24-b83h1) llega a la comparacion en carril_a (keep_names: div/); en
 /// core_defaults los nombres se borran (`nombres_de_celda`) y queda igual. Antes, iguales en las dos.

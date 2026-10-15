@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 'use strict';
 // generar.cjs: generador sintetico de programas dirigido a las pasadas de oxc_minifier
-// (t-gen, 2026-10-09; D2, 10-oct). Sin dependencias: solo node.
+// (2026-10-09; uno de los tres corpus de difuzz, ver MANUAL.md, Corpus). Sin dependencias: solo node.
 //
 // uso: node scripts/generar.cjs DIR_SALIDA CANTIDAD [opciones]
 //
@@ -30,7 +30,7 @@
 // ni largos maximos de Array/String. Sin Date, Math.random ni timers.
 
 const fs = require('fs');
-// --con-conocidos: tambien genera los patrones de los bugs ya reportados (ENVIAR.md A-D, #24331)
+// --con-conocidos: tambien genera los patrones de los bugs ya reportados (A-D de oxc, #24331)
 const CONOCIDOS = process.argv.includes('--con-conocidos');
 const path = require('path');
 
@@ -775,7 +775,7 @@ function main() {
     process.stderr.write('uso: generar.cjs DIR_SALIDA CANTIDAD [--semilla N] [--familias F1,F2,...] [--desde K] [--con-conocidos] (ver --help)\n');
     process.exit(2);
   }
-  // D2: un valor mal escrito no puede dar en silencio otra tanda (Number('x') es NaN y
+  // Validacion: un valor mal escrito no puede dar en silencio otra tanda (Number('x') es NaN y
   // `NaN | 0` es 0; Number('') es 0). Solo valida: los valores aceptados generan lo mismo que antes.
   const num = (s) => (typeof s === 'string' && /^-?[0-9]+$/.test(s) ? Number(s) : NaN);
   const out = argv[0];

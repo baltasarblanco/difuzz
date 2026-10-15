@@ -70,21 +70,21 @@ swc-s1-use-strict	swc-a-carril_a	div:Stdout
 swc-s3-neg-zero-member	swc-a-carril_a	div:ThrowNew
 swc-s3-neg-zero-member	swc-b-core_defaults	div:ThrowType
 swc-s3-neg-zero-member	swc-b-carril_a	div:ThrowType
-# 11.1 (I1 de rev-integral-1): el bug E de oxc (`Math.cbrt(-8)` -> NaN) escrito solo por stderr
+# 11.1 (I1): el bug E de oxc (`Math.cbrt(-8)` -> NaN) escrito solo por stderr
 # (`process.stderr.write`). El preload lo pasa a stdout como `[stderr] ...`: div:Stdout en las 4 de
 # oxc. Antes: igual. swc no tiene el bug: igual.
 oxc-cbrt-stderr	oxc-a-core_defaults	div:Stdout
 oxc-cbrt-stderr	oxc-a-carril_a	div:Stdout
 oxc-cbrt-stderr	oxc-b-core_defaults	div:Stdout
 oxc-cbrt-stderr	oxc-b-carril_a	div:Stdout
-# 11.2 (I2 de rev-integral-1): el bug E de oxc impreso por stdout en un programa que sale con
+# 11.2 (I2): el bug E de oxc impreso por stdout en un programa que sale con
 # `process.exit(1)` a proposito. El original con un codigo propio se compara (antes: descarte
 # `exit`): div:Stdout en las 4 de oxc. swc: igual.
 oxc-cbrt-exit1	oxc-a-core_defaults	div:Stdout
 oxc-cbrt-exit1	oxc-a-carril_a	div:Stdout
 oxc-cbrt-exit1	oxc-b-core_defaults	div:Stdout
 oxc-cbrt-exit1	oxc-b-carril_a	div:Stdout
-# 11.4 (I7 de rev-integral-1): prueba del oraculo, no un bug. Solo el minificado (sin el nombre de su
+# 11.4 (I7): prueba del oraculo, no un bug. Solo el minificado (sin el nombre de su
 # variable local) se mata con SIGSEGV: ExitStatus en las 8 celdas. Con `Signal => Same` (mutacion m3) daba igual.
 difuzz-senal-b	swc-a-core_defaults	div:ExitStatus
 difuzz-senal-b	swc-a-carril_a	div:ExitStatus

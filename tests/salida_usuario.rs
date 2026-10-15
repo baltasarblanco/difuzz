@@ -496,7 +496,7 @@ fn pipe_cerrado_ayuda_y_uso() {
     std::fs::remove_dir_all(&b).unwrap();
 }
 
-/// 10.5 (M2 de rev-b9-A): `--preparar --info` (la identidad del oraculo) sin `println!`. Antes,
+/// 10.5 (M2): `--preparar --info` (la identidad del oraculo) sin `println!`. Antes,
 /// rc 101 (panic) con el stdout en un pipe cerrado o en /dev/full.
 #[test]
 fn preparar_info_sin_panic() {
@@ -604,7 +604,7 @@ fn indice_con_escrituras_perdidas_no_se_publica() {
 }
 
 /// 11.5 (I3): una ejecucion del original (A) que pasa `--mem-node` manda el caso a recursos/ (causa
-/// `node_memoria`, con el programa que corrio); nunca a iguales. 11.2b (rev-b11b-A H1, rev-b11b-B
+/// `node_memoria`, con el programa que corrio); nunca a iguales. 11.2b (H1 y
 /// H2): el que solo reserva de mas minificado (`solo-b`: mide su propio texto) no va a recursos/: B
 /// se repite con los topes mayores, lo vuelve a pasar y es una divergencia (ExitStatus, con el paso
 /// `tope_node` en meta.txt). Un re-chequeo que pasa el tope (`d01`: el de profundidad reserva el doble)
@@ -648,7 +648,7 @@ fn tope_de_memoria_de_node_va_a_recursos() {
     assert_eq!(campo(stats, "total"), campo(stats, "iguales") + campo(stats, "DIVERGENCIAS") + campo(stats, "RECURSOS") + filas, "{stats}");
 
     // Un re-chequeo que pasa el tope: 24-f1-d01 de la aceptacion (bug F de oxc, div:Stdout) con una
-    // reserva proporcional a la profundidad de pila (rev-b11b-B, recheque-excede.sh): A y B ~240 MiB,
+    // reserva proporcional a la profundidad de pila: A y B ~240 MiB,
     // la corrida honda del re-chequeo de profundidad el doble.
     let corpus_r = b.join("corpus-r");
     let d01 = "let d = 0; function r() { d++; r(); } try { r(); } catch {}\nconst reserva = Buffer.alloc(d * 16000, 1);\nlet a = [];\nfor (let i = 0; i < 7000; i++) a = [a];\nfunction h(v) {\n  const t = [\"\", \"abc\".substring(1, undefined)];\n  console.log(JSON.stringify(t[+(typeof v !== \"string\")]));\n}\nPromise.resolve(a).then(JSON.stringify).then(h, h);\n";
@@ -691,7 +691,7 @@ fn tope_de_memoria_de_node_va_a_recursos() {
 
 /// 11.7 (I5): un original que escribe mas que `--max-salida` (stdout mas stderr) manda el caso a
 /// recursos/ (causa `node_salida`), nunca a iguales: lo juntado esta cortado. Por stdout (`grande`) o
-/// por stderr (`err`). 11.2b (rev-b11b-A H1): el que solo escribe de mas minificado (`solo-b`, 3 MiB
+/// por stderr (`err`). 11.2b: el que solo escribe de mas minificado (`solo-b`, 3 MiB
 /// contra 1 MiB de A) no va a recursos/: B se repite con el tope mayor (8 MiB), termina y diverge por
 /// stdout, como sin topes. Lo que entra en el tope se compara como siempre (`entra`).
 #[test]
@@ -743,7 +743,7 @@ fn solo_b(cuerpo_b: &str, cuerpo_a: &str, cola: &str) -> String {
     format!("(function () {{ const relleno = \"{relleno}\"; }})();\nconst corto = require(\"fs\").readFileSync(__filename, \"utf8\").length < 2000;\nif (corto) {{\n{cuerpo_b}\n}} else {{\n{cuerpo_a}\n}}\n{cola}\n")
 }
 
-/// 11.2c (rev-b11-2b-A H2 y H3, MUT-a y MUT-b): las ramas del Timeout de B en `confirm`.
+/// 11.2c: las ramas del Timeout de B en `confirm`.
 /// - `bucle-lento` (el t03 de la revision A de 11b, lento): B, con el bug F de oxc, imprime sin fin
 ///   64 KiB cada 100 ms. Con el timeout de 1 s no llega al tope de salida (1 MiB); con el timeout
 ///   largo lo pasa: queda el Timeout, `div/` (con MUT-a, iguales: un miscompile real perdido).
@@ -780,7 +780,7 @@ fn confirmacion_de_b_con_timeout_largo() {
         "c03",
         solo_b(&format!("const keep = [];\nfor (let i = 0; i < 8; i++) keep.push(Buffer.alloc(50 << 20, 1));\n{}", esperar(1300)), &esperar(300), "console.log(\"listo\");").as_bytes(),
     );
-    // 11.2e (rev-b11-final-A vuelta 2, V2-H1): s01, sin bug. Solo B reserva 300 MiB (pasa el tope de
+    // 11.2e: s01, sin bug. Solo B reserva 300 MiB (pasa el tope de
     // 300, no el mayor) y atrapa 300 excepciones a 1000 marcos de profundidad: con el sensor tarda
     // segundos (MEDIDO por la revision: 6,5 s), sin el, 0,2 s. La repeticion con los topes mayores corre
     // sin el sensor: iguales (con 705d3c5, con el sensor y sin reintento, div/ ExitStatus).
@@ -792,7 +792,7 @@ fn confirmacion_de_b_con_timeout_largo() {
     // sensor da lo mismo: iguales.
     let cuenta = "var calls = 0;\nError.prepareStackTrace = function () { calls++; return \"\"; };\ntry { null.x; } catch (e) {}";
     caso(&corpus, "s03", solo_b(&format!("{cuenta}\nconst keep = [];\nfor (let i = 0; i < 6; i++) keep.push(Buffer.alloc(50 << 20, 1));"), cuenta, "console.log(\"llamadas\", calls);").as_bytes());
-    // 11.2f (rev-b11-final-B vuelta 3, V3-H1): h01 y h02, con el bug F de oxc. El `toString` propio
+    // 11.2f: h01 y h02, con el bug F de oxc. El `toString` propio
     // de un error atrapado solo corre con el sensor (V8 formatea el stack al pausar). Con el bug, B con
     // el sensor reserva 400 MiB (pasa el tope); repetido sin el sensor no reserva y sale. h01: A sin el
     // sensor gira sin fin con la misma salida parcial que B; antes (70509f2) se tomaba como igual a B
@@ -800,14 +800,14 @@ fn confirmacion_de_b_con_timeout_largo() {
     let nota = "const n = \"abc\".substring(1, undefined).length;\nclass E extends Error { toString() { globalThis.v = 1; return \"E\"; } }\ntry { throw new E(\"x\"); } catch (e) {}\nconsole.log(\"hola\", typeof globalThis.v);\nif (n === 0) {\n  if (globalThis.v) { const b = []; for (let i = 0; i < 25; i++) b.push(Buffer.alloc(16 << 20, 1)); console.log(b.length); }\n  process.exit(0);\n}\n";
     caso(&corpus, "h01", format!("{nota}if (!globalThis.v) for (;;) {{}}\nconsole.log(\"fin\");\n").as_bytes());
     caso(&corpus, "h02", format!("{nota}console.log(\"fin\");\n").as_bytes());
-    // 11.2f (rev-b11-final-A vuelta 3, V3-H1): x01 nota el sensor (el `toString` imprime solo con el
+    // 11.2f: x01 nota el sensor (el `toString` imprime solo con el
     // sensor) y tiene el bug F; solo B reserva 400 MiB. A con el sensor, A sin el y B difieren: div/, y
     // el A guardado es el sin el sensor (A y B comparados sin el sensor). x02: B ademas gira sin fin:
     // la repeticion no termina y queda en div/ sin esa comparacion.
     let x = "class E extends Error { toString() { console.log(\"toString llamado\"); return \"E\"; } }\ntry { throw new E(\"x\"); } catch (e) {}\nconst n = \"abc\".substring(1, undefined).length;\nconst keep = [];\n";
     caso(&corpus, "x01", format!("{x}if (n === 0) for (let i = 0; i < 8; i++) keep.push(Buffer.alloc(50 << 20, 1));\nconsole.log(\"fin\", n);\n").as_bytes());
     caso(&corpus, "x02", format!("{x}if (n === 0) {{ for (let i = 0; i < 8; i++) keep.push(Buffer.alloc(50 << 20, 1)); for (;;) {{}} }}\nconsole.log(\"fin\", n);\n").as_bytes());
-    // 11.2f (rev-b11-final-A: A sin el sensor corria una sola vez): d01, con el bug F. Sin el sensor
+    // 11.2f (A sin el sensor corria una sola vez): d01, con el bug F. Sin el sensor
     // el programa cuenta sus corridas en un archivo de afuera: la repeticion de B (1) y la primera de
     // A sin el sensor (2) imprimen lo mismo, la segunda (3) otra cosa. A sin el sensor no se reproduce:
     // inconcluso, sigue en div/ (con una sola corrida se tomaba como igual a B).
@@ -821,7 +821,7 @@ fn confirmacion_de_b_con_timeout_largo() {
         )
         .as_bytes(),
     );
-    // 11.2g (rev-b11-final-A vuelta 4, V4-H1): g01, sin bug. El programa nota el sensor y sin el gira
+    // 11.2g: g01, sin bug. El programa nota el sensor y sin el gira
     // sin fin (A y B igual); solo B pasa el tope. La repeticion de B (sin el sensor) no termina, A con el
     // sensor si: sigue en div/ (no se cambia ningun destino), pero la traza dice que A sin el sensor
     // tampoco termina: la divergencia la pone el sensor.
@@ -831,7 +831,7 @@ fn confirmacion_de_b_con_timeout_largo() {
         "g01",
         solo_b(&format!("{visto}\nconst keep = [];\nfor (let i = 0; i < 6; i++) keep.push(Buffer.alloc(50 << 20, 1));"), visto, "if (!visto) for (;;) {}\nconsole.log(\"listo\");").as_bytes(),
     );
-    // 11.2h (rev-b11-final-A vuelta 5, V5-H1): las corridas de A sin el sensor son auxiliares: si pasan
+    // 11.2h: las corridas de A sin el sensor son auxiliares: si pasan
     // un tope, el paso queda inconcluso y el caso sigue en div/ (antes, `como_a`: recursos/). Los dos
     // con el bug F de oxc y un programa que nota el sensor; solo B reserva 300 MiB. g03: sin el sensor
     // imprime 256 KiB cada 500 ms sin fin: la repeticion de B (4 MiB de tope) da Timeout y A sin el
@@ -853,7 +853,7 @@ fn confirmacion_de_b_con_timeout_largo() {
         )
         .as_bytes(),
     );
-    // 11.2i (rev-b11-final vuelta 6, V6-H1 y V6-H2): el A repetido sin el sensor de I3 es auxiliar. Los
+    // 11.2i: el A repetido sin el sensor de I3 es auxiliar. Los
     // tres con el bug F de oxc y un programa que nota el sensor; el sensor de B se degrada (i01: B atrapa
     // 400 excepciones, `sensor_tope`; i3-tope e i3-colgado: B con el sensor gira, `sensor_caido`). i01 (de
     // la revision A): A sin el sensor imprime sin fin y pasa el tope de salida. i3-tope (B): A sin el
@@ -863,7 +863,7 @@ fn confirmacion_de_b_con_timeout_largo() {
     caso(&corpus, "i01", format!("{nota_sensor}if (n === 0) for (let i = 0; i < 400; i++) {{ try {{ null.x; }} catch (e) {{}} }}\nif (!sensor) {{\n  const s = \"z\".repeat(1 << 20);\n  for (;;) process.stdout.write(s + \"\\n\");\n}}\nconsole.log(\"fin\", n);\n").as_bytes());
     caso(&corpus, "i3-tope", format!("{nota_sensor}if (sensor) {{\n  if (n === 0) for (;;) {{}}\n  console.log(\"con\", n);\n}} else {{\n  if (n !== 0) {{ const b = []; for (let i = 0; i < 25; i++) b.push(Buffer.alloc(16 << 20, 1)); }}\n  console.log(\"sin\", n);\n}}\n").as_bytes());
     caso(&corpus, "i3-colgado", format!("{nota_sensor}console.log(\"hola\");\nif (sensor) {{\n  if (n === 0) for (;;) {{}}\n  console.log(\"fin\");\n}} else {{\n  if (n === 0) process.exit(0);\n  for (;;) {{}}\n}}\n").as_bytes());
-    // 11.2j (rev-b11-final-B vuelta 7, V7-H1 y V7-H2): con I3 completo (B con el sensor gira y se
+    // 11.2j: con I3 completo (B con el sensor gira y se
     // repite sin el; A se repite sin el), "A otra vez" repite el A auxiliar de I3. Las corridas sin el
     // sensor de A cuentan en un archivo de afuera. i3-tope2: la segunda reserva 400 MiB (pasa el tope);
     // i3-nodet: la segunda imprime otra cosa. Las dos quedan inconclusas y el caso sigue en div/ (antes:
@@ -938,13 +938,13 @@ fn confirmacion_de_b_con_timeout_largo() {
     let num = |tras: &str| -> u128 { meta.split(tras).nth(1).and_then(|s| s.split(' ').next()).and_then(|n| n.parse().ok()).unwrap_or_else(|| panic!("sin `{tras}`: {meta}")) };
     let (largo, turno) = (num("sin el sensor, timeout "), num("; turno "));
     assert!(turno < largo + 1500, "turno {turno} ms con un timeout largo de {largo} ms");
-    // 11.2c (rev-b11-2b-B N2): el B cortado que se guarda es un prefijo con la marca.
+    // 11.2c: el B cortado que se guarda es un prefijo con la marca.
     let b_out = std::fs::read_to_string(celda.join("div/mayor-gira/b.stdout")).unwrap();
     assert!(b_out.len() < 70 * 1024 && b_out.contains("[... difuzz recorto "), "{}", b_out.len());
     std::fs::remove_dir_all(&b).unwrap();
 }
 
-/// 11.2c (rev-b11-2b-A H1 = B-N3, H3: MUT-c y MUT-d): un A que pasa un tope al confirmar una
+/// 11.2c (H1 = B-N3, H3: MUT-c y MUT-d): un A que pasa un tope al confirmar una
 /// divergencia va a recursos/, como cualquier A que pasa un tope. `marca` (sin bug; A depende de un
 /// archivo afuera) da "chico" la primera vez y "grande" (400 MiB) despues: el B y el "A otra vez"
 /// de la primera corrida ya ven la marca. Corrida 1 (`--cache`): A ("chico") entra en la cache, el "A
@@ -1001,7 +1001,7 @@ fn a_que_pasa_el_tope_al_confirmar_va_a_recursos() {
     let meta = std::fs::read_to_string(out.join("oxc+carril_a+tal_cual/recursos/pesado/meta.txt")).unwrap();
     assert!(meta.contains("ejecucion: el original (A) del caso, en la pasada cruda\n"), "{meta}");
 
-    // Lo que dice meta.txt de un A de la cache (rev-b11-2b-B N3): B (bug F de oxc) reserva sin fin.
+    // Lo que dice meta.txt de un A de la cache: B (bug F de oxc) reserva sin fin.
     // Sin cache: `a_cache: miss`. Con la entrada (grabada con los mismos topes): el A fresco la
     // confirma (`hit (confirmado con una corrida fresca)`) y la traza dice de donde sale "A no".
     let corpus_h = b.join("corpus-h");
@@ -1017,12 +1017,12 @@ fn a_que_pasa_el_tope_al_confirmar_va_a_recursos() {
     std::fs::remove_dir_all(&b).unwrap();
 }
 
-/// 11.2c (rev-b11-2b-B N1 = A-H6): las repeticiones de B con los topes mayores (el doble de RSS) van
+/// 11.2c: las repeticiones de B con los topes mayores (el doble de RSS) van
 /// de a una en todo difuzz. Dos casos con `--jobs 2` cuyo B (sin bug, mas corto) reserva 400 MiB:
 /// los dos pasan el tope de 300 casi a la vez y se repiten con 600. En la repeticion, B toma un
 /// archivo exclusivo (`wx`) durante 3 s: si otra repeticion lo tiene, imprime `solapado` y diverge.
 /// Con el turno, iguales los dos; sin el (las dos a la vez, `jobs` x 2 x tope), uno va a div/.
-/// 11.2k (rev-b11-final-B vuelta 8, V8-H1): I3 con el A del caso leido de la cache. El programa tiene
+/// 11.2k: I3 con el A del caso leido de la cache. El programa tiene
 /// el bug F de oxc y nota el sensor; con el sensor imprime una "version" que se lee de un archivo de
 /// afuera (cambia entre corridas: la entrada de la cache queda vieja); sin el sensor, A alterna su
 /// salida (el A auxiliar de I3 no se reproduce). Corrida 1: div/. Corrida 2, misma cache: el A del caso

@@ -1,4 +1,4 @@
-// 9.3 (M5 de rev-b8-A): `(h) = function () {}` no da `.name` (IsIdentifierRef de una expresion
+// 9.3 (M5): `(h) = function () {}` no da `.name` (IsIdentifierRef de una expresion
 // parentizada es falso: node da ""), y `recheck::Nombran` ya no lo marca. No es alcanzable de
 // punta a punta con oxc 0.153.0: su codegen quita esos parentesis al imprimir el original
 // (`h=function(){}`), asi que A ya tiene el destino sin parentesis. Este caso fija el destino: el

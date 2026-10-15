@@ -1,4 +1,4 @@
-// 11.2b (rev-b11b-A t02): A ("bc") y B ("", bug F de oxc) terminan con poca salida. Solo con mas pila
+// 11.2b: A ("bc") y B ("", bug F de oxc) terminan con poca salida. Solo con mas pila
 // (el re-chequeo de profundidad, M16) JSON.stringify no desborda y el programa escribe 20 MiB.
 let a = [];
 for (let i = 0; i < 7000; i++) a = [a];

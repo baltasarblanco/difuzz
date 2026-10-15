@@ -1,4 +1,4 @@
-// 11.2d (c-eagain/cuenta de rev-b11-final-B): sin bug, A y B hacen lo mismo. stdout por
+// 11.2d (c-eagain/cuenta): sin bug, A y B hacen lo mismo. stdout por
 // process.stdout.write (2,4 MiB) con un fs.writeSync(2, ...) intercalado que cuenta EAGAIN y writes
 // cortos. Con 26c5239 daba falsos div/ y no_determinista; tiene que dar igual.
 const fs = process.getBuiltinModule("fs");

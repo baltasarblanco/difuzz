@@ -9,13 +9,13 @@ y del corpus real, medido el 11-oct), y en estas formas encontró el bug de los 
 
 ## Origen y licencia
 
-Las escribió el agente `codegen-fidelidad` el 11-oct-2026 (`formas.cjs`; informe en el trabajo
+Las escribió un agente de IA (la tarea `codegen-fidelidad`) el 11-oct-2026 (`formas.cjs`; el informe, en el trabajo
 interno de ese día). Son propias del proyecto, no vienen de SWC ni de otro repositorio: van con la
 licencia de difuzz. `LISTA.tsv` dice el tipo de fuente de cada una (`script` o `modulo`) y si se
 adaptó.
 
 **Adaptación (6 formas, `adaptada=si`):** las de módulo que leían su `export default` importándose
-a sí mismas con `import * as m from "./input.mjs"` (el nombre del archivo en el arnés del agente)
+a sí mismas con `import * as m from "./input.mjs"` (el nombre del archivo en el arnés de esa tarea)
 usan `import(import.meta.url).then((m) => console.log(...))`: difuzz corre el programa con otro
 nombre (`difuzz-<pid>-w<n>.mjs`), y el `import` estático no enlazaba. Sin `await` de primer nivel:
 el módulo se importaría a sí mismo mientras evalúa y no terminaría. El resto, byte a byte, más un

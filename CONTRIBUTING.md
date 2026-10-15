@@ -47,6 +47,19 @@ For a refactor that must not change any result, compare the old and new binaries
 scripts/comparar-binarios.sh --jobs 4 --corpus tests/golden/corpus BIN_BASE BIN_NEW OUT_DIR "oxc b" "swc a"
 ```
 
+## Labels in comments
+
+Code comments, test data and many commit messages cite labels from difuzz's development log,
+which is not part of the repository:
+
+- items of the improvement series (`10.2`, `11.2c`);
+- findings of the reviews of each series (`R1-H05`, `M30`, `I3`, `H4`, `B-F2`, ...);
+- short tags of earlier work (`b1-b`, `t-principio`, `n-ruido`).
+
+They are kept as stable tags, and the comment next to each one says what the change does and why.
+Labels from different reviews can repeat (there is more than one `I3`); the surrounding text tells
+them apart. For a numbered item, `git log --grep` often finds its commit.
+
 ## Commits and pull requests
 
 - Use conventional commits (`fix: ...`, `feat: ...`, `test: ...`, `docs: ...`, `chore: ...`).

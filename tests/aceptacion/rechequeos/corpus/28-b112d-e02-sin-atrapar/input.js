@@ -1,4 +1,4 @@
-// 11.2d (c-eagain/sin-atrapar de rev-b11-final-B): sin bug, como e01 pero sin atrapar errores del
+// 11.2d (c-eagain/sin-atrapar): sin bug, como e01 pero sin atrapar errores del
 // fs.writeSync(2, ...). Con 26c5239 un EAGAIN mataba al programa en un punto que dependia del momento.
 const fs = process.getBuiltinModule("fs");
 const s = "y".repeat(8192);

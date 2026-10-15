@@ -46,7 +46,7 @@ pub fn compare(a: &Exec, b: &Exec) -> Verdict {
         Status::Failed(_) => return Verdict::Same,
         Status::Exited(_) => {}
     }
-    // 11.2 (I2 de rev-integral-1): el codigo de salida distinto de 0 que no es un throw (M10: 70
+    // 11.2 (I2): el codigo de salida distinto de 0 que no es un throw (M10: 70
     // solo es "lanzo" si el preload lo dijo por su canal) es parte de lo que se compara. Distinto,
     // ExitStatus; igual, se comparan los stdout. Antes un B con uno era ExitStatus siempre,
     // porque el original con uno se descartaba (`exit`): con A sin codigo da lo mismo que antes.
@@ -428,7 +428,7 @@ impl Reporter {
             let line = format!("{}\t{cause}\t{}\n", case.display(), elapsed.as_millis());
             if let Err(e) = f.write_all(line.as_bytes()) {
                 eprintln!("reporter: no pude escribir descartes.tsv: {e}");
-                // 10.4 (M1 de rev-b9-A): como `new` cuando no lo puede crear.
+                // 10.4 (M1): como `new` cuando no lo puede crear.
                 write_failed();
             }
         }
@@ -440,7 +440,7 @@ impl Reporter {
         if let Some(ix) = &self.index {
             if let Err(e) = ix.cerrar(cierre) {
                 eprintln!("indice: no pude cerrar: {e}");
-                // 10.4 (M1 de rev-b9-A): queda el indice anterior y `--cruce` lo muestra sin
+                // 10.4 (M1): queda el indice anterior y `--cruce` lo muestra sin
                 // aviso; antes la corrida cerraba `completa` y con 0. `main` lo cuenta despues.
                 write_failed();
             }
@@ -844,7 +844,7 @@ mod tests {
         }
     }
 
-    /// 11.4 (I7 de rev-integral-1): un B muerto por senal (crash de V8, abort, OOM killer) es
+    /// 11.4 (I7): un B muerto por senal (crash de V8, abort, OOM killer) es
     /// ExitStatus contra cualquier A, aunque el stdout coincida; un B colgado, Timeout. Antes
     /// ningun test lo veia: la mutacion `Signal => Same` (m3) sobrevivia a todo.
     #[test]
@@ -858,7 +858,7 @@ mod tests {
         }
     }
 
-    /// 11.2 (I2 de rev-integral-1): un original que sale con un codigo propio se compara. El
+    /// 11.2 (I2): un original que sale con un codigo propio se compara. El
     /// mismo codigo y el mismo stdout: iguales; otro stdout: Stdout; otro codigo (o 0, o un
     /// throw): ExitStatus. Sin codigo propio en A, un B con uno sigue siendo ExitStatus (como
     /// antes), y el 70 y el 71 solo son throw y enlace con su linea del canal (M10).
@@ -1202,7 +1202,7 @@ mod tests {
         std::fs::remove_dir_all(&d).unwrap();
     }
 
-    /// 10.4 (M1 de rev-b9-A): una linea de descartes.tsv que no se pudo escribir y un indice que
+    /// 10.4 (M1): una linea de descartes.tsv que no se pudo escribir y un indice que
     /// no se pudo cerrar cuentan como escrituras perdidas (antes: solo stderr, `completa` y 0).
     #[test]
     fn descartes_e_indice_perdidos_cuentan() {
