@@ -114,7 +114,7 @@
           // filtro seccomp que nego la senal (runner::encerrar_senales): marca el caso aunque
           // el programa no lance (`_kill` directo) o atrape el `kill EPERM` sin el sensor. No
           // se distingue de un EPERM natural (un proceso de otro usuario, p. ej. el pid 1):
-          // ese tambien marca (rev-int H5, MEDIDO; README, sandbox): con 7.9, si el original y el
+          // ese tambien marca (H5 de la revision de la integracion, MEDIDO; MANUAL.md, Sandbox): con 7.9, si el original y el
           // minificado lo hacen, el caso se compara con la nota (antes iba a descartes).
           // `conPermisos` y `ctl` se definen mas abajo; aca solo se leen en la llamada.
           if (r === eperm && conPermisos) ctl('sandbox');
@@ -215,7 +215,7 @@
 
   // Se captura antes de que el programa pueda pisar console.log o process.stdout.write.
   const write = process.stdout.write.bind(process.stdout);
-  // 11.2d (rev-b11-final A-N1 = B-F1): al tocar `process.stdout` (y `process.stderr`, abajo) node
+  // 11.2d: al tocar `process.stdout` (y `process.stderr`, abajo) node
   // deja el pipe en O_NONBLOCK. Entonces un `fs.writeSync(1 o 2, ...)` del programa (11.1 manda el 2
   // al 1) da EAGAIN o un write parcial segun cuan rapido vacia difuzz el pipe, se adelanta a lo que
   // `process.stdout.write` dejo encolado, y lo encolado se pierde si el programa sale con
@@ -242,7 +242,7 @@
   // del programa) se toma ahora: el programa puede pisar `fs.writeSync`, los metodos de String o
   // de Number, `Math.imul`, `Object.keys`, el iterador de los arreglos (`for...of`) o
   // `Session.prototype.post`, y con eso callar una linea del canal o cambiar lo que entra al hash
-  // (rev-7.1b x7, x8, x8b, x8c). `desligar(f)(x, ...a)` llama `f` con `this` = x sin buscar
+  // (revision de 7.1b). `desligar(f)(x, ...a)` llama `f` con `this` = x sin buscar
   // `call` en el momento.
   const desligar = (f) => Function.prototype.call.bind(f);
   const writeSync = desligar(fs.writeSync);
@@ -487,7 +487,7 @@
       if (j === k + 1 || !(j === f.length || f[j] === ')' || f[j] === ',')) continue;
       let ini = i;
       while (ini > desde && f[ini - 1] !== ' ' && f[ini - 1] !== '(') ini--;
-      // 11.2c (rev-b11-2b-B N6): un archivo de mas de MAX_LARGO_MARCO caracteres (lo elige el
+      // 11.2c: un archivo de mas de MAX_LARGO_MARCO caracteres (lo elige el
       // programa: `//# sourceURL=` de un eval) no va al canal; antes un nombre de 20 MiB pasaba el
       // tope de salida por el canal y mandaba a recursos/ un A cuyo stdout era una linea. Sus marcos
       // conservan la posicion (como los de un archivo que no es del programa).
@@ -595,7 +595,7 @@
     clearImmediate(i);
   } catch {}
 
-  // 10.3 (R2 de rev-b9-A): una funcion con su `.name`, en el formato de util.inspect que
+  // 10.3 (R2): una funcion con su `.name`, en el formato de util.inspect que
   // `oracle::normalize_names` borra (`[Function: f]`, `[Function (anonymous)]`). Sin keep_names
   // en la celda se borra como siempre (`oracle::nombres_de_celda`); con keep_names (carril_a)
   // el minifier promete el `.name` y se compara crudo, como lo que el programa imprime (9.1).
@@ -767,12 +767,12 @@
     } catch {}
     if (pisado) prenderPerezoso();
   };
-  // I3 (revision-b456): el sensor llego a MAX_PAUSAS y se apago a mitad de la corrida
+  // I3 (revision de los bloques 4-6): el sensor llego a MAX_PAUSAS y se apago a mitad de la corrida
   // (linea `sensor_tope` del canal, al salir): el resto corrio sin sus efectos.
   let sensorTope = false;
   const violaciones = [];
   // `desc`: la descripcion de V8 (el stack formateado), para reconocer despues el mismo error.
-  // `noAtrapada` (I2, revision-b456): la TDZ que nadie del programa atrapo; ya tiene su flag
+  // `noAtrapada` (I2 de la revision de los bloques 4-6): la TDZ que nadie del programa atrapo; ya tiene su flag
   // (`tdz`), asi que al salir solo deja su linea `viol` (para el re-chequeo) y no `tdz_atrapada`.
   const registrarViolacion = (k, pos, desc, noAtrapada) => {
     if (violaciones.length < MAX_VIOL) violaciones.push([k, pos, desc, noAtrapada === true]);
@@ -837,7 +837,7 @@
     try {
       quiet = true;
       let text = e !== null && typeof e === 'object' ? String(e.stack || e.message || e) : String(e);
-      // 11.2b (rev-b11b-B H1): el texto lo elige el programa (`new Error("x".repeat(256 << 20))`) y
+      // 11.2b: el texto lo elige el programa (`new Error("x".repeat(256 << 20))`) y
       // difuzz lo lee entero; no se compara: alcanza con el principio.
       if (text.length > EXC_MAX) text = `${text.slice(0, EXC_MAX)} [... difuzz recorto ${text.length - EXC_MAX} caracteres]`;
       ctl(`exc ${text.replace(/\\/g, '\\\\').replace(/\n/g, '\\n')}`);
@@ -861,7 +861,7 @@
     }
     // La coercion de un Symbol no tenia flag ni atrapada ni sin atrapar.
     if (k === 'symbol') registrarViolacion('symbol', posDeMarco(e));
-    // I2 (revision-b456, r09-tdz-final-getter): la TDZ no atrapada tambien se ubica, para
+    // I2 (revision de los bloques 4-6, r09-tdz-final-getter): la TDZ no atrapada tambien se ubica, para
     // que `tdz` pase por el re-chequeo de violaciones (antes iba directo a known/).
     if (k === 'tdz') registrarViolacion('tdz', posDeThrow(e), null, true);
     writeDz(`!dz throw ${t}\n`);
@@ -895,7 +895,7 @@
       write(`[${m}] ${util.format(...args)}\n`);
     };
   }
-  // 11.1 (I1 de rev-integral-1): lo que el programa escribe DIRECTO a stderr tampoco se comparaba
+  // 11.1 (I1): lo que el programa escribe DIRECTO a stderr tampoco se comparaba
   // (MEDIDO: `process.stderr.write(String(Math.cbrt(-8)))`, el bug E de oxc, daba iguales). Va a
   // stdout, en el orden en que se escribe, precedido por `[stderr] ` (una vez por escritura, como
   // `[error] ` en console.error: las lineas siguientes de un stack quedan con sus espacios y
@@ -903,14 +903,14 @@
   // ahi solo queda lo que escribe node (y lo que no se cubre, abajo), que sigue sin compararse
   // (trae rutas y pids). Se cubren las tres vias que miden la revision: `process.stderr.write` (y lo
   // que escribe por ella: `stream.pipe(process.stderr)`, un `console.Console` sobre
-  // `process.stderr`), `fs.writeSync(2, ...)` y `process._rawDebug`. Fuera (README, limites):
+  // `process.stderr`), `fs.writeSync(2, ...)` y `process._rawDebug`. Fuera (MANUAL.md, limites):
   // `process.stderr.end(dato)`, `fs.write(2, ...)` asincronico, `fs.writeFileSync(2 o
   // '/dev/stderr')`, un stream nuevo sobre el fd 2 y los procesos hijos que heredan el stderr.
   // `fs.writeSync(2, ...)` se escribe con el `writeSync` real al fd 1 (mismas firmas, mismo
   // valor de retorno, mismos errores); `process.stderr.write`, con el `write` de stdout tomado
   // arriba. El nombre y el largo de lo envuelto son los del original (el programa puede leerlos;
   // A y B ven lo mismo de todas formas).
-  // N1 (rev-b11a-B vuelta 2): una escritura VACIA no lleva el prefijo. Node escribe un chunk vacio
+  // N1 (integracion del bloque 11): una escritura VACIA no lleva el prefijo. Node escribe un chunk vacio
   // a `process.stderr` al terminar cada `execFileSync`/`execSync` (el stderr del hijo, aunque no
   // haya), y el `[stderr] ` suelto se pegaba a la linea siguiente. Vacio: un string de largo 0 o
   // una vista de 0 bytes; en `fs.writeSync`, ademas, un `length` explicito de 0 o un `offset` que
