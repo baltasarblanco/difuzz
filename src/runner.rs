@@ -2699,11 +2699,16 @@ mod tests {
         for (que, js) in [
             ("stdout", "const s = \"x\".repeat(1 << 20) + \"\\n\";\nfor (let i = 0; i < 1024; i++) process.stdout.write(s);\n"),
             ("stdout y stderr", "const s = \"x\".repeat(700 * 1024) + \"\\n\";\nprocess.stdout.write(s);\nprocess.stderr.write(s);\n"),
-            // `fs.writeSync`: `process.stderr.write` de 2 MiB a un pipe deja la mayor parte en la cola
-            // de node, que el bucle no deja vaciar (MEDIDO: timeout, sin pasar el tope). Integracion
-            // con 11.1: `fs.writeSync(2, ...)` va al fd 1 del preload, que es no bloqueante (EAGAIN si
-            // difuzz no vacio el pipe; MEDIDO): reintenta. El stderr real (el pipe de node, sin el
-            // preload en el medio) se escribe abriendo `/dev/stderr` (bloqueante).
+            // `fs.writeSync`, mientras gira. Con 11.1, `fs.writeSync(2, ...)` va al fd 1 del preload.
+            // Hasta 11.2d (`d2bbf83`) ese pipe quedaba no bloqueante: un `process.stderr.write` de
+            // 2 MiB dejaba la mayor parte en la cola de node, que el bucle no deja vaciar (MEDIDO
+            // entonces: timeout, sin pasar el tope), y `fs.writeSync` daba EAGAIN si difuzz no habia
+            // vaciado el pipe. Desde 11.2d el preload deja bloqueantes los pipes de stdout y stderr
+            // (`bloquear` en `src/preload.js`): cada escritura sale entera y no hay EAGAIN. El
+            // reintento de EAGAIN se conserva: con el pipe bloqueante no hace nada, y si el pipe
+            // volviera a quedar no bloqueante el caso sigue midiendo el tope y no un EAGAIN. El stderr
+            // real (el pipe de node, sin el preload en el medio) se escribe abriendo `/dev/stderr`
+            // (bloqueante).
             ("stderr del programa, mientras gira", "const fs = require(\"fs\");\nfor (let i = 0; i < 32; i++) for (;;) { try { fs.writeSync(2, \"x\".repeat(64 * 1024)); break; } catch (e) { if (e.code !== \"EAGAIN\") throw e; } }\nwhile (true) {}\n"),
             ("stderr real, mientras gira", "const fs = require(\"fs\");\nconst fd = fs.openSync(\"/dev/stderr\", \"w\");\nfor (let i = 0; i < 32; i++) fs.writeSync(fd, \"x\".repeat(64 * 1024));\nwhile (true) {}\n"),
         ] {
