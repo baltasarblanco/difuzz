@@ -18,23 +18,34 @@ una celda corrida cuenta como falla.
 
 Por qué cada clase esperada:
 - `oxc-o1`, `oxc-o3*`: el minificado de oxc es un SyntaxError en script y en módulo, así que ThrowNew en las 4 celdas de oxc.
+  `oxc-o1` es el Issue C (`{ __proto__ }`, #PENDIENTE-C) y `oxc-o3*`, el Issue B (claves computadas negativas, #PENDIENTE-B).
 - `oxc-o2-casos` (imprime `"ok"`): en sloppy, asignar al nombre de una function expression se ignora sin error. Solo
-  diverge en módulo (TypeError).
+  diverge en módulo (TypeError). Los dos `oxc-o2-*` son el Issue D (`catch (a) { var a }`, #PENDIENTE-D).
 - `oxc-o2-typeof` (la forma del texto de reporte a oxc): `number` contra `function` en A (Stdout) y TypeError en B.
-- `oxc-n6422-2-log`: `PASS` contra `FAIL` (Stdout) en las 4 celdas de oxc.
+- `oxc-n6422-2-log`: `PASS` contra `FAIL` (Stdout) en las 4 celdas de oxc. Es el Issue A (el spread con getter se mueve),
+  público como [comentario en oxc#27412](https://github.com/oxc-project/oxc/pull/27412#issuecomment-6192468107).
 - `oxc-n6422-2-fixture`: tiene `import`, así que en carril A es `parse_esm` (descarte). En B, AssertionError
-  (ThrowNew) en oxc **y en swc**: `@swc/core` 1.16.2 también borra el spread con getter (verificado a mano).
-- `oxc-o4`: `delete NaN` da `false` en sloppy (Stdout) y SyntaxError temprano en módulo (ThrowNew).
-- `oxc-o5`: `0` contra `1` (Stdout) en las 4.
-- `oxc-o6`: panic del minifier de oxc (también sin debug assertions).
+  (ThrowNew) en oxc **y en swc**: `@swc/core` 1.16.2 también borra el spread con getter (verificado a mano; en swc,
+  #PENDIENTE-SWC-GS).
+- `oxc-o4`: `delete NaN` da `false` en sloppy (Stdout) y SyntaxError temprano en módulo (ThrowNew). Es el primer ítem de
+  [oxc#24331](https://github.com/oxc-project/oxc/issues/24331) (de un tercero; arreglado por
+  [oxc#27466](https://github.com/oxc-project/oxc/pull/27466) y [oxc#27522](https://github.com/oxc-project/oxc/pull/27522)).
+- `oxc-o5`: `0` contra `1` (Stdout) en las 4. Un default con efecto dentro de un rest: la familia "rest-parameter
+  destructuring side effects are dropped" de [oxc#24331](https://github.com/oxc-project/oxc/issues/24331); esta forma,
+  #PENDIENTE-O5.
+- `oxc-o6`: panic del minifier de oxc (también sin debug assertions). Público por un tercero:
+  [oxc#26636](https://github.com/oxc-project/oxc/issues/26636).
 - `oxc-o7`: debug_assert de oxc. Con el oráculo el minificado es el de npm y no diverge: `asserts/` en las 4 de oxc.
+  Público por un tercero, junto con `oxc-eval-indirecto`: [oxc#26511](https://github.com/oxc-project/oxc/pull/26511).
 - `oxc-eval-indirecto` (R1-H05, `eval-indirecto` del corpus c6 de la revisión 1): el debug_assert de oxc tapaba un
-  miscompile. Con el oráculo, oxc cambia `var e = eval; e("x")` por `eval("x")`: `global/local` contra
+  miscompile ([oxc#26511](https://github.com/oxc-project/oxc/pull/26511)). Con el oráculo, oxc cambia `var e = eval; e("x")` por `eval("x")`: `global/local` contra
   `local/local` (Stdout) en las 4 de oxc, con `solo_debug_assertions: si` en el meta. swc: igual.
 - `swc-s1-use-strict`: swc inlinea una función estricta y pierde la directiva. Solo diverge en sloppy (carril A).
+  Reportado como [comentario en swc#9238](https://github.com/swc-project/swc/issues/9238#issuecomment-6150632079).
 - `swc-s3-neg-zero-member`: swc imprime `-0[-0]=0` (SyntaxError) solo con el preset carril_a en A. En B el original ya
-  lanza TypeError (propiedad sobre un primitivo en estricto), y por eso es ThrowType en los dos presets.
-- `oxc-cbrt-stderr` (11.1, repro `s8` de la revisión integral 1): el bug E de oxc (`Math.cbrt(-8)` → `NaN`) escrito
+  lanza TypeError (propiedad sobre un primitivo en estricto), y por eso es ThrowType en los dos presets. #PENDIENTE-SWC-NZ.
+- `oxc-cbrt-stderr` (11.1, repro `s8` de la revisión integral 1): el bug E de oxc (`Math.cbrt(-8)` → `NaN`,
+  [oxc#27621](https://github.com/oxc-project/oxc/pull/27621), mergeada) escrito
   solo con `process.stderr.write`. El preload lo pasa a stdout (`[stderr] -2` contra `[stderr] NaN`): Stdout en las
   4 de oxc. swc no tiene el bug: igual.
 - `oxc-cbrt-exit1` (11.2, repro `s6` de la revisión integral 1): el mismo bug impreso por stdout en un programa que

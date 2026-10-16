@@ -395,7 +395,7 @@ sobre el crudo con esos literales salados también lo explica (sin literales que
 confirmación con la sal y alcanza con lo anterior, como en A contra B). Si no, o si no se puede
 saber, sigue a `codegen/` con el paso en `pasos:`. Así, un bug de codegen en una rama que depende del
 texto de `toString` o de `.stack`, o que solo se ve en un marco del stack, ya no se excusa (10.1b,
-MEDIDO con O8 de oxc 0.153.0: los tres repros de las revisiones de 10.1 van a `codegen/`). El
+MEDIDO con O8 de oxc 0.153.0, [oxc#6154](https://github.com/oxc-project/oxc/issues/6154): los tres repros de las revisiones de 10.1 van a `codegen/`). El
 precio, el mismo que en A contra B: un valor derivado del contenido (`String(f).length`,
 `stack.length`) da inconcluso y va a `codegen/` aunque solo difiera el texto.
 
@@ -449,7 +449,8 @@ que el corpus ejercita. `--crudo` corrió sobre los fixtures de SWC (oxc, carril
 `CODEGEN`, ver arriba) y no sobre el corpus real: el 0 de ese corpus es de un arnés aparte, el del
 agente de IA que escribió esas formas (24 933 ejecuciones de los fixtures de SWC y del corpus real, 11-oct;
 ver [`tests/codegen/README.md`](tests/codegen/README.md)), no de esta opción. El bug de los
-paréntesis salió de formas escritas a propósito, que están en `tests/codegen/` (ver
+paréntesis (O8, [oxc#6154](https://github.com/oxc-project/oxc/issues/6154) y
+[oxc#9029](https://github.com/oxc-project/oxc/issues/9029)) salió de formas escritas a propósito, que están en `tests/codegen/` (ver
 [Tests y verificaciones](#tests-y-verificaciones)). No mira la pasada observada (el epílogo de un
 programa mudo), el envoltorio de módulos del carril B, `--invocar` ni las variantes de
 `--mutaciones`: un mudo se compara solo por su estado de salida y sus globals. Se compara lo que
@@ -653,10 +654,11 @@ Principios:
     anónima (`var x = () => {}`, un default de parámetro o de destructuring, `x = ...`,
     `x ||= ...`, `x &&= ...`, `x ??= ...`, un campo privado; `recheck::Nombran`; con el destino
     entre paréntesis, `(x) = ...` o `[(x) = ...] = []`, no hay NamedEvaluation y no se marca:
-    node da `.name` vacío, y el codegen de oxc 0.153.0 quita esos paréntesis igual). Si lo toca, el
+    node da `.name` vacío, y el codegen de oxc 0.153.0 quita esos paréntesis igual: O8,
+    [oxc#6154](https://github.com/oxc-project/oxc/issues/6154)). Si lo toca, el
     `.name` cambió, y eso ya es un bug de keep_names que el programa puede estar imprimiendo con
     la forma del mensaje (oxc 0.153.0 manglea un parámetro con default anónimo:
-    `(handler = () => {}) => handler.name` da `e`): `Inconcluso`, `div/` con nota (H1 de la
+    `(handler = () => {}) => handler.name` da `e`; [oxc#27725](https://github.com/oxc-project/oxc/issues/27725)): `Inconcluso`, `div/` con nota (H1 de la
     revisión del bloque 8). Se mira el binding renombrado, no el texto: no importa cómo lea el
     programa el `.name` (`f["na" + "me"]`, `Reflect.get`). Sin keep_names (core_defaults) el
     cambio del `.name` es la asunción "No Reliance on Function.prototype.name" y no se mira.
@@ -766,7 +768,8 @@ Principios:
   `.stack` ya es falsa en B). Lo que no cubre:
   - el pliegue que borra la rama (de las 99 variantes de 7.1 quedan 24 filas de 656: `global` y
     `with` × contador y objeto): oxc pliega mal la condición de adentro (`Number.isInteger(5e-324)`,
-    `"abc".substring(1, undefined)`) y borra la rama entera; B ya no toca la asunción y da el valor
+    [oxc#27622](https://github.com/oxc-project/oxc/pull/27622); `"abc".substring(1, undefined)`,
+    [oxc#27098](https://github.com/oxc-project/oxc/pull/27098)) y borra la rama entera; B ya no toca la asunción y da el valor
     por defecto, como un minificado que la aprovechó. Desde B no se distingue.
   - una dependencia por datos de una asunción sin sensor de uso completo cuyo valor por defecto
     la sal no cambia: un valor calculado (`[].join()`), un literal fuera de las posiciones que se
@@ -813,7 +816,7 @@ Principios:
     "otro")` con `t = [0, bug.length]` (A: `otro`; B y A con más pila: `cero`), o el mismo valor en
     un `if` que imprime una línea que A no tiene (`if (t[i] === 0) console.log("cero")`). La sal
     llega a `cero`, el token que difiere, y el salado también coincide: `known/` (MEDIDO en la
-    revisión A del bloque 10 con oxc 0.153.0 y el bug F, en tres programas de ese tipo,
+    revisión A del bloque 10 con oxc 0.153.0 y el bug F ([oxc#27098](https://github.com/oxc-project/oxc/pull/27098)), en tres programas de ese tipo,
     en las 4 celdas de oxc; igual con `c9eab79`). Por la salida no se distingue de un positivo de
     verdad (`rec(4800) ? "desbordo" : "cupo"`, que sigue en `known/`): la sal no lo puede cerrar.
     Caso fijo `26-b102b-l01` en la aceptación, con su destino actual.
@@ -874,7 +877,7 @@ Principios:
   las de los re-chequeos (B == A', las líneas de `localizada_con_marca`, `mensaje_nombre`) y el
   síntoma de `known-sintomas.tsv` (por eso su encabezado pasó a `sintoma v3`: las tablas viejas se
   descartan una vez). `console.log(handler)` con `handler` un parámetro con default anónimo que oxc
-  0.153.0 manglea da `[Function: handler]` contra `[Function: e]` y va a `div/` con el paso
+  0.153.0 manglea ([oxc#27725](https://github.com/oxc-project/oxc/issues/27725)) da `[Function: handler]` contra `[Function: e]` y va a `div/` con el paso
   `nombres_inspect` en la traza (antes de 9.1 iba a `iguales` en las 4 celdas: H3 de la revisión
   del bloque 8; casos `25-b91-`). El modo lo fija `main::process_case` por caso
   (`oracle::con_nombres_crudos`, por hilo). Lo que cuesta, MEDIDO en el corpus de SWC (3119 casos,
@@ -893,7 +896,7 @@ Principios:
 - **La pasada observada y `--invocar` ven el `.name` de una función desde 10.3**: lo que
   exporta, observa o devuelve el programa pasa por `ser` del preload (`src/preload.js`,
   `serFuncion`), que hasta 10.3 escribía toda función como `fn`, sin nombre: un bug de keep_names
-  que solo se veía en lo que exporta un módulo mudo quedaba en `iguales` también en carril_a
+  ([oxc#27725](https://github.com/oxc-project/oxc/issues/27725)) que solo se veía en lo que exporta un módulo mudo quedaba en `iguales` también en carril_a
   (MEDIDO en la revisión del bloque 9: `export function make(handler = ()
   => {}) { return handler; }` con `--invocar`, y un objeto exportado con esa función).
   Ahora la escribe como `util.inspect`, `[Function: handler]` o `[Function (anonymous)]`, y la
@@ -1151,16 +1154,18 @@ DIFUZZ_SIN_NODE=1 cargo test --no-fail-fast           # sin node: saltea y cuent
 Sin `node` en el `PATH`, los tests que lo necesitan fallan con un mensaje claro. Con
 `DIFUZZ_SIN_NODE=1` se saltean y cada uno deja una línea `DIFUZZ_SALTEADO_SIN_NODE` en stderr.
 
-- **Golden de detección** (`tests/golden/`): 19 casos (17 con bugs conocidos de oxc y swc, el control `control-limpio` y una prueba del oráculo, `difuzz-senal-b`), en 8
+- **Golden de detección** (`tests/golden/`): 19 casos (17 con bugs conocidos de oxc y swc, cada uno con su issue o PR en
+  [`tests/golden/README.md`](tests/golden/README.md); el control `control-limpio` y una prueba del oráculo, `difuzz-senal-b`), en 8
   celdas, más `--invocar` y `--stubs`; la clase esperada de cada caso está en `esperado.tsv`.
 - **Aceptación de los re-chequeos** (`tests/aceptacion/rechequeos/`): 188 casos que, en su mayoría,
   combinan un bug real de oxc con un flag de asunción (o con la forma en que se imprime), en las 4
   celdas de oxc (752 comparaciones). El desglose está en `tests/README.md`.
 - **Corpus de codegen** (`tests/codegen/`, 10.1): 142 formas propias cuya semántica depende de la
   sintaxis exacta (paréntesis, comas, directivas, ASI, claves computadas, escapes), con `--crudo`
-  en 8 celdas (1136 comparaciones). Las 9 del bug de los paréntesis de oxc van a `codegen/`; los
-  bugs del minificador que también tocan (keepNames con `(0, function(){})`, la clase con
-  `static ["prototype"]`), a `div/`. Destinos justificados en
+  en 8 celdas (1136 comparaciones). Las 9 del bug de los paréntesis de oxc (O8,
+  [oxc#6154](https://github.com/oxc-project/oxc/issues/6154)) van a `codegen/`; los
+  bugs del minificador que también tocan (keepNames con `(0, function(){})`, O9, conocido y sin reportar; la clase con
+  `static ["prototype"]`, O10, #PENDIENTE-O10), a `div/`. Destinos justificados en
   [`tests/codegen/README.md`](tests/codegen/README.md).
 
 ```sh
@@ -1229,7 +1234,8 @@ scripts/barrido-sintetico.sh --semilla 59 regresion OUT/regresion [BIN]     # 10
 scripts/barrido-sintetico.sh --semilla 1010 explorar F3 OUT/explorar-f3 [BIN] # 5000 casos de una familia
 ```
 
-`regresion` genera a propósito los patrones de los bugs conocidos: **tiene** que dar `div/`; un bug
+`regresion` genera a propósito los patrones de los bugs conocidos (la lista, con el issue o la PR de
+cada uno, junto a `CONOCIDOS` en `scripts/generar.cjs`): **tiene** que dar `div/`; un bug
 que deja de aparecer está arreglado (o se rompió el generador). En `explorar` esos patrones no
 salen, así que cada `div/` es candidato a bug nuevo. Una familia que da 0 bugs nuevos en 5000 casos
 deja de explorarse y queda solo en la regresión. Las familias (F1-F10) y las opciones del generador

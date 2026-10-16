@@ -28,7 +28,7 @@ deja una línea `DIFUZZ_SALTEADO_SIN_USERNS` en stderr.
 
 ## Golden de detección — `tests/golden/`
 
-19 casos (17 con bugs conocidos de oxc y swc, el control `control-limpio` y una prueba del oráculo, `difuzz-senal-b`), en 8 celdas (swc|oxc × carril a|b × core_defaults|carril_a), más
+19 casos (17 con bugs conocidos de oxc y swc, cada uno con su issue o PR en `tests/golden/README.md`; el control `control-limpio` y una prueba del oráculo, `difuzz-senal-b`), en 8 celdas (swc|oxc × carril a|b × core_defaults|carril_a), más
 `--invocar`/`--stubs` en oxc core_defaults. Clase esperada por caso y celda en `esperado.tsv`, justificada
 en `tests/golden/README.md`.
 
@@ -44,7 +44,7 @@ tests/golden/verificar.sh [--jobs N] [BINARIO] [DIR_SALIDA]
 188 casos que combinan un bug real de oxc con un flag de asunción (o con la forma en que se imprime), en las 4
 celdas de oxc (188 × 4 = 752 comparaciones): 21 de la revisión 1 (C4, `00-` a `10-`), 9 adversariales de la revision de los bloques 4-6 (`r01` a
 `r10`, sin `r05`), `14-tdz-positivo`, 11 de los flags que antes no tenían re-chequeo (`15-` coerción, `16-`
-built-ins, `17-` contenido de `toString`/`.stack`, `18-` profundidad: positivos y adversariales con el Issue A),
+built-ins, `17-` contenido de `toString`/`.stack`, `18-` profundidad: positivos y adversariales con el Issue A, [comentario en oxc#27412](https://github.com/oxc-project/oxc/pull/27412#issuecomment-6192468107)),
 15 de la revisión de la integración del 09-oct (`19-`: el bug adentro del código que el re-chequeo neutraliza; r03, r06 y r13 son
 controles), 5 del paso 7 (`20-`), 23 de n-principio (`21-`: `extends`, `with`, `global_conocido`,
 violaciones y solo sloppy con el bug en la rama que solo corre con la violación; la TDZ en un `return`; y sus
@@ -64,16 +64,18 @@ con un desborde de pila nativo usado como dato (`24-f1-`, ítem 8.1: `d01` y `d0
 pila de este node), 6 del nombre local en un mensaje de V8 (`24-b83-`, ítem 8.3: `cb is not a function`
 contra `e is not a function`; 3 positivos y 3 con un bug real al lado, en el código que el bug deja de correr
 o dentro de la expresión que V8 escribe), 3 de H1 de la revisión del bloque 8 (`24-b83h1-`: con keep_names
-oxc manglea un parámetro con default anónimo y el `.name` que el programa imprime con la forma del mensaje
+oxc manglea un parámetro con default anónimo, [oxc#27725](https://github.com/oxc-project/oxc/issues/27725), y el `.name` que el programa imprime con la forma del mensaje
 cambia; van a `div/` en carril_a y a `known/` en core_defaults, donde keep_names está apagado; `n03` lee el
 `.name` con una clave armada en runtime), 2 del sensor perezoso en B (`24-b87-`, ítem 8.7: una TDZ atrapada
 por un `try` armado en runtime, que `runner::puede_atrapar` no ve en el minificado; con el bug en el catch van
 a `div/`), 6 de los nombres que imprime `util.inspect` (`25-b91-`, ítem 9.1: el mismo bug de keep_names que
 `24-b83h1-`, visto como `[Function: handler]` contra `[Function: e]`, con clase, `bound`, privado y `catch`;
+[oxc#27725](https://github.com/oxc-project/oxc/issues/27725), y el privado, #PENDIENTE-N2;
 `c01` es el control con las formas que keep_names cubre), 6 de los menores de `mensaje_nombre` (`25-b93-`,
 ítem 9.3: V8 escribe una llamada como `(...)` y el acceso opcional como `?.`, `cb(...) is not a function`; los
 positivos `p01` y `p02` van a `known/`; `p03`, un parámetro con default anónimo, a `div/` en carril_a por H1;
-`p04` fija `(h) = function () {}`, que el codegen de oxc imprime sin paréntesis; `n01` y `n02`, con un bug
+`p04` fija `(h) = function () {}`, que el codegen de oxc imprime sin paréntesis (O8,
+[oxc#6154](https://github.com/oxc-project/oxc/issues/6154)); `n01` y `n02`, con un bug
 real al lado o en un argumento que V8 no escribe, a `div/`) y 5 de H2 de la revisión del bloque 8 (`25-b92-`,
 ítem 9.2: la profundidad nativa de `24-f1-` con una tabla que la sal de 8.1 no confirmaba: valores en
 argumentos, un literal salado que no es el de la coincidencia, un booleano y un número; van a `div/` porque
@@ -83,16 +85,16 @@ llegar a la línea en que B difiere de A; `p01`, el positivo de `24-f1-p01` con 
 ítem 10.2: la misma profundidad nativa con una etiqueta salable en la misma línea que el valor, antes, después
 o pegada; la sal tiene que caer en un token que difiere de A, no en la etiqueta: `div/`; `p01`, el positivo
 con la etiqueta, sigue en `known/`) y 1 de R2 de la misma revisión (`26-b103-o02`, ítem 10.3: un módulo mudo que
-exporta una función cuyo `.name` cambia con el bug de keep_names; la pasada observada la escribe con su nombre:
+exporta una función cuyo `.name` cambia con el bug de keep_names, [oxc#27725](https://github.com/oxc-project/oxc/issues/27725); la pasada observada la escribe con su nombre:
 `div/` en carril_a, igual en core_defaults, descarte en el carril A) y 1 límite conocido (`26-b102b-l01`, 10.2b, x03
 de la revisión A del bloque 10: el valor del bug elige qué literal se imprime y la sal confirma; espera `known/` en las 4
 celdas aunque B ejecuta el bug; ver "Límites conocidos" en el manual (`MANUAL.md`)) y 5 del re-chequeo de nombres de
-core_defaults (`27-b113-`, ítem 11.3, I6 de la revisión integral 1: `n01` y `n02` llevan el bug E de oxc en un programa
+core_defaults (`27-b113-`, ítem 11.3, I6 de la revisión integral 1: `n01` y `n02` llevan el bug E de oxc ([oxc#27621](https://github.com/oxc-project/oxc/pull/27621)) en un programa
 que nombra `.name` y van a `div/` en las 4; con el paso de nombres siempre `Explica`, la mutación m1, iban a `known/` en
 core_defaults; `p01`, solo el nombre mangleado, y `p02`, un valor que sale de un nombre y que explica el renombre, van a `known/` en
 core_defaults e igual en carril_a; `n03`, el fixture 12306 de SWC, pasa por el camino nuevo de I6 y va a `div/` en
 core_defaults, costo declarado y guardián de la mutación m1b), 3 de los topes de salida (`27-b11-t`, ítem 11.2b:
-con el bug F de oxc el programa escribe más que el tope de salida, `t01` solo en B, `t02` solo con la pila del
+con el bug F de oxc ([oxc#27098](https://github.com/oxc-project/oxc/pull/27098)) el programa escribe más que el tope de salida, `t01` solo en B, `t02` solo con la pila del
 re-chequeo de profundidad y `t03` en un bucle de B; van a `div/` en las 4) y 4 de las escrituras a stderr con
 `fs.writeSync(2, …)` (`28-b112d-`, ítem 11.2d: `e01` a `e03`, sin bug, cuentan los EAGAIN, no atrapan sus errores
 o salen con `process.exit` y esperan `igual` en las 4; `w06`, con el bug F en stdout, `div/` en las 4). Los `19-`, `20-` y `22-` esperan `div/` en todas
@@ -115,7 +117,8 @@ tests/aceptacion/rechequeos/verificar.sh [--jobs N] [BINARIO] [DIR_SALIDA]
 exacta, corridas con `--crudo` (el texto crudo contra el original que imprime el backend) en 8
 celdas (oxc|swc × carril a|b × core_defaults|carril_a): 1136 comparaciones. La clase de un caso con
 `codegen/` es `codegen:<kind>+<clase>` (ortogonal). Las 9 formas del bug de los paréntesis de oxc
-(O8) van a `codegen/` en las 8 celdas; O9 y O10 a `div/` por el oráculo de siempre. Origen,
+(O8, [oxc#6154](https://github.com/oxc-project/oxc/issues/6154) y [oxc#9029](https://github.com/oxc-project/oxc/issues/9029))
+van a `codegen/` en las 8 celdas; O9 (conocido, sin reportar) y O10 (#PENDIENTE-O10) a `div/` por el oráculo de siempre. Origen,
 adaptaciones y la justificación de cada destino en `tests/codegen/README.md`. Reutiliza
 `tests/golden/verificar.sh`, que para esto acepta `--difuzz "ARGS"` (argumentos extra para cada
 celda).
