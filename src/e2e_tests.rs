@@ -255,7 +255,7 @@ fn tabla() -> Vec<Fila> {
         },
         // 11.3 (I6): el re-chequeo de nombres de core_defaults, por el camino de
         // produccion (oxc de verdad). Positivo: el `.name` de una funcion que oxc manglea va a
-        // known/. Negativo: el bug E de oxc (`Math.cbrt(-8)` -> NaN) en un programa que nombra
+        // known/. Negativo: el bug E de oxc (`Math.cbrt(-8)` -> NaN, oxc#27621) en un programa que nombra
         // `.name` va a div/: con keep_names el bug sigue (NoExplica). Si el paso de nombres diera
         // siempre Explica (la mutacion m1 de la revision), iria a known/.
         Fila {
@@ -640,7 +640,7 @@ fn sensor_omitido_de_punta_a_punta() {
 }
 
 /// 10.3 (R2): con `--invocar`, la funcion que devuelve una funcion observada se
-/// serializa con su `.name` (antes `fn`). El bug de keep_names de oxc 0.153.0 (parametro con default
+/// serializa con su `.name` (antes `fn`). El bug de keep_names de oxc 0.153.0 (oxc#27725; parametro con default
 /// anonimo: `handler` -> `e`, 24-b83h1) llega a la comparacion en carril_a (keep_names: div/); en
 /// core_defaults los nombres se borran (`nombres_de_celda`) y queda igual. Antes, iguales en las dos.
 #[test]

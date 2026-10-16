@@ -678,7 +678,7 @@ pub fn mensaje_con_nombre_localizado(a: &runner::Exec, b: &runner::Exec) -> bool
 /// (su nombre propio, o el destino de NamedEvaluation si es anonima: `x = () => {}`,
 /// `(x = () => {}) => ...`, `{x = class {}}`, `x ||= function () {}`; `Nombran`). Con un
 /// preset que promete keep_names (`Minifier::preserva_nombres`), si el mangle renombro uno
-/// de esos bindings el `.name` cambio, y eso ya es un bug de keep_names (oxc 0.153.0 manglea
+/// de esos bindings el `.name` cambio, y eso ya es un bug de keep_names (oxc#27725: oxc 0.153.0 manglea
 /// el parametro con default anonimo: oxc_mangler-0.153.0/src/keep_names.rs:84-111 solo mira
 /// `Function`, `Class` y `VariableDeclarator`). Si el programa imprime ese `.name` con la
 /// forma `X is not a function`, el resto se cumple igual: por eso da `Inconcluso` (div/ con
@@ -2537,7 +2537,7 @@ pub const ARGUMENTS_RENOMBRADO: &str = "__dz_arguments";
 /// a `ARGUMENTS_RENOMBRADO`, junto con las referencias que lo ven. Ligar
 /// `arguments` es error temprano en estricto (`var arguments` no compila con
 /// "use strict"), asi que sin esto el re-chequeo sloppy de un caso asi no podia
-/// ni empezar (terser collapse_vars_arguments). Alcance: en una funcion no flecha
+/// ni empezar (terser collapse_vars_arguments, oxc#23844). Alcance: en una funcion no flecha
 /// (o el tope del archivo, que en CommonJS es la funcion envoltorio) que liga
 /// `arguments` como parametro, `var` o declaracion de funcion, se renombra todo
 /// identificador `arguments` de su cuerpo, entrando en flechas (no tienen
@@ -3095,7 +3095,7 @@ mod tests {
     #[test]
     fn renombra_arguments() {
         use super::rename_arguments;
-        // collapse_vars_arguments: el `arguments` de `inner` es el suyo.
+        // collapse_vars_arguments (oxc#23844): el `arguments` de `inner` es el suyo.
         let out = rename_arguments("var outer=function(){var k=7,arguments=5,inner=function(){console.log(arguments)};inner(k,1)};outer();").unwrap();
         assert!(out.contains("__dz_arguments = 5") && out.contains("console.log(arguments)"), "{out}");
         // Las flechas no tienen `arguments` propio: ven el ligado.
@@ -3151,7 +3151,7 @@ mod tests {
         let w = "var o = { x: 1 };\nwith (o) { console.log(typeof o); }\n";
         let aw = r.run(w);
         assert_eq!(with_matters(&r, (Minifier::Oxc, Preset::CoreDefaults, SourceKind::Script), w, w, &aw, &aw), Recheck::Explica);
-        // O4 (oxc #24331: `delete (0/0)` -> `delete NaN`) con un `with` al lado que
+        // O4 (oxc#24331: `delete (0/0)` -> `delete NaN`) con un `with` al lado que
         // no tiene nada que ver: sin el scope la divergencia sigue, el flag se va.
         let o4 = "var o = {};\nwith (o) { console.log(1); }\nconsole.log(delete (0 / 0));\n";
         let a4 = r.run(o4);
@@ -3386,7 +3386,7 @@ mod tests {
 
     /// b4-a (R1-H04 / C3): el sensor ve las violaciones atrapadas, y el re-chequeo
     /// solo las explica si la divergencia es esa. Al lado de un bug real de oxc
-    /// (O4, #24331: `delete (0/0)` -> `delete NaN`) la divergencia sigue: div/.
+    /// (O4, oxc#24331: `delete (0/0)` -> `delete NaN`) la divergencia sigue: div/.
     #[test]
     fn violaciones_atrapadas_en_node() {
         use crate::minify::{self, SourceKind};

@@ -860,7 +860,7 @@ fn tokens_js(s: &str) -> Vec<String> {
 }
 
 /// M13: el flag `extends` (estatico) mira todo el programa: en 9460 un
-/// `class extends 1` atrapado a proposito tapaba un bug real (O5). Se cambia
+/// `class extends 1` atrapado a proposito tapaba un bug real (O5: oxc#24331, #PENDIENTE-O5). Se cambia
 /// cada heredero literal por `null`, se minifica igual y se compara: si la
 /// divergencia sigue, `extends` no la explica (`false`). Si no hay nada que
 /// cambiar o algo falla, inconcluso (b1-b: antes `true`, se conservaba el flag).
@@ -982,7 +982,7 @@ fn depth_recheck(
 /// b1-b (R1-H01): ademas el camino tiene que sostenerse (recheck::veredicto). Si
 /// en estricto el original toma otra rama, la divergencia puede "desaparecer"
 /// porque la rama con el bug no corre: eso es inconcluso (`Err`), no sloppy.
-/// R2-H10 (terser collapse_vars_arguments): si el original liga `arguments`
+/// R2-H10 (terser collapse_vars_arguments, oxc#23844): si el original liga `arguments`
 /// (`var arguments = 5`), con "use strict" no compila. Antes eso cortaba el
 /// re-chequeo; ahora se prueba la variante estricta con ese binding renombrado
 /// (`recheck::rename_arguments`) y rige el mismo `veredicto`: solo si la
@@ -1121,7 +1121,7 @@ mod tests {
     }
 
     /// 11.3 (I6): el re-chequeo de nombres solo explica una divergencia en que
-    /// B difiere de A en nombres de su texto. El bug E de oxc (`-2` contra `NaN`), un `typeof` que
+    /// B difiere de A en nombres de su texto. El bug E de oxc (`-2` contra `NaN`, oxc#27621), un `typeof` que
     /// cambia o un nombre que no esta en el minificado no son nombres.
     #[test]
     fn difiere_solo_en_nombres_pide_nombres() {
@@ -1232,7 +1232,7 @@ mod tests {
     }
 
     /// M17: "solo sloppy" exige que el original sea estricto-valido y que la
-    /// divergencia desaparezca en estricto. Un bug real (O1) no se esconde.
+    /// divergencia desaparezca en estricto. Un bug real (O1, el Issue C: #PENDIENTE-C) no se esconde.
     #[test]
     fn oxc_solo_sloppy() {
         use super::sloppy_only;
@@ -1276,7 +1276,7 @@ mod tests {
         let (o, m, a, b) = ab("const __proto__ = 0;\nconsole.log(Object.keys({ __proto__ }));\n");
         assert_eq!(sloppy_only(&r, (Minifier::Oxc, Preset::CoreDefaults), &o, &m, &a, &b), Ok(super::Sloppy::No));
         // b1-b (R1-H01, c4 10-rt-sloppy-miente): el bug de oxc (borra la IIFE con
-        // rest y default con efecto) esta en la rama sloppy. En estricto el
+        // rest y default con efecto; oxc#24331, #PENDIENTE-O5) esta en la rama sloppy. En estricto el
         // original toma la otra rama: antes `Ok(true)` (known/), ahora inconcluso.
         let (o, m, a, b) = ab("function rec(v) { console.log(v); }\nfunction f() { return this; }\nif (f() === undefined) {\n  console.log(\"estricto\");\n} else {\n  (function (...[value = rec(\"rest\")]) {})();\n}\nconsole.log(\"fin\");\n");
         assert_eq!(a.stdout, "rest\nfin\n");
@@ -1350,7 +1350,7 @@ mod tests {
             let (a, b) = (r.run(&original), r.run(&minified));
             (original, minified, a, b)
         };
-        // terser/compress/collapse_vars/collapse_vars_arguments (corpus completo).
+        // terser/compress/collapse_vars/collapse_vars_arguments (corpus completo; oxc#23844, arreglado por oxc#26929).
         let cva = "var outer = function () {\n    var k = 7,\n        arguments = 5,\n        inner = function () {\n            console.log(arguments);\n        };\n    inner(k, 1);\n};\nouter();\n";
         for preset in [Preset::CoreDefaults, Preset::CarrilA] {
             let (o, m, a, b) = ab(cva, preset);
@@ -1361,14 +1361,14 @@ mod tests {
             assert_eq!(sloppy_only(&r, (Minifier::Oxc, preset), &o, &m, &a, &b), Ok(Sloppy::Renombrando), "{preset:?}");
         }
         // Miente: `var arguments` inofensivo y el bug de 9460 (IIFE con rest y
-        // default con efecto) en otra sentencia. Renombrado y en estricto, el bug sigue.
+        // default con efecto; oxc#24331, #PENDIENTE-O5) en otra sentencia. Renombrado y en estricto, el bug sigue.
         let (o, m, a, b) = ab("function rec(v) { console.log(v); }\nfunction g() { var arguments = 1; return arguments; }\nconsole.log(g());\n(function (...[value = rec(\"rest\")]) {})();\nconsole.log(\"fin\");\n", Preset::CoreDefaults);
         assert_eq!(a.stdout, "1\nrest\nfin\n");
         assert_ne!(b.stdout, a.stdout, "oxc ya no tiene el bug de 9460: buscar otro");
         assert_eq!(sloppy_only(&r, (Minifier::Oxc, Preset::CoreDefaults), &o, &m, &a, &b), Ok(Sloppy::No));
         // B1 (revision de los bloques 4-6, r01-args-getter): `var arguments;` sin inicializador conserva
         // el objeto `arguments`; renombrado vale `undefined` y A' lanza en la linea del
-        // bug (el bug A de oxc: el spread con getter se mueve). Antes: SiRenombrando
+        // bug (el bug A de oxc, oxc#27412: el spread con getter se mueve). Antes: SiRenombrando
         // (known/). Ahora el renombre solo ya cambia A: inconcluso (div/).
         let r01 = "function f() {\n  var arguments;\n  let result = \"FAIL\";\n  const o = { ...{ get prop() { result = \"PASS\"; } } };\n  console.log(arguments.length, result);\n  return o;\n}\nf(1, 2);\n";
         for preset in [Preset::CoreDefaults, Preset::CarrilA] {
@@ -1480,7 +1480,7 @@ mod tests {
 
     /// b4-a (R1-H04 / C3), de punta a punta con oxc: una TDZ atrapada que oxc borra
     /// va a known/ (re-chequeo de violaciones Explica); la misma al lado de un bug
-    /// real (O4, #24331) queda en div/ con `tdz_atrapada_irrelevante`.
+    /// real (O4, oxc#24331) queda en div/ con `tdz_atrapada_irrelevante`.
     #[test]
     fn tdz_atrapada_de_punta_a_punta() {
         use super::Medido;
@@ -1505,7 +1505,7 @@ mod tests {
         let tdz = "try { x; console.log(\"sin tdz\"); } catch (e) { console.log(\"tdz\"); }\nlet x = 1;\n";
         // I2 (revision de los bloques 4-6): la TDZ NO atrapada tambien pasa por el re-chequeo. oxc borra
         // `x;` (asume que no hay TDZ): known/. r09-tdz-final-getter: el bug A de
-        // oxc (el spread con getter se mueve) y `x; let x;` al final: antes known/
+        // oxc (el spread con getter se mueve, oxc#27412) y `x; let x;` al final: antes known/
         // ("No TDZ Violation") sin re-chequeo, ahora div/ (`tdz_irrelevante`).
         let nc = "console.log(\"a\");\nx;\nlet x = 1;\n";
         let r09 = "let result = \"FAIL\";\nconst o = { ...{ get prop() { result = \"PASS\"; } } };\nconsole.log(result);\nconsole.log(o);\nx;\nlet x;\n";
@@ -1533,8 +1533,8 @@ mod tests {
     }
 
     /// 9.2 (H2 y M1 de la revision del bloque 8), de punta a punta con oxc: un desborde de pila
-    /// nativo usado como dato y un bug (`Number.isInteger(5e-324)` -> `true`, `"abc".substring(1,
-    /// undefined)` -> `""`) que deja en B el valor de A con mas pila. Sin literales que salar
+    /// nativo usado como dato y un bug (`Number.isInteger(5e-324)` -> `true`, oxc#27622; `"abc".substring(1,
+    /// undefined)` -> `""`, oxc#27098) que deja en B el valor de A con mas pila. Sin literales que salar
     /// (`[true, bug]`) o con la sal sin llegar a la linea (`[0, bug.length]`), con 9e52cef iban a
     /// known/; ahora div/ con nota. El positivo con la tabla en las ramas de un `?:` (la sal amplia)
     /// sigue en known/ y la traza dice que se confirmo con la sal.
@@ -1703,7 +1703,7 @@ mod tests {
     /// t-principio: "un bug real nunca termina en known/; solo un re-chequeo
     /// concluyente manda ahi". `coercion`, `builtins`, `fn_tostring`/`stack` (paso
     /// contenido) y `profundidad` (bug en la misma linea) iban a known/ con el bug A
-    /// de oxc al lado (MEDIDO con el binario de la revision de los bloques 4-6). Por flag: el
+    /// de oxc (oxc#27412) al lado (MEDIDO con el binario de la revision de los bloques 4-6). Por flag: el
     /// positivo legitimo sigue en known/ y el adversarial va a div/ con el paso en la traza.
     #[test]
     fn flags_sin_rechequeo_de_punta_a_punta() {
@@ -1726,7 +1726,7 @@ mod tests {
         let preload = runner::Preload::write_tagged("principio").unwrap();
         let r = runner::Runner::new(&preload, crate::test_util::id_runner(), std::time::Duration::from_secs(20));
         let cfg = preset.build(Minifier::Oxc, kind);
-        // Bug A de oxc: el spread con getter se mueve (oxc imprime "FAIL").
+        // Bug A de oxc (oxc#27412): el spread con getter se mueve (oxc imprime "FAIL").
         let bug = "let result = \"FAIL\";\nconst o = { ...{ get prop() { result = \"PASS\"; } } };\nconsole.log(result);\nconsole.log(o);\n";
         let casos: [(&str, String, bool, &str); 22] = [
             // n-principio (corpus de ataque): el bug en la rama que solo corre con
@@ -1781,7 +1781,7 @@ mod tests {
     /// `salida_usuario::tope_de_memoria_de_node_va_a_recursos`) y pasa un tope de node queda
     /// Inconcluso, con la nota del tope, y el caso sigue en div/: el `Excedido` no sale de `clasificar`
     /// (si saliera, el caso iria entero a recursos/ y el test paniquea con ese payload). Los casos son
-    /// los "adentro" de `flags_sin_rechequeo_de_punta_a_punta` (el bug E de oxc en la rama de la
+    /// los "adentro" de `flags_sin_rechequeo_de_punta_a_punta` (el bug E de oxc, oxc#27621, en la rama de la
     /// violacion), con 3 MiB de salida (tope: 1 MiB) en la rama que toma solo la variante del
     /// re-chequeo (sin la violacion). `nombres` y `mensaje_nombre`: la variante es un minificado que
     /// conserva el nombre (keep_names o sin mangle), y el programa se reconoce minificado (sin saltos).
@@ -1844,7 +1844,7 @@ mod tests {
     /// el TypeError del motor con el nombre del parametro (`cb is not a function`) y oxc lo
     /// manglea. Desde cd54ad2 iba a div/; ahora known/ por `mensaje_nombre`. Si ademas se
     /// imprime el stack, en core_defaults cambia el nombre del marco (`at run` -> `at e`) y
-    /// sigue en div/ (n-principio, `stack-mangling`). Con el bug F (`"abc".substring(1, undefined)`
+    /// sigue en div/ (n-principio, `stack-mangling`). Con el bug F (oxc#27098; `"abc".substring(1, undefined)`
     /// -> ``) en otra linea, o dentro de la expresion que V8 escribe, sigue en div/ (la
     /// localizacion no pasa y el paso no corre).
     #[test]

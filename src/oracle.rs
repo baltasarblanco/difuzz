@@ -84,7 +84,7 @@ pub fn compare(a: &Exec, b: &Exec) -> Verdict {
 /// posiciones de los marcos de stack borradas como en `compare` (al reimprimir cambian lineas y
 /// columnas: issue_2208_8 imprime un stack en stdout). A diferencia de `main::same_exec` y de
 /// `compare`, los nombres que imprime `util.inspect` quedan crudos: parsear e imprimir no
-/// tiene por que tocarlos (el bug de los parentesis de `(h) = function(){}` cambia uno).
+/// tiene por que tocarlos (el bug de los parentesis de `(h) = function(){}`, O8, oxc#6154, cambia uno).
 pub fn mismo_programa(x: &Exec, y: &Exec) -> bool {
     let archivos = archivos_de_marco(x, y);
     let n = |s: &str| normalize_stack_positions(s, &archivos);

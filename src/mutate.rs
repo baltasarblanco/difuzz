@@ -70,7 +70,7 @@ enum Op {
 /// (sentencias, literales) mas dos propios (declaraciones y funciones).
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum Extra {
-    /// Literal numerico i: `n` → `-n` o `-1` (de ahi salio O3, la clave computada negativa).
+    /// Literal numerico i: `n` → `-n` o `-1` (de ahi salio O3, la clave computada negativa: el Issue B, #PENDIENTE-B).
     Neg(usize, NegTo),
     /// Envolver la sentencia i en un bloque o en una IIFE flecha (conserva `this` y `arguments`).
     Wrap(usize, WrapTo),

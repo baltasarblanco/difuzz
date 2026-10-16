@@ -32,7 +32,7 @@
 //! R1-H05, el oraculo sin debug assertions. El binario de difuzz lleva
 //! `debug-assertions = true` (Cargo.toml: los ganchos de diagnostico de SWC solo
 //! existen asi), pero el paquete npm del minifier no: un `debug_assert!` de oxc
-//! (p. ej. `compression_pass.rs:167-190`, eval indirecto) hace panic donde npm
+//! (p. ej. `compression_pass.rs:167-190`, eval indirecto, oxc#26511) hace panic donde npm
 //! devuelve codigo mal compilado. Por eso, ante un `Outcome::Panic`,
 //! `minify::prepare` re-minifica el caso con un segundo `Remoto` cuyo ejecutable
 //! es el mismo codigo compilado SIN debug assertions:
@@ -1256,7 +1256,7 @@ pub(crate) mod tests {
 
     /// Aceptacion de M34: un abort real del hijo (desborde de pila) es un
     /// `Outcome::Panic` con la senal, y el caso siguiente se minifica con un
-    /// hijo nuevo. Un panic comun del minifier (O6 de oxc) llega con su mensaje.
+    /// hijo nuevo. Un panic comun del minifier (O6 de oxc, oxc#26636) llega con su mensaje.
     #[test]
     fn abort_del_hijo_es_un_hallazgo_y_sigue() {
         let r = remoto_de_test(Minifier::Swc, SourceKind::Script);

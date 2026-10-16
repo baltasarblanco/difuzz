@@ -1544,7 +1544,7 @@ fn crudo_sin_perder_el_caso(st: &mut CrudoStats, rel: &Path, chequeo: impl FnOnc
 /// 10.1 (`--crudo`): el punto ciego de A. A no es el texto del caso sino el programa que el
 /// backend parseo e imprimio (`minify::prepare`: oxc con `oxc_codegen`; swc con `paren_remover`,
 /// `resolver`, `fixer` y su `emit`), y B sale del mismo programa parseado: un parser o un
-/// codegen que cambian la semantica (`(h) = function(){}` impreso sin los parentesis: el `.name`
+/// codegen que cambian la semantica (`(h) = function(){}` impreso sin los parentesis, O8, oxc#6154: el `.name`
 /// pasa de "" a "h") le pegan igual a A y a B y el oraculo no lo ve. Aca el texto crudo (`src`,
 /// con la forma aplicada) corre con el mismo runner que A (mismo archivo, preload, sensor y
 /// sandbox) y se compara con A (`oracle::mismo_programa`). Si difieren, `comparar_crudo`
@@ -2511,7 +2511,7 @@ fn compare_and_report(
     // AUXILIAR (existe porque el sensor se degrado; el A del caso ya termino dentro de los topes). Si
     // pasa un tope o no termina solo, I3 queda inconcluso: no se cambia al runner sin el sensor y A y B
     // se comparan como estaban (el A del caso, con el sensor). Antes un tope mandaba el caso a
-    // recursos/ (i01, i3-tope) y un A que no terminaba se comparaba igual (i3-colgado: el bug F, iguales;
+    // recursos/ (i01, i3-tope) y un A que no terminaba se comparaba igual (i3-colgado: el bug F, oxc#27098, iguales;
     // tambien en 2ff4d90).
     let mut nota_i3 = None;
     if runner.con_sensor() {
@@ -3835,7 +3835,7 @@ mod tests {
             .unwrap();
     }
 
-    /// 9.1 (H3 de la revision del bloque 8), de punta a punta: oxc 0.153.0 con keep_names manglea
+    /// 9.1 (H3 de la revision del bloque 8), de punta a punta: oxc 0.153.0 con keep_names manglea (oxc#27725)
     /// un parametro con default anonimo y `console.log(handler)` da `[Function: handler]` contra
     /// `[Function: e]`. Con la celda en `ctx.medido`, carril_a (keep_names) va a div/ con el paso
     /// `nombres_inspect`; core_defaults (sin keep_names) y un ctx sin celda (`medido: None`)
