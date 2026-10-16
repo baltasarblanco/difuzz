@@ -31,7 +31,7 @@
 
 const fs = require('fs');
 // --con-conocidos: tambien genera los patrones de los bugs conocidos. Donde esta cada uno: A en un
-// comentario de oxc#27412, B #PENDIENTE-B, C #PENDIENTE-C, D #PENDIENTE-D, el default con efecto en
+// comentario de oxc#27412, B oxc#27834, C #PENDIENTE-C, D #PENDIENTE-D, el default con efecto en
 // un rest en oxc#24331 (esta forma, #PENDIENTE-O5), E oxc#27621, F oxc#27098, G oxc#25158,
 // H oxc#27622, I oxc#27695 y oxc#27719, K oxc#27656.
 const CONOCIDOS = process.argv.includes('--con-conocidos');
@@ -537,7 +537,7 @@ class Gen {
   // computados, privados, destructuring con claves computadas.
   F7(sc) {
     const out = [];
-    // Claves numericas negativas computadas en destructuring/clases son el Issue B (#PENDIENTE-B): en esos
+    // Claves numericas negativas computadas en destructuring/clases son el Issue B (oxc#27834): en esos
     // contextos solo con --con-conocidos (en literales de objeto se imprimen bien).
     // b4: tambien [Infinity] (se pliega a 1/0 sin corchetes) y, en metodos/accesores de
     // literales de objeto, cualquiera de estas (variantes del Issue B que encontro el generador).

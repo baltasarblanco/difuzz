@@ -18,7 +18,7 @@ una celda corrida cuenta como falla.
 
 Por qué cada clase esperada:
 - `oxc-o1`, `oxc-o3*`: el minificado de oxc es un SyntaxError en script y en módulo, así que ThrowNew en las 4 celdas de oxc.
-  `oxc-o1` es el Issue C (`{ __proto__ }`, #PENDIENTE-C) y `oxc-o3*`, el Issue B (claves computadas negativas, #PENDIENTE-B).
+  `oxc-o1` es el Issue C (`{ __proto__ }`, #PENDIENTE-C) y `oxc-o3*`, el Issue B (claves computadas negativas, [oxc#27834](https://github.com/oxc-project/oxc/issues/27834)).
 - `oxc-o2-casos` (imprime `"ok"`): en sloppy, asignar al nombre de una function expression se ignora sin error. Solo
   diverge en módulo (TypeError). Los dos `oxc-o2-*` son el Issue D (`catch (a) { var a }`, #PENDIENTE-D).
 - `oxc-o2-typeof` (la forma del texto de reporte a oxc): `number` contra `function` en A (Stdout) y TypeError en B.
