@@ -90,8 +90,8 @@ known limits are in [SECURITY.md](SECURITY.md).
 
 ## AI assistance
 
-difuzz is developed with AI assistance: a large part of its code, tests and documentation was
-written with Anthropic's Claude, directed by the author.
+difuzz is built with Anthropic's Claude as a coding assistant. The author sets the design,
+reviews every change and runs the checks before anything is merged.
 
 ## License
 
