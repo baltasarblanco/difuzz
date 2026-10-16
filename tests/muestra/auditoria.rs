@@ -43,7 +43,7 @@ struct Excepcion {
     causa: &'static str,
 }
 
-/// A1. Medidas por la revision-1 sobre el corpus completo (INFORME.md, fila A1:
+/// A1. Medidas por la revision-1 sobre el corpus completo (su informe, fila A1:
 /// swc B 3051/3053) y de nuevo aca sobre la muestra.
 const EXCEPCIONES_A1: &[Excepcion] = &[
     Excepcion {

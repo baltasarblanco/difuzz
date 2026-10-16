@@ -28,7 +28,7 @@
 //! `mismo_camino` y `localizada`) mandaba a known/ un bug real en la rama que solo corre
 //! con la violacion (el catch de la TDZ, la rama sin `window`, la rama sloppy, la rama
 //! que depende del scope del `with`): MEDIDO, 17 casos y 116 filas de 8 celdas de oxc
-//! (noche2/n-principio/corpus-ataque). Se borraron `veredicto`, `mismo_camino` y
+//! (n-principio, corpus de ataque). Se borraron `veredicto`, `mismo_camino` y
 //! `localizada`: ya nadie los usa.
 
 use std::panic::{catch_unwind, AssertUnwindSafe};
@@ -280,7 +280,7 @@ pub fn camino_sensor(b: &runner::Exec, con_sensor: bool, clases: Option<&[&str]>
     }
 }
 
-/// Integracion 7.1 + 7.4 (H3 de la revision de 7.1, H1/H2 de la de la integracion): el camino de B cuando A y B se
+/// Integracion 7.1 + 7.4 (H3 de la revision de 7.1, H1/H2 de la revision de la integracion): el camino de B cuando A y B se
 /// compararon sin el sensor (I3: alguno paso el tope o se cayo con el). B (`b`, sin el sensor)
 /// no tiene sensor que mirar, asi que se corre B otra vez CON el sensor (tope
 /// `runner::MAX_PAUSAS_MAYOR`) y cobertura, y otra SIN el sensor con cobertura. La corrida con el

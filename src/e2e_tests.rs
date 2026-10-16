@@ -311,7 +311,7 @@ fn tabla() -> Vec<Fila> {
         // t-principio: antes el "bug" de Rompe (41 -> 42) iba en la misma linea que el largo
         // del stack y el paso contenido lo aceptaba; ahora A' y B' con el contenido fijo lo
         // ven (NoExplica).
-        // n-ruido (t-real): un stack que solo cambia de columna al minificar no diverge.
+        // n-ruido (codigo real): un stack que solo cambia de columna al minificar no diverge.
         Fila {
             caso: "stack-columna",
             programa: "var o = { valueOf() { return 1; } };\nconsole.log(new Error('e').stack);\n",

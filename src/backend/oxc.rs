@@ -108,7 +108,7 @@ impl Oxc {
     ///   mangle, y `top_level` explicito. Es la intencion del carril A de SWC
     ///   (DCE top-level + keep_*). En oxc coincide con core_defaults_keep_names.
     ///
-    /// M35 (decision del usuario, opcion a): en los tres presets
+    /// M35 (decision del 06-oct, opcion a): en los tres presets
     /// `treeshake.annotations = false`. `core_defaults` se aparta de `minifySync`
     /// SOLO en eso: oxc honra `/*@__PURE__*/` y `/*#__NO_SIDE_EFFECTS__*/` por
     /// contrato y borra llamadas anotadas con efectos (7 falsos positivos por

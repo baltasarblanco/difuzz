@@ -45,7 +45,7 @@ tests/golden/verificar.sh [--jobs N] [BINARIO] [DIR_SALIDA]
 celdas de oxc (181 × 4 = 724 comparaciones): 21 de la revisión 1 (C4, `00-` a `10-`), 9 adversariales de la revision de los bloques 4-6 (`r01` a
 `r10`, sin `r05`), `14-tdz-positivo`, 11 de los flags que antes no tenían re-chequeo (`15-` coerción, `16-`
 built-ins, `17-` contenido de `toString`/`.stack`, `18-` profundidad: positivos y adversariales con el Issue A),
-15 de la revisión de t-int (`19-`: el bug adentro del código que el re-chequeo neutraliza; r03, r06 y r13 son
+15 de la revisión de la integración del 09-oct (`19-`: el bug adentro del código que el re-chequeo neutraliza; r03, r06 y r13 son
 controles), 5 del paso 7 (`20-`), 23 de n-principio (`21-`: `extends`, `with`, `global_conocido`,
 violaciones y solo sloppy con el bug en la rama que solo corre con la violación; la TDZ en un `return`; y sus
 positivos), 5 de `.stack` (`22-`, de n-ruido: el bug cambia nombre, cuenta u orden de los marcos), 5 del

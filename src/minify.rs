@@ -323,7 +323,7 @@ pub fn instrument(src: &str, invocar: bool, kind: SourceKind) -> Option<String> 
         GLOBALS.set(&Globals::new(), || top_level_bindings(src, kind))
     }))
     .ok()??;
-    // M36 (decision del usuario, opcion a): en el carril A (CommonJS) un programa
+    // M36 (decision del 06-oct, opcion a): en el carril A (CommonJS) un programa
     // que menciona `module`/`exports` (UMD, CJS) puede no tener bindings top-level
     // y exportar todo por `module.exports`. Se observa eso tambien. `module` es la
     // variable del envoltorio CommonJS de node: con `en_funcion` sigue a la vista

@@ -199,7 +199,7 @@ pub fn normalize_names(s: &str) -> String {
     out
 }
 
-/// n-ruido (t-real: ~12 casos en known/ solo por columnas): en un marco de stack
+/// n-ruido (codigo real: ~12 casos en known/ solo por columnas): en un marco de stack
 /// (`at f (archivo:L:C)`, `at archivo:L:C`) cambia cada `archivo:L:C` por `<pos>`:
 /// archivo, linea y columna cambian legitimamente al minificar. Conserva el resto del
 /// marco (nombre de la funcion, `new`, `async`, `[as x]`, `<anonymous>` sin posicion,
@@ -991,7 +991,7 @@ mod tests {
         assert!(!solo_nombres_de_inspect(&ex("[Function: f]\n"), &ex("6\n")));
     }
 
-    /// n-ruido (t-real): las posiciones de los marcos se borran; el nombre, la cantidad y
+    /// n-ruido (codigo real): las posiciones de los marcos se borran; el nombre, la cantidad y
     /// el orden de los marcos no.
     #[test]
     fn stack_sin_posiciones() {
@@ -1020,7 +1020,7 @@ mod tests {
         assert_eq!(n("    at 10:20"), "    at 10:20");
     }
 
-    /// 7.5 (revision n2, MENOR 5, repro `revision-n2/ruido/t03-stack-pos`): una linea
+    /// 7.5 (revision n2, MENOR 5, repro `t03-stack-pos`): una linea
     /// impresa con forma de marco conserva la posicion si su archivo no es el de un marco
     /// real (anotado por el preload, o de difuzz); un marco real la pierde igual que antes.
     #[test]

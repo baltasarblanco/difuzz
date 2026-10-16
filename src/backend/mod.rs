@@ -60,7 +60,7 @@ pub struct Politica {
 }
 
 impl Politica {
-    /// Decision del usuario (09-oct): el sensor de violaciones del preload (b4-a,
+    /// Decision del 09-oct: el sensor de violaciones del preload (b4-a,
     /// inspector de V8, x1,67 por ejecucion de node) corre solo para los backends
     /// que usan su resultado: los que piden `Rechequeo::Violaciones` (hoy oxc). Sale
     /// de `rechequeos` y no de un campo aparte, para que no puedan desacoplarse.

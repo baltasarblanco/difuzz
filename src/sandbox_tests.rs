@@ -305,7 +305,7 @@ fn sandbox_destino_del_caso() {
     let leer = format!("var t = require('fs').readFileSync({}, 'utf8');\nconsole.log(\"bug-no\", t.length);\n", js_str(&senuelo));
     let hijo = "require('child_process').execSync('true');\nconsole.log(\"bug-no\");\n".to_string();
     let escribir = "require('fs').writeFileSync('dentro.txt', 'x');\nconsole.log(41);\n".to_string();
-    // revision-n2/sb3/u01-solo-a-toca: el original lee (negado, atrapado e impreso); con el
+    // u01-solo-a-toca (revision n2): el original lee (negado, atrapado e impreso); con el
     // "bug", B no entra a la rama.
     let solo_a = format!(
         "var m = \"bug-no\";\nif (m === \"bug-no\") {{ try {{ require('fs').readFileSync({}); }} catch (e) {{ console.log(\"negado\", e.code); }} }}\nconsole.log(m);\n",
@@ -313,7 +313,7 @@ fn sandbox_destino_del_caso() {
     );
     let vivo = "var vivo; try { process.kill(process.pid, 0); vivo = true; } catch (e) { vivo = e.code; }\nconsole.log(vivo, \"bug-no\");\n".to_string();
     let matarse = "var r; try { process.kill(process.pid, \"SIGTERM\"); r = \"ok\"; } catch (e) { r = e.code; }\nconsole.log(r, \"bug-no\");\n".to_string();
-    // revision/a3-2c/corpus/c01-ayb-bug-real: lee negado y lo atrapa en silencio; despues, el
+    // c01-ayb-bug-real (revision a3-2c): lee negado y lo atrapa en silencio; despues, el
     // "bug" (ajeno al sandbox). Antes de 7.9 iba a descartes.
     let ayb_bug = format!("try {{ require('fs').readFileSync({}); }} catch (e) {{}}\nconsole.log(\"bug-no\");\n", js_str(&senuelo));
     // 7.9: sin bug (el "minificado" cambia `1` por `0+1`), A y B leen negado e imprimen el error
@@ -791,7 +791,7 @@ fn sandbox_prioridad_y_senales_sin_lanzar() {
 }
 
 /// 7.7 (MENOR 5 y 8): carril B, un modulo mudo cuyo original toca el sandbox y el minificado
-/// no (`revision/a3-2c/corpus-b/m01-mudo-solo-a`): la pasada cruda (iguales: los dos mudos) y
+/// no (`m01-mudo-solo-a` de la revision a3-2c): la pasada cruda (iguales: los dos mudos) y
 /// el envoltorio de modulos son solo-A. El hallazgo (div/) lleva la nota UNA vez y el caso
 /// cuenta dos pasadas solo-A.
 #[test]
@@ -831,7 +831,7 @@ fn sandbox_solo_a_modulo() {
 
 /// 7.9 (revision fe0cd86, MENOR 3): carril B, un modulo mudo cuyo original y minificado tocan
 /// el sandbox (leen negado y lo atrapan en silencio) y que tiene un bug ajeno al sandbox
-/// (`revision/a3-2c/corpus-b/m02-ayb-bug-real`): la pasada cruda (iguales: los dos mudos) y el
+/// (`m02-ayb-bug-real` de la revision a3-2c): la pasada cruda (iguales: los dos mudos) y el
 /// envoltorio de modulos son A-y-B y se comparan. El hallazgo (div/) lleva la nota UNA vez y el
 /// caso cuenta dos pasadas A-y-B; nada va a descartes.
 #[test]

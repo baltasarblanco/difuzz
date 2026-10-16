@@ -21,7 +21,7 @@
 // - Orden dentro de cada (estrato, tipo): sha256("difuzz-muestra-v1\0" + ruta
 //   relativa), ascendente. Se toman los primeros CUOTAS[estrato][tipo].
 // - FIJOS: casos que entran siempre porque los tests los nombran (excepciones
-//   conocidas de A1 en swc, revision-1 INFORME.md).
+//   conocidas de A1 en swc, del informe de la revision-1).
 'use strict';
 const fs = require('fs');
 const path = require('path');

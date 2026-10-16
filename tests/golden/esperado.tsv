@@ -56,7 +56,7 @@ oxc-o7	oxc-a-core_defaults	asserts
 oxc-o7	oxc-a-carril_a	asserts
 oxc-o7	oxc-b-core_defaults	asserts
 oxc-o7	oxc-b-carril_a	asserts
-# b5 (09-oct, R1-H05): eval indirecto -> directo (revision-1/pruebas/c6-corpus/eval-indirecto). Con
+# b5 (09-oct, R1-H05): eval indirecto -> directo (eval-indirecto del corpus c6 de la revision 1). Con
 # debug assertions oxc hace panic (el debug_assert que tapaba el bug); el oraculo sin ellas da el
 # minificado de npm, que cambia `var e = eval; e("x")` por `eval("x")`: `global/local` contra
 # `local/local` (Stdout) en las 4 celdas de oxc, con `solo_debug_assertions: si` en el meta.

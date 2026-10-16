@@ -2256,7 +2256,7 @@ fn observe_module(
     true
 }
 
-/// El runner de un worker de la celda. Decision del usuario (09-oct): el sensor
+/// El runner de un worker de la celda. Decision del 09-oct: el sensor
 /// de violaciones del preload lo decide la politica del backend medido
 /// (`Politica::usa_sensor`): swc corre sin el (A, B y re-chequeos), oxc con el.
 fn runner_de_celda(preload: &runner::Preload, worker: usize, cli: &Cli) -> runner::Runner {
@@ -2320,17 +2320,17 @@ enum Pasada {
     Sigue(Option<runner::Exec>),
 }
 
-/// 2c (revision-n2): quien toco el sandbox en un caso cuyo original lo toco.
+/// 2c (revision n2): quien toco el sandbox en un caso cuyo original lo toco.
 enum TocaSandbox {
     /// El original no lo toco (si solo lo toca el minificado, se compara).
     No,
     /// El original si y el minificado no: el bug puede ser justo lo que cambia que archivo
-    /// se abre (`revision-n2/sb3/u01-solo-a-toca`: con el bug, B no llegaba a leerlo). Se
+    /// se abre (`u01-solo-a-toca` de la revision n2: con el bug, B no llegaba a leerlo). Se
     /// compara, con una nota en meta.txt; es el espejo de B-solo. Con el B que lo decidio.
     SoloA(Box<runner::Exec>),
     /// Los dos. 7.9: se compara igual (con el B que lo decidio), con una nota en meta.txt.
     /// A y B corren con el mismo sandbox (mismo runner, mismas rutas): lo que niega lo niega
-    /// igual a los dos, y un bug ajeno al sandbox (`revision/a3-2c/corpus/c01-ayb-bug-real`)
+    /// igual a los dos, y un bug ajeno al sandbox (`c01-ayb-bug-real` de la revision a3-2c)
     /// es un bug. Si el bug cambia lo que se toca (otra ruta, otro permiso), tambien: es un
     /// cambio de comportamiento. Las divergencias falsas que esto podria traer se midieron
     /// con programas sin bug que tocan el sandbox de muchas formas (45 programas, 3 veces cada
@@ -2616,7 +2616,7 @@ fn compare_and_report(
             ));
         }
     }
-    // Integracion 7.1 + 7.4 (H3 de la revision de 7.1; H1/H2 de la de la integracion): si A y B se compararon sin el
+    // Integracion 7.1 + 7.4 (H3 de la revision de 7.1; H1/H2 de la revision de la integracion): si A y B se compararon sin el
     // sensor (I3), el camino de B que pide 7.1 no sale de las corridas con el sensor ya hechas
     // (un programa puede notar el sensor y tomar otro camino con el): el re-chequeo, solo si
     // todo lo demas ya daba Explica, corre B otra vez con el sensor (tope mayor) y sin el, con
@@ -3469,7 +3469,7 @@ mod tests {
         assert!(super::hint_lines(out, &super::Stats::default()).is_empty());
     }
 
-    /// Decision del usuario (09-oct): el runner de la celda (el de produccion,
+    /// Decision del 09-oct: el runner de la celda (el de produccion,
     /// `runner_de_celda`) corre el sensor de violaciones solo si la politica del
     /// backend lo usa. swc: node sin el sensor (DIFUZZ_SENSOR=0), sin flags ni
     /// lineas `viol` de una TDZ atrapada; oxc: con. Lo mismo vale para los

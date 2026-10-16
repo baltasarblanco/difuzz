@@ -90,15 +90,15 @@ impl Swc {
     ///
     /// - `compress.module = false`: el minifier asume sloppy, igual que Node
     ///   al ejecutar un `.cjs`.
-    /// - `compress.top_level = Some(..)`: sin esto `top_level()` da false y el
-    ///   DCE top-level no corre; swc#12029 y swc#11963 son invisibles
-    ///   sin eso.
+    /// - `compress.top_level = Some(..)`: sin esto `top_level()` da false, el
+    ///   DCE top-level no corre y swc#12029 y swc#11963 quedan
+    ///   invisibles.
     /// - `mangle.eval` queda en su default `false`: en el codigo es
     ///   `ignore_eval`, un opt-in que asume que ningun eval referencia
     ///   nombres locales. Prenderlo fabrica divergencias esperadas.
-    /// - `mangle.props` queda en `None` en F1: el corpus imprime objetos
+    /// - `mangle.props` queda en `None`: el corpus imprime objetos
     ///   libremente y el mangling de propiedades es observable via reflexion.
-    ///   Se prende en F3, cuando el generador controla la salida.
+    ///   Prenderlo pide un corpus cuya salida controle el generador.
     /// - `keep_fnames`/`keep_classnames` (compress) y `keep_fn_names`/
     ///   `keep_class_names` (mangle) en `true`: sin eso, `console.log(f)` imprime
     ///   `[Function: f]` contra `[Function: n]` y es divergencia esperada. En la

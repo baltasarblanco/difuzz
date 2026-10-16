@@ -316,7 +316,7 @@ impl Remoto {
     /// (`Drop for Hijo`): asi no queda un hijo ocioso cuyo RSS cuente contra el presupuesto de
     /// los otros. MEDIDO: lanzar el hijo y minificar un programa chico cuesta ~3 ms (20
     /// lanzamientos, carga ~43), contra la corrida de node de B0 que el re-chequeo paga igual
-    /// (~180 ms una corrida de node en el meta.txt de un caso de la aceptacion, 25-b93-p03).
+    /// (~180 ms en la revision del bloque 8, con el programa que hoy es el caso 25-b93-p03).
     pub fn sin_mangle(minifier: Minifier, preset: Preset, kind: SourceKind) -> Option<Remoto> {
         minifier.build_sin_mangle(preset, kind)?;
         let exe = crate::binario::propio();

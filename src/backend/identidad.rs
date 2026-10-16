@@ -3,7 +3,7 @@
 //! backend nuevo se agrega tocando solo `src/backend/` (este archivo y su
 //! entrada en `mod.rs`) y no hereda nada de otro backend (asunciones, backlog,
 //! abreviatura de `--cruce`). Basado en el de la revision 1
-//! (`revision-1/pruebas/b1-identidad.rs`), con el `Outcome` de hoy.
+//! (su prueba b1), con el `Outcome` de hoy.
 
 use oxc_allocator::Allocator;
 use oxc_codegen::{Codegen, CodegenOptions};

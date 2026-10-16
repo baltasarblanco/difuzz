@@ -251,7 +251,7 @@ pub fn clasificar<'a>(
     // b7-1 (r04: B todavia llega al limite de la pila y corre el catch con el bug): B con la
     // pila de siempre y con mas pila, con cobertura.
     let camino = |b2: &runner::Exec| recheck::camino_entorno(runner, minified, b, b2, (&[runner::DEEP_STACK], &[]), &[]);
-    // 8.1 (rev-final F1: un desborde de pila NATIVO usado como dato, `JSON.stringify` de un
+    // 8.1 (F1 de la revision final del bloque 7: un desborde de pila NATIVO usado como dato, `JSON.stringify` de un
     // arreglo anidado; B recorre los mismos bloques con y sin mas pila y el camino no lo ve): sin
     // sensor de uso, un Explica se confirma salado, como contenido. El mismo M16 sobre el
     // original salado: si A salado ya no depende de la pila (o la corrida honda falla), no
@@ -938,7 +938,7 @@ fn apply_recheck(
 /// Paso 7 (revision-tint B1, r09: el bug en el catch del RangeError, que con mas pila no
 /// corre): rige `recheck::veredicto_neutralizado`, sin `localizada`: B tiene que dar lo
 /// mismo que A con mas pila.
-/// n-ruido (t-real: Timeout de node con `expiry` de reloj real): que A con mas pila de
+/// n-ruido (codigo real: Timeout de node con `expiry` de reloj real): que A con mas pila de
 /// otra salida no prueba que A dependa de la pila si A tal cual tampoco se repite. Antes
 /// de atribuir a la pila se corre A otra vez sin cambiar nada (`a_otra_vez`, solo si la
 /// corrida honda difiere): si difiere de A, la causa no es la pila y el re-chequeo es
@@ -1468,7 +1468,7 @@ mod tests {
         assert!(matches!(r, Some(Recheck::Inconcluso(ref n)) if n.contains("Timeout")), "{r:?}");
         // Un Failed del fuzzer sigue sin opinar.
         assert_eq!(depth_recheck(&ok("1\n"), &ok("2\n"), &ex(Status::Failed("x".into()), ""), nunca_a, nunca, igual), None);
-        // n-ruido (t-real, Timeout con `expiry` de reloj real): A con mas pila da otra salida,
+        // n-ruido (codigo real, Timeout con `expiry` de reloj real): A con mas pila da otra salida,
         // pero A tal cual tambien. Antes: B con mas pila coincidia por azar con A con mas pila
         // y la pila "explicaba" (known/). Ahora inconcluso, sin correr B con mas pila.
         let r = depth_recheck(&ok("expiry 45\n"), &ok("expiry 46\n"), &ok("expiry 47\n"), || ok("expiry 44\n"), nunca, igual);
@@ -1638,7 +1638,7 @@ mod tests {
         std::fs::remove_dir_all(&d).unwrap();
     }
 
-    /// Integracion 7.1 + 7.4 (H3 de la revision de 7.1; H1 de la de la integracion), de punta a punta con oxc: casos de
+    /// Integracion 7.1 + 7.4 (H3 de la revision de 7.1; H1 de la revision de la integracion), de punta a punta con oxc: casos de
     /// aceptacion de 7.4 (`23-t01`, `23-t02`), de 7.1 (`23-b71-r01`, con el ruido de 7.4 para que
     /// A y B pasen el tope) y de la revision de la integracion (`23-i01`, `23-i02`: el programa nota el sensor). A y B
     /// se comparan sin el sensor (I3) y el camino de B (7.1) sale de una corrida de B con el sensor
@@ -1729,7 +1729,7 @@ mod tests {
         // Bug A de oxc: el spread con getter se mueve (oxc imprime "FAIL").
         let bug = "let result = \"FAIL\";\nconst o = { ...{ get prop() { result = \"PASS\"; } } };\nconsole.log(result);\nconsole.log(o);\n";
         let casos: [(&str, String, bool, &str); 22] = [
-            // n-principio (noche2/n-principio/corpus-ataque): el bug en la rama que solo corre con
+            // n-principio (corpus de ataque): el bug en la rama que solo corre con
             // la violacion (A=-2, B=NaN). Con `veredicto` iban a known/ (`localizada`).
             ("extends-adentro", "let r = \"none\";\ntry { class A extends 1 {} r = typeof A; } catch (e) { r = Math.cbrt(-8); }\nconsole.log(r);\n".into(), false, "  extends: Inconcluso"),
             ("with-adentro", "var o = { k: 1 };\nvar r;\nwith (o) { r = typeof k !== \"undefined\" ? Math.cbrt(-8) : \"nok\"; }\nconsole.log(r);\n".into(), false, "  with: Inconcluso"),

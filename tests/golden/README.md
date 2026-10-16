@@ -28,7 +28,7 @@ Por qué cada clase esperada:
 - `oxc-o5`: `0` contra `1` (Stdout) en las 4.
 - `oxc-o6`: panic del minifier de oxc (también sin debug assertions).
 - `oxc-o7`: debug_assert de oxc. Con el oráculo el minificado es el de npm y no diverge: `asserts/` en las 4 de oxc.
-- `oxc-eval-indirecto` (R1-H05, `revision-1/pruebas/c6-corpus/eval-indirecto`): el debug_assert de oxc tapaba un
+- `oxc-eval-indirecto` (R1-H05, `eval-indirecto` del corpus c6 de la revisión 1): el debug_assert de oxc tapaba un
   miscompile. Con el oráculo, oxc cambia `var e = eval; e("x")` por `eval("x")`: `global/local` contra
   `local/local` (Stdout) en las 4 de oxc, con `solo_debug_assertions: si` en el meta. swc: igual.
 - `swc-s1-use-strict`: swc inlinea una función estricta y pierde la directiva. Solo diverge en sloppy (carril A).

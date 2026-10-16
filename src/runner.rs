@@ -510,7 +510,7 @@ pub struct Runner {
     /// M30 (`--stubs`): manifiesto de stubs del caso (stubs.rs), uno por
     /// worker. `None`: sin stubs (no se pasa DIFUZZ_STUBS).
     stubs: Option<PathBuf>,
-    /// Decision del usuario (09-oct): el sensor de violaciones del preload (b4-a)
+    /// Decision del 09-oct: el sensor de violaciones del preload (b4-a)
     /// solo corre si la politica del backend lo usa (`Politica::usa_sensor`).
     /// `false`: toda ejecucion lleva DIFUZZ_SENSOR=0. Por defecto `true`.
     sensor: bool,
@@ -616,7 +616,7 @@ impl Runner {
             && (e.ctl.lines().any(|l| l == SANDBOX_SIN_ATRAPAR) || e.exc().is_some_and(|x| marca_sandbox(&x, self.sandbox)))
     }
 
-    /// Decision del usuario (09-oct): con `false`, node corre siempre sin el
+    /// Decision del 09-oct: con `false`, node corre siempre sin el
     /// sensor de violaciones (A, B y re-chequeos: todo pasa por este runner).
     pub fn with_sensor(mut self, on: bool) -> Runner {
         self.sensor = on;
@@ -1441,7 +1441,7 @@ fn encerrar(aislar: Option<&Aislar>) -> std::io::Result<()> {
     unsafe { encerrar_senales() }
 }
 
-/// 2b (revision-n2): el modelo de permisos de node no cubre las senales y no hay namespace
+/// 2b (revision n2): el modelo de permisos de node no cubre las senales y no hay namespace
 /// de PID: `process.kill(<pid de afuera>, ...)` llegaba a cualquier proceso del usuario
 /// (MEDIDO por el revisor con un senuelo y SIGTERM). Un filtro seccomp (sin root: con
 /// `no_new_privs`) deja mandar senales solo al propio node: `kill` a su pid, a 0 o a su
@@ -2353,7 +2353,7 @@ mod tests {
         let _ = senuelo.wait();
     }
 
-    /// n-ruido (t-real): los timers de node salen opacos (su estado trae el reloj real
+    /// n-ruido (codigo real): los timers de node salen opacos (su estado trae el reloj real
     /// del event loop: `_idleStart`, `expiry`); una clase del programa llamada Timeout no.
     #[test]
     fn timers_de_node_opacos() {
