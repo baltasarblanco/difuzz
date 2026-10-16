@@ -9,8 +9,8 @@
 //                      misma semilla y mismo K, mismo programa (byte a byte)
 //   --familias F1,..   familias a sortear por seccion (default F1..F10, ver abajo)
 //   --desde K          numerar desde K (default 0): partir una tanda sin repetir casos
-//   --con-conocidos    generar tambien los patrones de los bugs ya reportados (A-D, #24331 y
-//                      los de t-gen: E, F, G, H, I, K). Sin esto, un bug conocido inunda la tanda
+//   --con-conocidos    generar tambien los patrones de los bugs conocidos (A-D, #24331 y
+//                      los del generador: E, F, G, H, I, K). Sin esto, un bug conocido inunda la tanda
 //                      y tapa lo nuevo; con esto, la tanda es una suite de regresion
 //   -h, --help         esta ayuda (sale con 0)
 //
@@ -30,7 +30,7 @@
 // ni largos maximos de Array/String. Sin Date, Math.random ni timers.
 
 const fs = require('fs');
-// --con-conocidos: tambien genera los patrones de los bugs ya reportados (A-D de oxc, #24331)
+// --con-conocidos: tambien genera los patrones de los bugs conocidos
 const CONOCIDOS = process.argv.includes('--con-conocidos');
 const path = require('path');
 
@@ -164,7 +164,7 @@ class Gen {
     const n = () => (this.chance(0.6) ? `(${this.num()})` : `Number(${this.prim(sc)})`);
     switch (this.int(16)) {
       case 0: return `${this.paren(s())}.${this.pick(['charAt', 'charCodeAt', 'codePointAt', 'at'])}(${n()})`;
-      // t-gen E/F: indexOf con no-ASCII (offset en bytes), posiciones >= 2**31, y
+      // E/F (del generador): indexOf con no-ASCII (offset en bytes), posiciones >= 2**31, y
       // substring/slice con fin NaN/undefined se pliegan mal; sin --con-conocidos esos
       // casos usan receptor ASCII literal y posiciones literales finitas. G: en indexOf, con
       // busqueda "" y una posicion mas alla del largo del receptor (`("").indexOf((""), (2))` se
@@ -537,7 +537,7 @@ class Gen {
     // Claves numericas negativas computadas en destructuring/clases son el Issue B: en esos
     // contextos solo con --con-conocidos (en literales de objeto se imprimen bien).
     // b4: tambien [Infinity] (se pliega a 1/0 sin corchetes) y, en metodos/accesores de
-    // literales de objeto, cualquiera de estas (t-gen, variantes del Issue B).
+    // literales de objeto, cualquiera de estas (variantes del Issue B que encontro el generador).
     const NEG = ['[-1]', '[-0]', '[-1e-7]', '[-Infinity]', '[-(1)]', '[Infinity]'];
     const BASE = [
       '[0]', '[1.5]', '[1e21]', '["-1"]', '["01"]', '["1"]', '["a b"]', '["__proto__"]',

@@ -1217,7 +1217,7 @@ difuzz, no para buscar bugs; para eso se usan tres, cada uno con un rol (decidid
 | Corpus | Rol | De dónde sale | Cuándo se corre |
 |---|---|---|---|
 | Fixtures de SWC (`<clon de swc>/crates/swc_ecma_minifier/tests`, ~3100 casos) | regresión de difuzz y comparabilidad entre binarios (el arnés, `scripts/comparar-binarios.sh`; la muestra fija de `tests/muestra/` sale de acá) | ya existe | con cada cambio de difuzz |
-| Sintético (`scripts/generar.cjs`) | exploración por familias de pasadas de oxc, y regresión de los bugs ya reportados | se genera en cada tanda, determinista por semilla | `regresion`: con cada versión nueva de oxc y antes de cada PR; `explorar`: al escribir o cambiar una familia |
+| Sintético (`scripts/generar.cjs`) | exploración por familias de pasadas de oxc, y regresión de los bugs conocidos | se genera en cada tanda, determinista por semilla | `regresion`: con cada versión nueva de oxc y antes de cada PR; `explorar`: al escribir o cambiar una familia |
 | Código real (`scripts/armar-corpus-real.py`) | barrido periódico: patrones de código publicado que el generador no imagina | se arma con lo que ya está en el disco (caché de npm, `node_modules`) | con cada versión nueva de oxc |
 
 **Sintético.** `scripts/barrido-sintetico.sh` genera la tanda y la corre (oxc, carril B por
@@ -1229,7 +1229,7 @@ scripts/barrido-sintetico.sh --semilla 59 regresion OUT/regresion [BIN]     # 10
 scripts/barrido-sintetico.sh --semilla 1010 explorar F3 OUT/explorar-f3 [BIN] # 5000 casos de una familia
 ```
 
-`regresion` genera a propósito los patrones de los bugs reportados: **tiene** que dar `div/`; un bug
+`regresion` genera a propósito los patrones de los bugs conocidos: **tiene** que dar `div/`; un bug
 que deja de aparecer está arreglado (o se rompió el generador). En `explorar` esos patrones no
 salen, así que cada `div/` es candidato a bug nuevo. Una familia que da 0 bugs nuevos en 5000 casos
 deja de explorarse y queda solo en la regresión. Las familias (F1-F10) y las opciones del generador

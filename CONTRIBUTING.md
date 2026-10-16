@@ -49,8 +49,9 @@ scripts/comparar-binarios.sh --jobs 4 --corpus tests/golden/corpus BIN_BASE BIN_
 
 ## Updating oxc
 
-`scripts/subir-oxc.sh VERSION OUT_DIR` moves the `oxc_*` crates and `oxc-minify` in `probe/` to a
-new version together, in a temporary worktree and without committing. It builds both binaries for
+`CORPUS=<dir> scripts/subir-oxc.sh VERSION OUT_DIR` moves the `oxc_*` crates and `oxc-minify` in
+`probe/` to a new version together, in a temporary worktree and without committing. It needs a
+corpus (`CORPUS` or `DIFUZZ_CORPUS`; without one it exits with 2). It builds both binaries for
 each version, runs the tests, golden, acceptance and the comparison harness, and leaves a report of
 which findings appear, disappear or change, plus a patch to apply. The procedure is in
 `scripts/subir-oxc.md` (in Spanish); `scripts/subir-oxc.sh --help` lists the variables.

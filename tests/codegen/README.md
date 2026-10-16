@@ -9,8 +9,8 @@ y del corpus real, medido el 11-oct), y en estas formas encontró el bug de los 
 
 ## Origen y licencia
 
-Las escribió un agente de IA (la tarea `codegen-fidelidad`) el 11-oct-2026 (`formas.cjs`; el informe, en el trabajo
-interno de ese día). Son propias del proyecto, no vienen de SWC ni de otro repositorio: van con la
+Las escribió un agente de IA (la tarea `codegen-fidelidad`) el 11-oct-2026; el generador y su informe no
+forman parte del repositorio. Son propias del proyecto, no vienen de SWC ni de otro repositorio: van con la
 licencia de difuzz. `LISTA.tsv` dice el tipo de fuente de cada una (`script` o `modulo`) y si se
 adaptó.
 
@@ -53,7 +53,7 @@ oxc (`oxc_minifier` 0.153.0):
 | `kn-comma-default-destr`, `ne-prop-comma`, `ne-default-param-comma`, `mod-default-comma` | `div:Stdout` en las 4 (la `mod-` solo en el carril B) | O9 también en core_defaults: el re-chequeo de nombres (B con keepNames) sigue dando otra cosa, así que la asunción de `.name` no lo explica |
 | `class-static-computed-prototype` | `div:Stdout` en las 4 | **O10**: compress borra una clase sin uso con `static ["prototype"]` y se pierde el `TypeError` |
 | `lone-surrogate`, `sur-mid-charcode` | `div:Stdout` en las 4 | `"\uD800".charCodeAt(0)` da 65533: conocido upstream (oxc#15524, abierto) y sin asunción que lo cubra; queda en `div/` |
-| `proto-shorthand` | `div:Stdout` en las 4 | `{ __proto__ }` con el binding renombrado (el issue C, ya enviado). Sin asunción |
+| `proto-shorthand` | `div:Stdout` en las 4 | `{ __proto__ }` con el binding renombrado (un bug conocido). Sin asunción |
 | `ne-assign-noparen`, `ne-array-default-noparen`, `ne-obj-default-noparen`, `ne-var-init-paren-fn`, `stmt-start-fn-member`, `stmt-start-class` | `known` en core_defaults | asunción de `Function.prototype.name` (keepNames apagado) |
 | `pure-call`, `pure-comma-call`, `pure-new`, `no-side-effects` | `igual` | difuzz apaga `treeshake.annotations` (M35): las anotaciones no se honran |
 

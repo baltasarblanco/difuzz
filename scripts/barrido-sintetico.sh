@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 # barrido-sintetico.sh: genera una tanda con scripts/generar.cjs y la corre con difuzz (oxc).
-# Desde el 10-oct (MANUAL.md, Corpus) el corpus sintetico es la fuente de exploracion y la regresion de lo ya reportado.
+# Desde el 10-oct (MANUAL.md, Corpus) el corpus sintetico es la fuente de exploracion y la regresion de los bugs conocidos.
 #
 # uso: barrido-sintetico.sh --semilla N [opciones] regresion OUT [BIN]
 #      barrido-sintetico.sh --semilla N [opciones] explorar FAMILIA OUT [BIN]
 #
-#   regresion   1000 casos con --con-conocidos (todas las familias): los patrones de los bugs ya
-#               reportados salen a proposito, asi que la tanda TIENE que dar div/. Se corre con cada
+#   regresion   1000 casos con --con-conocidos (todas las familias): los patrones de los bugs
+#               conocidos salen a proposito, asi que la tanda TIENE que dar div/. Se corre con cada
 #               version nueva de oxc y antes de cada PR: un bug que deja de aparecer fue arreglado
 #               (o el generador se rompio).
 #   explorar F  5000 casos de la familia F (F1..F10), sin los patrones conocidos: busca bugs
@@ -22,7 +22,7 @@
 #   --semilla N   OBLIGATORIA (entero): semilla base del generador. Misma semilla, misma tanda,
 #                 byte a byte (TANDA.txt guarda el sha256 del arbol para comprobarlo)
 #   --cantidad N  otro tamano de tanda (default: 1000 en regresion, 5000 en explorar)
-#   --carril K    a (script, .cjs) o b (modulo ES, .mjs). Default b, como las tandas de t-gen; los
+#   --carril K    a (script, .cjs) o b (modulo ES, .mjs). Default b, como las tandas del 09-oct; los
 #                 programas valen en los dos carriles ("use strict" arriba)
 #   --jobs N      workers de difuzz (default 8)
 #   -h, --help    esta ayuda (sale con 0)
