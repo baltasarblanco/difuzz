@@ -561,7 +561,7 @@
   };
   // (Definido antes de `ser`, que lo usa para los Error: M6.)
 
-  // n-ruido (t-real): los handles de timers de node (`Timeout` de setTimeout/setInterval,
+  // n-ruido (codigo real): los handles de timers de node (`Timeout` de setTimeout/setInterval,
   // `Immediate` de setImmediate) guardan estado del reloj real del event loop: serializados
   // campo por campo, A y B dan numeros distintos sin que el programa cambie. Los prototipos
   // se toman aca de un timer propio (creado y cancelado antes de que corra el programa): un
@@ -903,7 +903,7 @@
   // ahi solo queda lo que escribe node (y lo que no se cubre, abajo), que sigue sin compararse
   // (trae rutas y pids). Se cubren las tres vias que miden la revision: `process.stderr.write` (y lo
   // que escribe por ella: `stream.pipe(process.stderr)`, un `console.Console` sobre
-  // `process.stderr`), `fs.writeSync(2, ...)` y `process._rawDebug`. Fuera (MANUAL.md, limites):
+  // `process.stderr`), `fs.writeSync(2, ...)` y `process._rawDebug`. Fuera (MANUAL.md, Como funciona):
   // `process.stderr.end(dato)`, `fs.write(2, ...)` asincronico, `fs.writeFileSync(2 o
   // '/dev/stderr')`, un stream nuevo sobre el fd 2 y los procesos hijos que heredan el stderr.
   // `fs.writeSync(2, ...)` se escribe con el `writeSync` real al fd 1 (mismas firmas, mismo
