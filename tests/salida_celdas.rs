@@ -274,7 +274,7 @@ fn segunda_senal_y_sigkill_no_dejan_node() {
     std::fs::remove_dir_all(&b).unwrap();
 }
 
-/// 11.2d: cuatro B (bug F de oxc) que pasan el tope de 300 MiB y despues giran
+/// 11.2d: cuatro B (bug F de oxc, oxc#27098) que pasan el tope de 300 MiB y despues giran
 /// esperan, de a uno, su repeticion con los topes mayores (4 s cada una: el timeout largo, sin la
 /// repeticion sin el sensor). Un SIGINT con la cola armada no la espera entera: la repeticion en curso
 /// termina y los que esperaban quedan en descartes.tsv como `interrumpido`, sin destino inventado.

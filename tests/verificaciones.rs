@@ -1,7 +1,7 @@
 //! Las verificaciones de deteccion como tests de cargo, ignorados por defecto
 //! (necesitan node y corren difuzz sobre corpus chicos en varias celdas):
 //!
-//! - `golden`: `tests/golden/verificar.sh` (bugs conocidos en 8 celdas y modos opt-in).
+//! - `golden`: `tests/golden/verificar.sh` (bugs conocidos en 8 celdas y modos opt-in; su issue o PR, en `tests/golden/README.md`).
 //! - `aceptacion_rechequeos`: `tests/aceptacion/rechequeos/verificar.sh` (re-chequeos, 4 celdas de oxc).
 //! - `codegen`: `tests/codegen/verificar.sh` (10.1: 142 formas con `--crudo`, 8 celdas).
 //!

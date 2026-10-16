@@ -47,7 +47,7 @@ oxc-o6	oxc-a-core_defaults	panic
 oxc-o6	oxc-a-carril_a	panic
 oxc-o6	oxc-b-core_defaults	panic
 oxc-o6	oxc-b-carril_a	panic
-# b1-c (R1-H05, 08-oct): O7 es un debug_assert de oxc. Con el oraculo sin debug assertions el
+# b1-c (R1-H05, 08-oct): O7 es un debug_assert de oxc (oxc#26511). Con el oraculo sin debug assertions el
 # caso se compara con el minificado de npm (`eval(),console.log(\`ok\`);`): eval() sin argumentos
 # da undefined directo o indirecto, asi que no diverge y queda en asserts/. Sin oraculo (aviso al
 # arrancar) vuelve a ser panic.
@@ -56,7 +56,7 @@ oxc-o7	oxc-a-core_defaults	asserts
 oxc-o7	oxc-a-carril_a	asserts
 oxc-o7	oxc-b-core_defaults	asserts
 oxc-o7	oxc-b-carril_a	asserts
-# b5 (09-oct, R1-H05): eval indirecto -> directo (eval-indirecto del corpus c6 de la revision 1). Con
+# b5 (09-oct, R1-H05): eval indirecto -> directo (eval-indirecto del corpus c6 de la revision 1; oxc#26511). Con
 # debug assertions oxc hace panic (el debug_assert que tapaba el bug); el oraculo sin ellas da el
 # minificado de npm, que cambia `var e = eval; e("x")` por `eval("x")`: `global/local` contra
 # `local/local` (Stdout) en las 4 celdas de oxc, con `solo_debug_assertions: si` en el meta.
@@ -70,14 +70,14 @@ swc-s1-use-strict	swc-a-carril_a	div:Stdout
 swc-s3-neg-zero-member	swc-a-carril_a	div:ThrowNew
 swc-s3-neg-zero-member	swc-b-core_defaults	div:ThrowType
 swc-s3-neg-zero-member	swc-b-carril_a	div:ThrowType
-# 11.1 (I1): el bug E de oxc (`Math.cbrt(-8)` -> NaN) escrito solo por stderr
+# 11.1 (I1): el bug E de oxc (`Math.cbrt(-8)` -> NaN, oxc#27621) escrito solo por stderr
 # (`process.stderr.write`). El preload lo pasa a stdout como `[stderr] ...`: div:Stdout en las 4 de
 # oxc. Antes: igual. swc no tiene el bug: igual.
 oxc-cbrt-stderr	oxc-a-core_defaults	div:Stdout
 oxc-cbrt-stderr	oxc-a-carril_a	div:Stdout
 oxc-cbrt-stderr	oxc-b-core_defaults	div:Stdout
 oxc-cbrt-stderr	oxc-b-carril_a	div:Stdout
-# 11.2 (I2): el bug E de oxc impreso por stdout en un programa que sale con
+# 11.2 (I2): el bug E de oxc (oxc#27621) impreso por stdout en un programa que sale con
 # `process.exit(1)` a proposito. El original con un codigo propio se compara (antes: descarte
 # `exit`): div:Stdout en las 4 de oxc. swc: igual.
 oxc-cbrt-exit1	oxc-a-core_defaults	div:Stdout

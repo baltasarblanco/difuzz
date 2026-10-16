@@ -1,9 +1,9 @@
 # caso	celda	clase esperada
 # celda = <minifier>-<carril>-<preset>; clase = div:<kind> | panic | recursos | asserts | known | lint | descarte:<causa> | igual
 # Una celda sin fila para un caso espera "igual". Formato y clases: tests/golden/verificar.sh.
-# Corpus: el c4 de la revision 1 (generado), 21 casos. El bug real es O1 (`{__proto__}`,
+# Corpus: el c4 de la revision 1 (generado), 21 casos. El bug real es O1 (`{__proto__}`, el Issue C, #PENDIENTE-C;
 # el minificado no parsea: ThrowNew) o el de fixture/issues/9460 (IIFE con rest y default con efecto
-# borrada: Stdout). MEDIDO con el binario de 46e6749 (09-oct), igual a la tabla de b1-b (08-oct).
+# borrada: Stdout; oxc#24331, esta forma #PENDIENTE-O5). MEDIDO con el binario de 46e6749 (09-oct), igual a la tabla de b1-b (08-oct).
 00-o1-solo	oxc-a-core_defaults	div:ThrowNew
 00-o1-solo	oxc-a-carril_a	div:ThrowNew
 00-o1-solo	oxc-b-core_defaults	div:ThrowNew
@@ -75,7 +75,7 @@
 09-nombres-positivo	oxc-b-core_defaults	known
 # 10-rt-extends-miente: known/ por decision del 09-oct, aceptado como limite conocido.
 # El revisor 1 lo marco "ambiguo"; b1-b lo explica: oxc borro la clase (la asuncion extends) y con eso
-# la rama del bug de 9460 queda muerta, asi que B == A' y la divergencia la explica entera la
+# la rama del bug de 9460 (oxc#24331, #PENDIENTE-O5) queda muerta, asi que B == A' y la divergencia la explica entera la
 # asuncion. LIMITE: el re-chequeo compara salidas, no caminos; no puede separar este caso "miente" de
 # 01-extends-positivo sin medir cobertura de V8 (que rama corrio en A y en A'). El bug real queda
 # cubierto por 10-rt-solo (div/).
@@ -98,7 +98,7 @@
 10-rt-solo	oxc-b-core_defaults	div:Stdout
 10-rt-solo	oxc-b-carril_a	div:Stdout
 # Revision de los bloques 4-6 (09-oct): casos adversariales del revisor, con su numero rNN.
-# Todos llevan el bug A de oxc (el spread con getter se mueve: oxc imprime "FAIL" donde va "PASS").
+# Todos llevan el bug A de oxc (oxc#27412; el spread con getter se mueve: oxc imprime "FAIL" donde va "PASS").
 # Un bug real nunca va a known/: div/ donde se ve; descarte o igual donde no se ve. MEDIDO con el binario de
 # esa revision. B1: r01 (`var arguments;` + bug) iba a known/ ("solo sloppy ... renombrado"): el renombre solo ya
 # cambia A (`arguments` pasa a undefined). En B `var arguments` no parsea en modulo (descarte).
@@ -145,7 +145,7 @@
 14-tdz-positivo	oxc-b-core_defaults	known
 14-tdz-positivo	oxc-b-carril_a	known
 # t-principio (09-oct): flags que iban a known/ SIN re-chequeo concluyente. Los adversariales (aNN) llevan el
-# bug A de oxc al lado de algo que prende el flag; con el binario de esa revision iban a known/ en las 4
+# bug A de oxc (oxc#27412) al lado de algo que prende el flag; con el binario de esa revision iban a known/ en las 4
 # celdas (MEDIDO por t-principio, 09-oct). Ahora el re-chequeo da NoExplica: div/.
 # coercion (estatico): re-chequeo nuevo, las definiciones de valueOf/toString/[Symbol.toPrimitive] renombradas.
 15-a01-coercion-getter	oxc-a-core_defaults	div:Stdout
@@ -292,7 +292,7 @@
 20-p05-profundidad-catch-misma-linea	oxc-b-core_defaults	div:Stdout
 20-p05-profundidad-catch-misma-linea	oxc-b-carril_a	div:Stdout
 # n-principio (09-oct, noche): los re-chequeos que seguian con `veredicto` (extends, with, global_conocido,
-# violaciones, solo sloppy). El bug (`Math.cbrt(-8)` -> NaN, `delete (0/0)`, `substring`, `isInteger`) vive en la
+# violaciones, solo sloppy). El bug (`Math.cbrt(-8)` -> NaN, oxc#27621; `delete (0/0)`, oxc#24331; `substring`, oxc#27098; `isInteger`, oxc#27622) vive en la
 # rama que solo corre CON la violacion (el catch, la rama sin `window`, la del scope del `with`, la sloppy), o A'
 # da lo mismo que A por construccion (`-mismo-camino`). Con el binario de 5cc705f iban a known/ (MEDIDO,
 # corrida de ataque de n-principio, antes del cambio: 17 casos, 116 filas en 8 celdas). Ahora rige `veredicto_neutralizado`
@@ -389,7 +389,7 @@
 21-n38-tdz-return-positivo	oxc-a-carril_a	known
 21-n38-tdz-return-positivo	oxc-b-core_defaults	known
 21-n38-tdz-return-positivo	oxc-b-carril_a	known
-# n-principio, item de n-ruido (corpus adversarial de n-ruido, bug O4 `delete (0/0)`): el bug cambia el nombre
+# n-principio, item de n-ruido (corpus adversarial de n-ruido, bug O4 `delete (0/0)`, oxc#24331): el bug cambia el nombre
 # (r03), la cuenta (r02) o el orden (r09) de los marcos de un `.stack` impreso. `localizada_con_marca` aceptaba
 # cualquier par de marcos donde A' tiene `    at dz`: known/ en las 4 celdas de carril A con el binario de 5cc705f
 # (MEDIDO en n-principio, antes del cambio). Ahora un marco solo puede cambiar la posicion: div/. r01 (bug en la
@@ -445,8 +445,8 @@
 23-t05-tope-tdz-despues	oxc-a-carril_a	div:Stdout
 23-t05-tope-tdz-despues	oxc-b-core_defaults	div:Stdout
 23-t05-tope-tdz-despues	oxc-b-carril_a	div:Stdout
-# b7-1 (revision n2, IMPORTANTE 1): B == A' por el valor por defecto. El bug de oxc (substring, isInteger, cbrt,
-# `delete (0/0)`) deja justo el valor que la variable tiene cuando la rama de la violacion no corre (`""`, `0`,
+# b7-1 (revision n2, IMPORTANTE 1): B == A' por el valor por defecto. El bug de oxc (substring, oxc#27098; isInteger,
+# oxc#27622; cbrt, oxc#27621; `delete (0/0)`, oxc#24331) deja justo el valor que la variable tiene cuando la rama de la violacion no corre (`""`, `0`,
 # `false`, un `+=` que no suma): B corre la rama con el bug y da lo mismo que A', que no la corre. Con el binario de
 # fe0cd86 iban a known/ en todas las filas de abajo salvo r08 en B (MEDIDO por 7.1, 10-oct). Ahora el re-chequeo
 # mira el camino de B (el sensor en B para TDZ/Symbol/extends; la cobertura de V8 de B con y sin la neutralizacion
@@ -501,7 +501,7 @@
 23-b71-tdz-suma	oxc-a-carril_a	div:Stdout
 23-b71-tdz-suma	oxc-b-core_defaults	div:Stdout
 23-b71-tdz-suma	oxc-b-carril_a	div:Stdout
-# b7-3 (revision n2, MENOR 4; repro t02-timer-repeat): oxc pliega `Number.isInteger(5e-324)`
+# b7-3 (revision n2, MENOR 4; repro t02-timer-repeat): oxc pliega `Number.isInteger(5e-324)` (oxc#27622)
 # a true y el timer pasa de setTimeout a setInterval; se cancela, asi que solo se ve en `_repeat` (null vs 50). Con los
 # timers opacos de n-ruido (fe0cd86): igual en las 4 celdas; con 5cc705f: no_determinista o div/ segun la corrida
 # (el reloj `_idleStart` tambien se imprimia). Ahora se oculta solo el reloj: div/ (MEDIDO, b7-3).
@@ -510,7 +510,7 @@
 23-b01-timer-repeat	oxc-b-core_defaults	div:Stdout
 23-b01-timer-repeat	oxc-b-carril_a	div:Stdout
 # Integracion 7.1 + 7.4 (H1 de la revision de la integracion): el programa nota el sensor (cada pausa llama a su
-# `Error.prepareStackTrace`) y solo sin el corre la TDZ con el bug F en el catch. A pasa el tope (I3); en i01 B tambien,
+# `Error.prepareStackTrace`) y solo sin el corre la TDZ con el bug F (oxc#27098) en el catch. A pasa el tope (I3); en i01 B tambien,
 # en i02 B corre entero con el sensor. Sin la cobertura, la corrida de B con el sensor le prestaba a B un camino sin la
 # violacion y el bug iba a known/ (MEDIDO con paso-E: known en las 4 celdas; fe0cd86 y 7.1+7.4 crudo: div/). Ahora la
 # corrida con el sensor tiene que tener la misma cobertura de V8 que B sin el: div/.
@@ -523,14 +523,14 @@
 23-i02-sensor-detectado-b-entero	oxc-b-core_defaults	div:Stdout
 23-i02-sensor-detectado-b-entero	oxc-b-carril_a	div:Stdout
 # Integracion 7.1b (b7-int/sensor-rhs a01): como i01, pero el programa nota el sensor con un `push` nativo atado (no
-# aparece en la cobertura) y cambia de camino solo en el lado derecho de un `&&=` (V8 no lo separa); el bug F queda en un
+# aparece en la cobertura) y cambia de camino solo en el lado derecho de un `&&=` (V8 no lo separa); el bug F (oxc#27098) queda en un
 # indice elegido por datos. Con paso F (cobertura sin contadores): known en las 4 celdas (MEDIDO). Con los contadores de
 # rama de 7.1b en las dos corridas de B (con y sin el sensor): div/.
 23-i03-sensor-detectado-andasig	oxc-a-core_defaults	div:Stdout
 23-i03-sensor-detectado-andasig	oxc-a-carril_a	div:Stdout
 23-i03-sensor-detectado-andasig	oxc-b-core_defaults	div:Stdout
 23-i03-sensor-detectado-andasig	oxc-b-carril_a	div:Stdout
-# b7-1b (revision 7.1, H1 y H2): mas formas en que B == A' es coincidencia y B corre el bug (substring). H1: oxc
+# b7-1b (revision 7.1, H1 y H2): mas formas en que B == A' es coincidencia y B corre el bug (substring, oxc#27098). H1: oxc
 # arma `t&&=e=...` de un `if (t) t = (e = ...)`, y la cobertura de bloques de V8 no separa el lado derecho de
 # `&&=`/`||=`/`??=` ni los valores por defecto (h1-*: programas de H1). H2: la asuncion elige un valor (un
 # indice, una clave, lo que devuelve un helper nativo o un built-in pisado, el texto de una funcion nativa, el
@@ -598,7 +598,7 @@
 23-b71b-q02t-marco-forjado-tabla	oxc-b-carril_a	div:Stdout
 # b7-8 (10-oct): el patron del bug de V8 13.6 con el sensor de violaciones (sloppy + `eval` directo + clase; SIGSEGV en el
 # GC con el inspector pausando dentro de la definicion de una clase). En el carril A el caso corre entero sin el sensor
-# (`sensor: omitido` en meta.txt). omitido-bug: el bug de 9460 (IIFE con rest borrada) con el programa que tumba a node
+# (`sensor: omitido` en meta.txt). omitido-bug: el bug de 9460 (IIFE con rest borrada; oxc#24331, #PENDIENTE-O5) con el programa que tumba a node
 # 20/20 con el sensor: div/ igual que con fe0cd86 (antes por `sensor_caido`). omitido-tdz: la TDZ atrapada que oxc borra
 # (known/ con el sensor, MEDIDO con fe0cd86) pasa a div/ en el carril A: sin el sensor no hay evidencia. En el carril B
 # (modulo, estricto) el sensor corre: known/ como antes.
@@ -657,7 +657,7 @@
 23-b71c-s2e-global-writesync	oxc-b-carril_a	div:Stdout
 # 8.1 (F1 de la revision final del bloque 7): profundidad con un desborde de pila NATIVO usado como dato (`JSON.stringify` de un arreglo
 # anidado 7000 veces). B recorre los mismos bloques con y sin mas pila: el camino no lo ve, y el bug (oxc pliega
-# `"abc".substring(1, undefined)` a `""`) deja en B el valor de A con mas pila. Con 90cd16b (y fe0cd86) iban a known/;
+# `"abc".substring(1, undefined)` a `""`, oxc#27098) deja en B el valor de A con mas pila. Con 90cd16b (y fe0cd86) iban a known/;
 # ahora el Explica de profundidad se confirma con los literales salados y con otro valor por defecto B != A':
 # inconcluso, div/ (d01 con `.then(JSON.stringify)`, d04 con try/throw). p01: el positivo (el original desborda
 # con JSON.stringify a 4800 marcos de recursion, el minificado sin las locales muertas no; la salida sale de un
@@ -681,8 +681,8 @@
 # `mensaje_nombre` re-minifica sin mangle y exige que B sea un renombre alfa-equivalente de eso y que eso de lo
 # mismo que A: p01 (mensaje) y p03 (nombres privados `this[#h]` y `{ payload }`) a known/; p02 (el error con su
 # stack) a known/ en carril_a y en div/ en core_defaults (el marco cambia de nombre, `at run` -> `at e`: n-principio
-# lo deja en div/). Negativos con un bug real: n01 (9460 en otra linea), n02 (el mensaje sale del codigo que 9460
-# deja de correr) y n03 (bug F dentro de la expresion que V8 escribe) siguen en div/. MEDIDO con el binario de 8.3.
+# lo deja en div/). Negativos con un bug real: n01 (9460 en otra linea; oxc#24331, #PENDIENTE-O5), n02 (el mensaje sale del codigo que 9460
+# deja de correr) y n03 (bug F, oxc#27098, dentro de la expresion que V8 escribe) siguen en div/. MEDIDO con el binario de 8.3.
 24-b83-n01-bug-al-lado	oxc-a-core_defaults	div:Stdout
 24-b83-n01-bug-al-lado	oxc-a-carril_a	div:Stdout
 24-b83-n01-bug-al-lado	oxc-b-core_defaults	div:Stdout
@@ -708,7 +708,7 @@
 24-b83-p03-privado	oxc-b-core_defaults	known
 24-b83-p03-privado	oxc-b-carril_a	known
 # 8.3, H1 de la revision del bloque 8: con keep_names (carril_a) oxc 0.153.0 manglea un
-# parametro cuyo default es una funcion o clase anonima, y el `.name` inferido cambia (bug real de keep_names). Si el
+# parametro cuyo default es una funcion o clase anonima, y el `.name` inferido cambia (bug real de keep_names, oxc#27725). Si el
 # programa imprime ese `.name` con la forma `X is not a function/constructor`, B es alfa-equivalente a B0 y B0 da lo
 # mismo que A: con 81cb11f iban a known/ en las 4 celdas. Ahora `mensaje_nombre` da Inconcluso en carril_a cuando el
 # mangle renombra un binding del que sale un `.name` (recheck::Nombran): div/. En core_defaults (sin keep_names, el
@@ -728,7 +728,7 @@
 24-b83h1-n03-name-sin-palabra	oxc-b-carril_a	div:Stdout
 # 8.7 (sensor perezoso en B): la TDZ atrapada por un try armado en runtime (atob + (() => {}).constructor) y un
 # try muerto que oxc borra: A corre con el sensor entero, B perezoso (runner::puede_atrapar no ve nada en el
-# minificado) y sin lineas viol. El bug F (substring) en el catch deja B == A' == B'. Con 90cd16b: known/ en las 4
+# minificado) y sin lineas viol. El bug F (substring, oxc#27098) en el catch deja B == A' == B'. Con 90cd16b: known/ en las 4
 # celdas (n01 por camino_sensor, n02 por I3: 300 TDZ atrapadas, sensor_tope). Ahora el camino de B sale de B con
 # el sensor entero (recheck::camino_de_b, camino_sensor_i3): div/.
 24-b87-n01-tdz-catch-oculto	oxc-a-core_defaults	div:Stdout
@@ -740,7 +740,8 @@
 24-b87-n02-tdz-catch-oculto-tope	oxc-b-core_defaults	div:Stdout
 24-b87-n02-tdz-catch-oculto-tope	oxc-b-carril_a	div:Stdout
 # 9.1 (H3 de la revision del bloque 8): el mismo bug de keep_names que 24-b83h1 (oxc 0.153.0
-# manglea un parametro con default anonimo, el default de un patron en `catch` y un campo privado), visto con
+# manglea un parametro con default anonimo, el default de un patron en `catch` y un campo privado; oxc#27725 y,
+# el campo privado, #PENDIENTE-N2), visto con
 # util.inspect: `[Function: handler]` contra `[Function: e]`, `[class Handler]`, `bound handler`, `#handler`.
 # oracle::normalize_names borraba los nombres en todas las celdas: con 9e52cef iban a iguales en las 4. Ahora,
 # con keep_names en la celda (carril_a, `Minifier::preserva_nombres`), las comparaciones del caso los ven
@@ -760,10 +761,10 @@
 # 9.3 (menores M2 y M5 de la revision del bloque 8 sobre mensaje_nombre). M2: V8 escribe una llamada dentro de la expresion como
 # `(...)` y el acceso opcional como `?.` (`cb(...) is not a function`, `o?.g`, `o.f(...)?.g`; MEDIDO en node
 # 24.14.1). Con 9e52cef la localizacion no los aceptaba y los positivos p01 y p02 iban a div/ en las 4 celdas; ahora
-# known/. p03 es el caso c03 de esa revision: `f` es un parametro con default anonimo que oxc manglea tambien con keep_names (H1):
-# div/ en carril_a, known/ en core_defaults. n01 (bug de 9460 al lado) y n02 (bug F en el argumento, que V8 no
+# known/. p03 es el caso c03 de esa revision: `f` es un parametro con default anonimo que oxc manglea tambien con keep_names (H1, oxc#27725):
+# div/ en carril_a, known/ en core_defaults. n01 (bug de 9460 al lado; oxc#24331, #PENDIENTE-O5) y n02 (bug F, oxc#27098, en el argumento, que V8 no
 # escribe pero el programa imprime) siguen en div/. p04 (M5, `(h) = function () {}`): known/ con la base y con 9.3
-# (el codegen de oxc quita los parentesis del destino: no alcanzable de punta a punta); fija el destino.
+# (el codegen de oxc quita los parentesis del destino, O8, oxc#6154: no alcanzable de punta a punta); fija el destino.
 25-b93-n01-llamada-bug-al-lado	oxc-a-core_defaults	div:Stdout
 25-b93-n01-llamada-bug-al-lado	oxc-a-carril_a	div:Stdout
 25-b93-n01-llamada-bug-al-lado	oxc-b-core_defaults	div:Stdout
@@ -791,7 +792,7 @@
 # 9.2 (H2 y M1 de la revision del bloque 8): profundidad con un desborde de pila NATIVO usado como
 # dato, como 24-f1, pero con una tabla que la sal de 8.1 no confirmaba. n01: los valores salen de argumentos
 # (`String("")`), sin nada que salar; n02: un literal salable (`etiqueta`) que no es el de la coincidencia; n03: un
-# booleano (el bug `Number.isInteger(5e-324)` -> `true`), sin literales de cadena; n04: el residuo de 8.1 (d06), un
+# booleano (el bug `Number.isInteger(5e-324)` -> `true`, oxc#27622), sin literales de cadena; n04: el residuo de 8.1 (d06), un
 # numero (`[0, bug.length]`) con el literal del bug salado. Con 9e52cef: known/ en las 4 celdas (la sal confirmaba o no
 # habia nada que salar, y eso era Explica). Ahora la profundidad sala tambien argumentos, ramas de `?:`, `return`...
 # (recheck::Sal::Amplia), sin literales que salar es Inconcluso, y la sal tiene que llegar a cada linea en que B
@@ -841,14 +842,14 @@
 26-b102-p01-etiqueta-y-valor	oxc-b-core_defaults	known
 26-b102-p01-etiqueta-y-valor	oxc-b-carril_a	known
 # 10.3 (R2): un modulo mudo que exporta un objeto con una funcion cuyo `.name` cambia con el bug de
-# keep_names de oxc (parametro con default anonimo, como 25-b91-p01). La pasada observada del carril B la escribia `fn`
+# keep_names de oxc (parametro con default anonimo, como 25-b91-p01; oxc#27725). La pasada observada del carril B la escribia `fn`
 # (igual en las 4 celdas con c9eab79, MEDIDO); ahora `[Function: handler]`: div/ en carril_a, igual en core_defaults
 # (los nombres se borran). En el carril A no parsea.
 26-b103-o02-export-objeto-con-fn	oxc-a-core_defaults	descarte:parse_esm
 26-b103-o02-export-objeto-con-fn	oxc-a-carril_a	descarte:parse_esm
 26-b103-o02-export-objeto-con-fn	oxc-b-core_defaults	igual
 26-b103-o02-export-objeto-con-fn	oxc-b-carril_a	div:Stdout
-# 10.2b (H1 de la revision A del bloque 10, x03): LIMITE CONOCIDO, no un positivo. El valor del bug F de oxc elige que
+# 10.2b (H1 de la revision A del bloque 10, x03): LIMITE CONOCIDO, no un positivo. El valor del bug F de oxc (oxc#27098) elige que
 # literal de un ?: se imprime, y A con mas pila elige el mismo: la sal llega al token que difiere y confirma. known/ con
 # c9eab79 y con el tope de 10.2b (MEDIDO), aunque B ejecuta el bug (MANUAL.md, Limites conocidos). Si un cambio lo manda a
 # div/, actualizar esto y MANUAL.md.
@@ -875,7 +876,7 @@
 27-b11-t03-b-bucle-imprime	oxc-b-core_defaults	div:ExitStatus
 27-b11-t03-b-bucle-imprime	oxc-b-carril_a	div:ExitStatus
 # 11.3 (I6): el re-chequeo de nombres de core_defaults pide ademas que B difiera de A
-# solo en nombres de su texto. n01/n02: el bug E de oxc en un programa que nombra `.name` (div/ en las 4;
+# solo en nombres de su texto. n01/n02: el bug E de oxc (oxc#27621) en un programa que nombra `.name` (div/ en las 4;
 # con el paso de nombres siempre Explica, la mutacion m1, iban a known/ en core_defaults). p01: solo el
 # nombre mangleado: known/ en core_defaults, igual en carril_a (keep_names).
 27-b113-n01-nombres-cbrt	oxc-a-core_defaults	div:Stdout
@@ -897,7 +898,7 @@
 27-b113-n03-valor-de-un-nombre-borrado	oxc-a-core_defaults	div:Stdout
 27-b113-n03-valor-de-un-nombre-borrado	oxc-b-core_defaults	div:Stdout
 # 11.2d: el preload deja bloqueantes los pipes de stdout y stderr. w06: el bug F
-# de oxc por console.log y 2 MiB por fs.writeSync(2, ...): div/ en las 4 (con 26c5239, no_determinista o
+# de oxc (oxc#27098) por console.log y 2 MiB por fs.writeSync(2, ...): div/ en las 4 (con 26c5239, no_determinista o
 # ThrowLost, MEDIDO 8 de 8). e01, e02 y e03 (sin bug: fs.writeSync(2) intercalado con mas de 64 KiB de
 # stdout, sin atrapar, y process.exit tras 2 MiB encolados): igual en las 4, sin fila (con 26c5239, e01 y
 # e02 daban div:Stdout o no_determinista a veces). MEDIDO 2 corridas de cada binario.

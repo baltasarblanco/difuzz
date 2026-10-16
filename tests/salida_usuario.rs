@@ -273,7 +273,7 @@ fn descartes_reconstruye_el_total() {
 }
 
 /// 10.1: con `--crudo`, el crudo que da otra salida que el original impreso (los parentesis de
-/// `(h) = function(){}`) va a codegen/, ortogonal: el caso cuenta igual donde termino, la linea
+/// `(h) = function(){}`, O8, oxc#6154) va a codegen/, ortogonal: el caso cuenta igual donde termino, la linea
 /// `total=` es la misma que sin la opcion y la diferencia solo de `toString` es `contenido`. Sin la
 /// opcion no hay codegen/ ni linea `crudo`. El indice y `--cruce` cuentan el codegen/.
 #[test]
@@ -315,7 +315,7 @@ fn crudo_va_a_codegen_y_sin_la_opcion_nada_cambia() {
 
 /// 10.1b (H1 de las revisiones de 10.1): `contenido` solo si el paso `contenido` de A contra B
 /// (`clasificar::paso_contenido`) atribuye la diferencia al texto de toString o de .stack. Los
-/// bugs de los parentesis (O8 en oxc 0.153.0) en una rama que depende de ese texto (revision A) o
+/// bugs de los parentesis (O8 en oxc 0.153.0, oxc#6154) en una rama que depende de ese texto (revision A) o
 /// que solo se ven en un marco del stack (revision B), y uno ajeno a un toString que si importa,
 /// van a codegen/ (antes, los tres primeros eran `contenido`). Siguen en `contenido` un toString
 /// impreso entero y una diferencia que solo es la columna de un marco.
@@ -523,7 +523,7 @@ fn pipe_cerrado_no_pierde_la_divergencia() {
     }
     let b = base("pipe-div");
     let corpus = b.join("corpus");
-    // golden oxc-o1: div:ThrowNew en oxc carril_a (tests/golden/esperado.tsv).
+    // golden oxc-o1 (el Issue C, #PENDIENTE-C): div:ThrowNew en oxc carril_a (tests/golden/esperado.tsv).
     let o1 = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/golden/corpus/oxc-o1/input.js");
     caso(&corpus, "o1", &std::fs::read(o1).unwrap());
     caso(&corpus, "igual", b"console.log(1);\n");
@@ -647,7 +647,7 @@ fn tope_de_memoria_de_node_va_a_recursos() {
     let filas = std::fs::read_to_string(celda.join("descartes.tsv")).unwrap().lines().filter(|l| !l.starts_with('#')).count();
     assert_eq!(campo(stats, "total"), campo(stats, "iguales") + campo(stats, "DIVERGENCIAS") + campo(stats, "RECURSOS") + filas, "{stats}");
 
-    // Un re-chequeo que pasa el tope: 24-f1-d01 de la aceptacion (bug F de oxc, div:Stdout) con una
+    // Un re-chequeo que pasa el tope: 24-f1-d01 de la aceptacion (bug F de oxc, oxc#27098, div:Stdout) con una
     // reserva proporcional a la profundidad de pila: A y B ~240 MiB,
     // la corrida honda del re-chequeo de profundidad el doble.
     let corpus_r = b.join("corpus-r");
@@ -744,7 +744,7 @@ fn solo_b(cuerpo_b: &str, cuerpo_a: &str, cola: &str) -> String {
 }
 
 /// 11.2c: las ramas del Timeout de B en `confirm`.
-/// - `bucle-lento` (el t03 de la revision A de 11b, lento): B, con el bug F de oxc, imprime sin fin
+/// - `bucle-lento` (el t03 de la revision A de 11b, lento): B, con el bug F de oxc (oxc#27098), imprime sin fin
 ///   64 KiB cada 100 ms. Con el timeout de 1 s no llega al tope de salida (1 MiB); con el timeout
 ///   largo lo pasa: queda el Timeout, `div/` (con MUT-a, iguales: un miscompile real perdido).
 /// - `mayor-gira`: B escribe 1,5 MiB (pasa el tope) y gira sin fin: repetido con los topes mayores
@@ -792,7 +792,7 @@ fn confirmacion_de_b_con_timeout_largo() {
     // sensor da lo mismo: iguales.
     let cuenta = "var calls = 0;\nError.prepareStackTrace = function () { calls++; return \"\"; };\ntry { null.x; } catch (e) {}";
     caso(&corpus, "s03", solo_b(&format!("{cuenta}\nconst keep = [];\nfor (let i = 0; i < 6; i++) keep.push(Buffer.alloc(50 << 20, 1));"), cuenta, "console.log(\"llamadas\", calls);").as_bytes());
-    // 11.2f: h01 y h02, con el bug F de oxc. El `toString` propio
+    // 11.2f: h01 y h02, con el bug F de oxc (oxc#27098). El `toString` propio
     // de un error atrapado solo corre con el sensor (V8 formatea el stack al pausar). Con el bug, B con
     // el sensor reserva 400 MiB (pasa el tope); repetido sin el sensor no reserva y sale. h01: A sin el
     // sensor gira sin fin con la misma salida parcial que B; antes (70509f2) se tomaba como igual a B
@@ -801,13 +801,13 @@ fn confirmacion_de_b_con_timeout_largo() {
     caso(&corpus, "h01", format!("{nota}if (!globalThis.v) for (;;) {{}}\nconsole.log(\"fin\");\n").as_bytes());
     caso(&corpus, "h02", format!("{nota}console.log(\"fin\");\n").as_bytes());
     // 11.2f: x01 nota el sensor (el `toString` imprime solo con el
-    // sensor) y tiene el bug F; solo B reserva 400 MiB. A con el sensor, A sin el y B difieren: div/, y
+    // sensor) y tiene el bug F (oxc#27098); solo B reserva 400 MiB. A con el sensor, A sin el y B difieren: div/, y
     // el A guardado es el sin el sensor (A y B comparados sin el sensor). x02: B ademas gira sin fin:
     // la repeticion no termina y queda en div/ sin esa comparacion.
     let x = "class E extends Error { toString() { console.log(\"toString llamado\"); return \"E\"; } }\ntry { throw new E(\"x\"); } catch (e) {}\nconst n = \"abc\".substring(1, undefined).length;\nconst keep = [];\n";
     caso(&corpus, "x01", format!("{x}if (n === 0) for (let i = 0; i < 8; i++) keep.push(Buffer.alloc(50 << 20, 1));\nconsole.log(\"fin\", n);\n").as_bytes());
     caso(&corpus, "x02", format!("{x}if (n === 0) {{ for (let i = 0; i < 8; i++) keep.push(Buffer.alloc(50 << 20, 1)); for (;;) {{}} }}\nconsole.log(\"fin\", n);\n").as_bytes());
-    // 11.2f (A sin el sensor corria una sola vez): d01, con el bug F. Sin el sensor
+    // 11.2f (A sin el sensor corria una sola vez): d01, con el bug F (oxc#27098). Sin el sensor
     // el programa cuenta sus corridas en un archivo de afuera: la repeticion de B (1) y la primera de
     // A sin el sensor (2) imprimen lo mismo, la segunda (3) otra cosa. A sin el sensor no se reproduce:
     // inconcluso, sigue en div/ (con una sola corrida se tomaba como igual a B).
@@ -833,7 +833,7 @@ fn confirmacion_de_b_con_timeout_largo() {
     );
     // 11.2h: las corridas de A sin el sensor son auxiliares: si pasan
     // un tope, el paso queda inconcluso y el caso sigue en div/ (antes, `como_a`: recursos/). Los dos
-    // con el bug F de oxc y un programa que nota el sensor; solo B reserva 300 MiB. g03: sin el sensor
+    // con el bug F de oxc (oxc#27098) y un programa que nota el sensor; solo B reserva 300 MiB. g03: sin el sensor
     // imprime 256 KiB cada 500 ms sin fin: la repeticion de B (4 MiB de tope) da Timeout y A sin el
     // sensor (11.2g, 1 MiB) pasa el tope. g04: sin el sensor, el camino de A imprime sin fin y el de B
     // termina: la repeticion de B termina y difiere, y A sin el sensor (11.2f) pasa el tope.
@@ -854,7 +854,7 @@ fn confirmacion_de_b_con_timeout_largo() {
         .as_bytes(),
     );
     // 11.2i: el A repetido sin el sensor de I3 es auxiliar. Los
-    // tres con el bug F de oxc y un programa que nota el sensor; el sensor de B se degrada (i01: B atrapa
+    // tres con el bug F de oxc (oxc#27098) y un programa que nota el sensor; el sensor de B se degrada (i01: B atrapa
     // 400 excepciones, `sensor_tope`; i3-tope e i3-colgado: B con el sensor gira, `sensor_caido`). i01 (de
     // la revision A): A sin el sensor imprime sin fin y pasa el tope de salida. i3-tope (B): A sin el
     // sensor reserva 400 MiB. i3-colgado (B): A sin el sensor no termina (y su salida parcial es la de B).
@@ -1001,7 +1001,7 @@ fn a_que_pasa_el_tope_al_confirmar_va_a_recursos() {
     let meta = std::fs::read_to_string(out.join("oxc+carril_a+tal_cual/recursos/pesado/meta.txt")).unwrap();
     assert!(meta.contains("ejecucion: el original (A) del caso, en la pasada cruda\n"), "{meta}");
 
-    // Lo que dice meta.txt de un A de la cache: B (bug F de oxc) reserva sin fin.
+    // Lo que dice meta.txt de un A de la cache: B (bug F de oxc, oxc#27098) reserva sin fin.
     // Sin cache: `a_cache: miss`. Con la entrada (grabada con los mismos topes): el A fresco la
     // confirma (`hit (confirmado con una corrida fresca)`) y la traza dice de donde sale "A no".
     let corpus_h = b.join("corpus-h");
@@ -1023,7 +1023,7 @@ fn a_que_pasa_el_tope_al_confirmar_va_a_recursos() {
 /// archivo exclusivo (`wx`) durante 3 s: si otra repeticion lo tiene, imprime `solapado` y diverge.
 /// Con el turno, iguales los dos; sin el (las dos a la vez, `jobs` x 2 x tope), uno va a div/.
 /// 11.2k: I3 con el A del caso leido de la cache. El programa tiene
-/// el bug F de oxc y nota el sensor; con el sensor imprime una "version" que se lee de un archivo de
+/// el bug F de oxc (oxc#27098) y nota el sensor; con el sensor imprime una "version" que se lee de un archivo de
 /// afuera (cambia entre corridas: la entrada de la cache queda vieja); sin el sensor, A alterna su
 /// salida (el A auxiliar de I3 no se reproduce). Corrida 1: div/. Corrida 2, misma cache: el A del caso
 /// fresco difiere de la entrada; antes eso mandaba un bug real a no_determinista. Ahora: lapida, otra

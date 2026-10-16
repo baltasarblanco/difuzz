@@ -159,7 +159,7 @@ for caso in "${casos[@]}"; do
 done
 # Las stats de cada celda tienen que cerrar. MEDIDO en el corpus completo (07-oct): LINT es un
 # contador ortogonal (chequeo estatico; un caso puede estar en div/ y en lint/ a la vez, p. ej.
-# swc/B fixture/issues/12188). Desde R2-H06 (b6-usuario) descartes.tsv SI lista mudo_sin_bindings,
+# swc/B fixture/issues/12188, arreglado por swc#12253, con el residuo en swc#12529). Desde R2-H06 (b6-usuario) descartes.tsv SI lista mudo_sin_bindings,
 # ilegible y panic_del_fuzzer (antes se sumaban aparte mudos_sin_bindings + ilegibles), asi que
 #   total = iguales + DIVERGENCIAS + conocidas + PANICS + RECURSOS + filas(descartes.tsv)
 # (la misma identidad que documenta el USAGE de difuzz, sin --mutaciones).
