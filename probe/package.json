@@ -2,7 +2,7 @@
   "name": "difuzz-probe",
   "private": true,
   "license": "MIT OR Apache-2.0",
-  "description": "Probe de difuzz contra @swc/core publicado, con opciones por defecto",
+  "description": "difuzz probe against the published @swc/core, with default options",
   "dependencies": {
     "@swc/core": "1.16.2",
     "oxc-minify": "0.153.0"
