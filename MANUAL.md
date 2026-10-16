@@ -239,7 +239,7 @@ una nota en `meta.txt`:
 - **los dos** (`sandbox: el original y el minificado tocaron el sandbox: se compara`): un programa
   que, por ejemplo, intenta leer un archivo, lo atrapa y sigue, y además tiene un bug del minifier
   que no tiene nada que ver con eso, va a `div/` como sin sandbox. Antes de 7.9 iba entero a
-  `descartes.tsv` y el bug se perdía (revisión de `fe0cd86`, MENOR 3). Que esto no inventa
+  `descartes.tsv` y el bug se perdía (lo encontró una revisión interna de `fe0cd86`). Que esto no inventa
   divergencias se midió con 45 programas sin bug que tocan el sandbox de muchas formas (mensajes
   de error enteros con rutas, `util.inspect` y `.stack` del error, errores sin atrapar y con
   `cause`, `require` e `import()` de rutas negadas, procesos hijos, workers, `process.binding`,
@@ -296,8 +296,8 @@ los atrape. Con el sandbox, `os.setPriority` y `process._debugProcess` con el pi
 salida. Un `EPERM` natural se ve igual: un
 `kill`/`_kill` a un proceso de otro usuario (el pid 1, por ejemplo) da `EPERM` también sin el
 sandbox, y con `--sandbox` marca el caso: si el original y el minificado lo hacen, se compara con
-la nota de A y B (antes de 7.9 iba a descartes y un bug real al lado no se veía; MEDIDO en la
-revisión de la integración del bloque 7).
+la nota de A y B (antes de 7.9 iba a descartes y un bug real al lado no se veía; MEDIDO en una
+revisión interna).
 
 **`require` de un directorio** (8.4). Para resolver `require('..')`, `'../'`, `'.'` o `'/etc'` (un
 directorio que existe) node lee el `package.json` de ese directorio: un ancestro de la carpeta
@@ -662,7 +662,7 @@ Principios:
     cambio del `.name` es la asunción "No Reliance on Function.prototype.name" y no se mira.
     Lo que keep_names promete es `.name`, no el nombre con que V8 rotula un marco de stack: con
     `const h = c ? function () {} : 0`, `.name` es `""` pero el marco dice `at h` (V8 lo infiere
-    del binding fuera de NamedEvaluation; medido en node 24 por la revisión del bloque 8). Ese
+    del binding fuera de NamedEvaluation; medido en node 24 en una revisión interna). Ese
     nombre no se marca: se ve solo leyendo `.stack`, que ya prende el flag `stack` (asunción
     aceptada).
     Un mangle que hace que la llamada capture otro binding no llamable
@@ -738,8 +738,8 @@ Principios:
     confirmo con la sal)` (en profundidad, esto último ya no pasa: es inconcluso, con su nota). La confirmación salada de profundidad (8.1) no depende de la política del
     backend: vale en las celdas de swc también, y un `Explica` de profundidad en swc paga el
     salado y puede ir a `div/` como en oxc (en el corpus de tests de SWC ninguna divergencia de
-    swc llega ahí: sin cambios en `swc a`, `swc b` ni `swc a --sandbox`, medido en la revisión del
-    bloque 8).
+    swc llega ahí: sin cambios en `swc a`, `swc b` ni `swc a --sandbox`, medido en una revisión
+    interna).
 
     Cuesta, solo cuando todo lo demás ya daba `Explica`: 2 ejecuciones de node (en solo sloppy,
     además, 1 o 2 `node --check`), una instrumentación del minificado con SWC y, para contenido,
@@ -757,9 +757,9 @@ Principios:
 
   **Límites conocidos** (lo que no se prueba): el re-chequeo compara salidas, el camino de B y si
   B toca la asunción; no el camino de A' contra el de B. El chequeo es de control y de uso, no de
-  flujo de datos completo. Medido con oxc 0.153.0 (8 celdas): los 11 programas de la revisión de
-  la noche 2, los 4 de `&&=`/`||=`/valor por defecto y los 6 de dependencia por datos de la
-  revisión de 7.1 (H1, H2) van a `div/`; de 75 variantes propias (12 familias × 6 formas: tabla,
+  flujo de datos completo. Medido con oxc 0.153.0 (8 celdas): los 11 programas de una revisión
+  interna, los 4 de `&&=`/`||=`/valor por defecto y los 6 de dependencia por datos de otra
+  revisión interna, la de 7.1, van a `div/`; de 75 variantes propias (12 familias × 6 formas: tabla,
   clave, `&&=`, `||=`, valor por defecto, rama; más 3 de `with`) y 18 más (3 familias × 6: texto de función y
   `.stack` elegidos por datos sin `&&`, un valor por defecto que no es literal), lo que queda en
   `known/` son positivos (B no corre el bug: con los nombres mangleados la condición sobre el
@@ -772,10 +772,10 @@ Principios:
     la sal no cambia: un valor calculado (`[].join()`), un literal fuera de las posiciones que se
     salan (`elegir("", bug, cond)`) o un número, booleano o `null` (`[0, bug.length]`); la asunción
     es el `arguments` atado o el texto de una función del programa, elegidos por datos. Medido con
-    oxc 0.153.0 en las 8 celdas de la revisión de 7.1b, con B ejecutando el bug, en `known/`: el
+    oxc 0.153.0 en las 8 celdas en una revisión interna de 7.1b, con B ejecutando el bug, en `known/`: el
     `arguments` atado contra `[].join()` (4 filas: las de carril A), el texto de una función (8) y,
     de sloppy, una función declarada en un bloque (Anexo B: `typeof fb` fuera del bloque, 4 filas;
-    otra diferencia de sloppy sin sensor, además del `this`). En la revisión final del bloque 7
+    otra diferencia de sloppy sin sensor, además del `this`). En una revisión interna posterior
     (oxc 0.153.0, 8 celdas, B ejecutando el bug, igual que `fe0cd86`), también en `known/`: el
     texto de una función con `""` como argumento (8 filas), el `arguments` atado con `""` como
     argumento (4) y el texto de una función con valor por defecto `0` (8). Con un literal de cadena
@@ -785,12 +785,12 @@ Principios:
     el valor de A con más pila pegado a un literal salado que el programa imprime en el **mismo
     token** (letras con letras: `"es" + bool` imprime `estrue`; dígitos con dígitos: `"1" + t[i]`
     imprime `10` contra `12`; la sal cae adentro del token que difiere; MEDIDO el de dígitos en
-    la revisión A del bloque 10, x01, `known/` en las 4 celdas de oxc). Hasta 10.2 bastaba con la
+    una revisión interna: `known/` en las 4 celdas de oxc). Hasta 10.2 bastaba con la
     misma línea, antes o después del valor
     (`console.log("valor:", [0, bug.length][i])`, `console.log([true, bug][i], "es entero")`,
     `"n=".concat(...)`): la sal llegaba a la línea por la etiqueta, `sal_alcanza` la daba por
-    alcanzada y el caso iba a `known/` (MEDIDO en la revisión del bloque 9 y
-    con `c9eab79` en los `26-b102-n`); desde 10.2 la sal tiene que caer en un token que difiere de
+    alcanzada y el caso iba a `known/` (MEDIDO en una revisión interna y
+    con `c9eab79` en los casos `26-b102-n` de la aceptación); desde 10.2 la sal tiene que caer en un token que difiere de
     A y van a `div/`. El costo, del lado seguro: un positivo cuyo valor elegido es una cadena vacía
     (`''` contra `'bc'`: la sal cae después de la comilla, que A también imprime) o cuya línea la
     sal cambia en algo más que agregar `dz` (una cuenta, un largo) es inconcluso y va a `div/`. Una
@@ -864,8 +864,8 @@ Principios:
   que un `//# sourceURL=` del programa) pierde la posición y un bug en ella no se ve. Además, las
   pausas del sensor formatean el stack de cada excepción atrapada: el archivo de un `eval` con
   `//# sourceURL=x.js` que lanza y atrapa queda anotado aunque el programa nunca lea un stack, y
-  una línea impresa con `x.js:L:C` da `iguales` aunque la posición cambie (MEDIDO, revisión de la
-  integración del bloque 7).
+  una línea impresa con `x.js:L:C` da `iguales` aunque la posición cambie (MEDIDO en una revisión
+  interna).
 - **Los nombres de funciones y clases que imprime `util.inspect`** (`[Function: f]`,
   `[class A]`, `bound f`, `#f`, ...) **se comparan según la celda** (9.1). Sin keep_names
   (core_defaults) la comparación los borra (`oracle::normalize_names`): el mangle y los nombres
@@ -904,8 +904,8 @@ Principios:
   sale también `[Function: A]` (no `[class A]`: el tipo saldría del código fuente). El constructor
   de una instancia serializada no se escribe (`inst{...}`): un nombre de clase solo visible así
   sigue sin verse. El preload es parte de la clave de la caché de A (`main.rs`, `cache_parts`):
-  las entradas viejas no se reusan. Ruido conocido en swc carril_a (H2 de la revisión A del
-  bloque 10, MEDIDO en una muestra de 300 fixtures de SWC: `swc a` y `swc b` pasan de 1 a 4
+  las entradas viejas no se reusan. Ruido conocido en swc carril_a (encontrado en una revisión
+  interna, MEDIDO en una muestra de 300 fixtures de SWC: `swc a` y `swc b` pasan de 1 a 4
   `div/`; en oxc, 0): SWC inlina un binding de un solo uso (`var a1 = () => ...`, `var nameless =
   class {}`) dentro de la llamada de observación que agrega difuzz (`__difuzzObserve(["a1",
   () => ...])`) y la función pierde el nombre inferido (`[Function: a1]` contra `[Function
@@ -1056,7 +1056,7 @@ caso sigue. Al arrancar, difuzz imprime los dos topes (`topes de node: ...`).
   SIGKILL, ni a los que hicieron `setsid` (el subreaper los mata después de cada ejecución, si
   difuzz sigue vivo).
 
-Límites que quedan (11.2b, de las revisiones de 11b):
+Límites que quedan (11.2b, encontrados en revisiones internas):
 
 - El kind de un B que no termina dentro de los topes es `ExitStatus` (lo mató difuzz), aunque sin
   topes habría sido `Timeout` (un bucle que imprime) o `Stdout` (un B que escribe o reserva mucho y
@@ -1083,7 +1083,7 @@ Límites que quedan (11.2b, de las revisiones de 11b):
   En una máquina chica (con un solo worker y MemTotal ≤ 8 GiB, el tope ya es MemTotal/2) el techo
   deja el mayor igual al tope: un B que reserva un poco más que A va a `div/` ExitStatus en vez de
   iguales.
-- (11.2d, revisiones de b11-final) El kind de un B en un bucle que imprime depende de la carga:
+- (11.2d, encontrado en revisiones internas) El kind de un B en un bucle que imprime depende de la carga:
   `Timeout` si el timeout llega antes que el tope de salida, `ExitStatus` si el tope llega antes
   (MEDIDO: 16 MiB a los 4,76 s con un timeout de 5 s). Siempre `div/`.
 - El costo de que un A que pasa un tope al confirmar vaya a `recursos/` (11.2c): un caso con un bug
@@ -1254,7 +1254,7 @@ scripts/barrido-real.sh CORPUS/cjs OUT/cjs [BIN]    # el carril sale de fuentes.
 real no se versiona (las licencias son de sus autores); sí sus herramientas. Crecerlo bajando
 paquetes de npm necesita red y queda para decidir.
 
-Cuánto tarda (MEDIDO el 10-oct con `--jobs 8` y el binario de `fe0cd86`, antes del bloque 7, en
+Cuánto tarda (MEDIDO el 10-oct con `--jobs 8` y el binario de `fe0cd86`, en
 una máquina de 32 núcleos con carga 25-45 de otros procesos):
 
 | Qué | Casos | Tiempo |
