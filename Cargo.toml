@@ -5,7 +5,7 @@ edition = "2021"
 publish = false
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/baltasarblanco/difuzz"
-description = "Fuzzer diferencial de minifiers de JavaScript: corre cada caso original y minificado bajo node y compara las salidas. Backends: oxc (por defecto) y swc."
+description = "Differential fuzzer for JavaScript minifiers: runs each case original and minified under node and compares the outputs. Backends: oxc (default) and swc."
 
 # Crates publicados, versiones fijas. El Cargo.lock va commiteado (delta v1.2 §4.5).
 # swc_ecma_testing / testing no estan: runner propio (delta v1.2 §1 §3.3).
