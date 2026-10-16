@@ -85,7 +85,6 @@ difuzz's own process or files outside the case's working directory, or a sandbox
 less than this file says),
 please report it privately through GitHub's private vulnerability reporting ("Report a
 vulnerability" in the repository's Security tab) instead of opening a public issue.
-<!-- VERIFICAR: private vulnerability reporting can only be enabled on a public repository (Settings > Security); enable it right after publishing. -->
 
 Miscompilations that difuzz finds in a minifier are not vulnerabilities in difuzz: report them
 to that minifier's project.
