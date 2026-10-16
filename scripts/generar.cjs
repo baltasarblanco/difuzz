@@ -30,7 +30,10 @@
 // ni largos maximos de Array/String. Sin Date, Math.random ni timers.
 
 const fs = require('fs');
-// --con-conocidos: tambien genera los patrones de los bugs conocidos
+// --con-conocidos: tambien genera los patrones de los bugs conocidos. Donde esta cada uno: A en un
+// comentario de oxc#27412, B #PENDIENTE-B, C #PENDIENTE-C, D #PENDIENTE-D, el default con efecto en
+// un rest en oxc#24331 (esta forma, #PENDIENTE-O5), E oxc#27621, F oxc#27098, G oxc#25158,
+// H oxc#27622, I oxc#27695 y oxc#27719, K oxc#27656.
 const CONOCIDOS = process.argv.includes('--con-conocidos');
 const path = require('path');
 
@@ -165,8 +168,8 @@ class Gen {
     switch (this.int(16)) {
       case 0: return `${this.paren(s())}.${this.pick(['charAt', 'charCodeAt', 'codePointAt', 'at'])}(${n()})`;
       // E/F (del generador): indexOf con no-ASCII (offset en bytes), posiciones >= 2**31, y
-      // substring/slice con fin NaN/undefined se pliegan mal; sin --con-conocidos esos
-      // casos usan receptor ASCII literal y posiciones literales finitas. G: en indexOf, con
+      // substring/slice con fin NaN/undefined se pliegan mal (oxc#27098; el no-ASCII, tambien oxc#25158); sin --con-conocidos esos
+      // casos usan receptor ASCII literal y posiciones literales finitas. G (oxc#25158): en indexOf, con
       // busqueda "" y una posicion mas alla del largo del receptor (`("").indexOf((""), (2))` se
       // pliega a 2, node da 0); sin --con-conocidos indexOf toma solo las posiciones de nFin que no
       // pasan el largo de su receptor (lastIndexOf no diverge: nFin entera). Un solo pick, como antes.
@@ -264,9 +267,9 @@ class Gen {
       const opts = [
         () => this.expr(sc, 2),
         () => (o ? `${o}.p` : this.expr(sc, 1)),
-        // spread de un objeto con getters de uso unico que se mueve: tambien Issue A (con identificador)
+        // spread de un objeto con getters de uso unico que se mueve: tambien Issue A (con identificador; comentario en oxc#27412)
         () => (o && CONOCIDOS ? `{ ...${o} }` : `[${this.expr(sc, 1)}]`),
-        // spread de un literal con getter que se mueve al inlinear: Issue A, solo con --con-conocidos
+        // spread de un literal con getter que se mueve al inlinear: Issue A (oxc#27412), solo con --con-conocidos
         () => (o && CONOCIDOS ? `{ ...{ get g() { T.push("sg"); return ${this.prim(sc)}; } } }` : this.lit()),
         () => `t("i", ${this.expr(sc, 1)})`,
         () => (sc.arrs.length ? `[...${this.pick(sc.arrs)}]` : `[${this.prim(sc)}]`),
@@ -534,7 +537,7 @@ class Gen {
   // computados, privados, destructuring con claves computadas.
   F7(sc) {
     const out = [];
-    // Claves numericas negativas computadas en destructuring/clases son el Issue B: en esos
+    // Claves numericas negativas computadas en destructuring/clases son el Issue B (#PENDIENTE-B): en esos
     // contextos solo con --con-conocidos (en literales de objeto se imprimen bien).
     // b4: tambien [Infinity] (se pliega a 1/0 sin corchetes) y, en metodos/accesores de
     // literales de objeto, cualquiera de estas (variantes del Issue B que encontro el generador).
@@ -568,7 +571,7 @@ class Gen {
       } else if (k === 4) {
         const pr = this.id('__proto__x');
         const which = this.int(4);
-        // `const __proto__` + `{ __proto__ }` es el Issue C: solo con --con-conocidos
+        // `const __proto__` + `{ __proto__ }` es el Issue C (#PENDIENTE-C): solo con --con-conocidos
         if (which === 0 && CONOCIDOS && !this.yaProto) { this.yaProto = true; out.push(`const __proto__ = ${this.lit()}; P("pp", Object.keys({ __proto__ }));`); }
         else if (which === 0) out.push(`P("pp0", Object.keys({ "__proto__": ${this.lit()}, ["__proto__"]: 2 }));`);
         else if (which === 1) out.push(`P("pp2", Object.getPrototypeOf({ __proto__: null }) === null, Object.keys({ ["__proto__"]: 1 }), Object.keys({ "__proto__": {} }));`);
@@ -601,11 +604,11 @@ class Gen {
     for (let i = 0; i < n; i++) {
       const k = this.int(11);
       const f = this.id('h');
-      // `catch (h) { var h }` con h = nombre de la function expression es el Issue D: solo con --con-conocidos
+      // `catch (h) { var h }` con h = nombre de la function expression es el Issue D (#PENDIENTE-D): solo con --con-conocidos
       if (k === 0) out.push(`P("nfe", (function ${f}() { ${CONOCIDOS ? this.pick([`${f} = 1;`, '']) : ''} try { t("ty", 0); } catch (${f}) { ${this.pick([...(CONOCIDOS ? [`var ${f};`] : []), `${f} = 2;`, ''])} } return typeof ${f}; })());`);
       else if (k === 1) out.push(`P("iife", (function (x, y) { return ${this.pick(['x + y', '[x, y]', 'arguments.length', 'y', 'typeof y'])}; })(${this.expr(sc, 1)}${this.chance(0.5) ? `, ${this.expr(sc, 1)}` : ''}));`);
       else if (k === 2) out.push(`P("arr", ((x = t("dx", ${this.lit()}), y = x) => [x, y])(${this.pick(['', 'void 0', this.expr(sc, 1)])}));`);
-      // default con efecto dentro de un rest es #24331: solo con --con-conocidos
+      // default con efecto dentro de un rest es de la familia de oxc#24331 (esta forma, #PENDIENTE-O5): solo con --con-conocidos
       else if (k === 3) out.push(`P("rest", (function (...[r1 = ${CONOCIDOS ? 't("rd", 1)' : '1'}, ...r2]) { return [r1, r2.length]; })(${this.pick(['', '0', 'void 0, 2', this.expr(sc, 1)])}));`);
       else if (k === 4) out.push(`P("ac", (function () { var r = Array(arguments.length); for (var ix = 0; ix < arguments.length; ix++) r[ix] = arguments[ix]; return r; })(${this.lit()}, ${this.lit()}));`);
       else if (k === 5) out.push(`{ const fs = []; for (let ii = 0; ii < 3; ii++) { fs.push(() => ii); ${this.pick(['', 'ii++;', 'if (ii) continue;'])} } P("lp", fs.map((g) => g())); }`);
@@ -643,7 +646,7 @@ class Gen {
       () => `${s()}.${this.pick(['toLowerCase', 'toUpperCase', 'trim', 'trimStart', 'trimEnd'])}()`,
       () => `${s()}.concat(${a()}, ${a()})`,
       () => `${s()}.${this.pick(['substring', 'slice'])}(${af()}${this.chance(0.6) ? `, ${af()}` : ''})`,
-      // posiciones fuera de rango en indexOf/lastIndexOf: G (solo con --con-conocidos). Sin el,
+      // posiciones fuera de rango en indexOf/lastIndexOf: G, oxc#25158 (solo con --con-conocidos). Sin el,
       // indexOf no recibe una posicion mayor que el largo de su receptor (con S, solo `1` sobre `""`:
       // `"".indexOf("", 1)` se pliega a 1, node da 0). Un solo pick, como antes.
       () => {
@@ -658,7 +661,7 @@ class Gen {
       () => `Math.pow(${n()}, ${n()})`,
       () => `(${n()}) ** (${n()})`,
       () => `String.fromCharCode(${[...Array(1 + this.int(3))].map(() => this.pick(['65', '65.9', '-1', '65601', '"66"', 'undefined', 'NaN', '0x10FFFF', '2 ** 32 + 67', 'null', 'true'])).join(', ')})`,
-      // isInteger/isSafeInteger de un diminuto: H (solo con --con-conocidos)
+      // isInteger/isSafeInteger de un diminuto: H, oxc#27622 (solo con --con-conocidos)
       () => { const f = this.pick(['Number.isInteger', 'Number.isSafeInteger', 'Number.isNaN', 'Number.isFinite', 'isNaN', 'isFinite']); let x = a(); if (!CONOCIDOS && /Integer/.test(f) && x === '5e-324') x = '0.5'; return `${f}(${x})`; },
       () => `Array.of(${a()}, ${a()}).join()`,
       () => `[${a()}, ${a()}].concat(${a()}, [${a()}]).join("|")`,
@@ -676,7 +679,7 @@ class Gen {
       () => `typeof (${a()}) ${this.pick(['===', '!=='])} "${this.pick(['number', 'object', 'undefined', 'string', 'boolean'])}"`,
       () => `(${a()}) ?? (${a()})`,
       () => `${this.pick(['1n', '0n', '(-1n)', '(2n ** 64n)', 'BigInt(-0)', 'BigInt("0x10")'])} ${this.pick(['+', '-', '*', '/', '%', '**', '&', '|', '^', '<<', '>>'])} ${this.pick(['1n', '3n', '-2n', '64n'])}`,
-      // BigInt no evaluable (2n ** 64n) comparado con laxitud: K (solo con --con-conocidos)
+      // BigInt no evaluable (2n ** 64n) comparado con laxitud: K, oxc#27656 (solo con --con-conocidos)
       () => `${this.pick(['1n', '(-0n)', ...(CONOCIDOS ? ['2n ** 64n'] : []), '(-1n)'])} ${this.pick(['==', '<', '>=', '==='])} ${this.pick(['1', '-0', '"1"', '2 ** 64', 'true', '"x"', 'NaN', 'Infinity'])}`,
       () => `void (${a()})`,
       // URI: url_encoding de oxc_ecmascript. Pueden lanzar URIError: van en try (ver abajo)
