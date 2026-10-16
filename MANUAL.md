@@ -1153,9 +1153,9 @@ Sin `node` en el `PATH`, los tests que lo necesitan fallan con un mensaje claro.
 
 - **Golden de detección** (`tests/golden/`): 19 casos (17 con bugs conocidos de oxc y swc, el control `control-limpio` y una prueba del oráculo, `difuzz-senal-b`), en 8
   celdas, más `--invocar` y `--stubs`; la clase esperada de cada caso está en `esperado.tsv`.
-- **Aceptación de los re-chequeos** (`tests/aceptacion/rechequeos/`): 181 casos que combinan un
-  bug real de oxc con un flag de asunción (o con la forma en que se imprime), en las 4 celdas de oxc
-  (724 comparaciones).
+- **Aceptación de los re-chequeos** (`tests/aceptacion/rechequeos/`): 188 casos que, en su mayoría,
+  combinan un bug real de oxc con un flag de asunción (o con la forma en que se imprime), en las 4
+  celdas de oxc (752 comparaciones). El desglose está en `tests/README.md`.
 - **Corpus de codegen** (`tests/codegen/`, 10.1): 142 formas propias cuya semántica depende de la
   sintaxis exacta (paréntesis, comas, directivas, ASI, claves computadas, escapes), con `--crudo`
   en 8 celdas (1136 comparaciones). Las 9 del bug de los paréntesis de oxc van a `codegen/`; los
