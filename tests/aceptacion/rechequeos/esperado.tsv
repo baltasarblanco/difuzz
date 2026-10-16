@@ -741,7 +741,7 @@
 24-b87-n02-tdz-catch-oculto-tope	oxc-b-carril_a	div:Stdout
 # 9.1 (H3 de la revision del bloque 8): el mismo bug de keep_names que 24-b83h1 (oxc 0.153.0
 # manglea un parametro con default anonimo, el default de un patron en `catch` y un campo privado; oxc#27725 y,
-# el campo privado, #PENDIENTE-N2), visto con
+# el campo privado, como pregunta en el mismo oxc#27725), visto con
 # util.inspect: `[Function: handler]` contra `[Function: e]`, `[class Handler]`, `bound handler`, `#handler`.
 # oracle::normalize_names borraba los nombres en todas las celdas: con 9e52cef iban a iguales en las 4. Ahora,
 # con keep_names en la celda (carril_a, `Minifier::preserva_nombres`), las comparaciones del caso los ven
