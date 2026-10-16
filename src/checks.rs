@@ -57,7 +57,7 @@ pub fn static_flags_oxc(program: &Program) -> Vec<&'static str> {
 /// pausando en excepciones atrapadas, una pausa dentro de la definicion de una clase
 /// en codigo sloppy con `eval` directo arma la cadena de scopes con el contexto de la
 /// clase y el ScopeInfo de la funcion de afuera (SIGSEGV en el GC o lecturas fuera del
-/// contexto; MEDIDO en el informe sigsegv-9460 del 10-oct, ver runner.rs). Criterio, sobre-
+/// contexto; MEDIDO el 10-oct, ver runner.rs). Criterio, sobre-
 /// aproximado a proposito: el prologo del programa no tiene un `"use strict"` real y hay
 /// en cualquier lugar una llamada directa a `eval` (tambien `(eval)(...)` y
 /// `eval(...)`, que son directas) y una clase (declaracion o expresion). No

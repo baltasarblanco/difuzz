@@ -41,8 +41,8 @@ tests/golden/verificar.sh [--jobs N] [BINARIO] [DIR_SALIDA]
 
 ## Aceptación de los re-chequeos — `tests/aceptacion/rechequeos/`
 
-181 casos que combinan un bug real de oxc con un flag de asunción (o con la forma en que se imprime), en las 4
-celdas de oxc (181 × 4 = 724 comparaciones): 21 de la revisión 1 (C4, `00-` a `10-`), 9 adversariales de la revision de los bloques 4-6 (`r01` a
+188 casos que combinan un bug real de oxc con un flag de asunción (o con la forma en que se imprime), en las 4
+celdas de oxc (188 × 4 = 752 comparaciones): 21 de la revisión 1 (C4, `00-` a `10-`), 9 adversariales de la revision de los bloques 4-6 (`r01` a
 `r10`, sin `r05`), `14-tdz-positivo`, 11 de los flags que antes no tenían re-chequeo (`15-` coerción, `16-`
 built-ins, `17-` contenido de `toString`/`.stack`, `18-` profundidad: positivos y adversariales con el Issue A),
 15 de la revisión de la integración del 09-oct (`19-`: el bug adentro del código que el re-chequeo neutraliza; r03, r06 y r13 son
@@ -91,7 +91,11 @@ core_defaults (`27-b113-`, ítem 11.3, I6 de la revisión integral 1: `n01` y `n
 que nombra `.name` y van a `div/` en las 4; con el paso de nombres siempre `Explica`, la mutación m1, iban a `known/` en
 core_defaults; `p01`, solo el nombre mangleado, y `p02`, un valor que sale de un nombre y que explica el renombre, van a `known/` en
 core_defaults e igual en carril_a; `n03`, el fixture 12306 de SWC, pasa por el camino nuevo de I6 y va a `div/` en
-core_defaults, costo declarado y guardián de la mutación m1b). Los `19-`, `20-` y `22-` esperan `div/` en todas
+core_defaults, costo declarado y guardián de la mutación m1b), 3 de los topes de salida (`27-b11-t`, ítem 11.2b:
+con el bug F de oxc el programa escribe más que el tope de salida, `t01` solo en B, `t02` solo con la pila del
+re-chequeo de profundidad y `t03` en un bucle de B; van a `div/` en las 4) y 4 de las escrituras a stderr con
+`fs.writeSync(2, …)` (`28-b112d-`, ítem 11.2d: `e01` a `e03`, sin bug, cuentan los EAGAIN, no atrapan sus errores
+o salen con `process.exit` y esperan `igual` en las 4; `w06`, con el bug F en stdout, `div/` en las 4). Los `19-`, `20-` y `22-` esperan `div/` en todas
 las celdas; los `21-`, `23-`, `24-`, `25-b92-`, `25-b93-` y `26-b102-`, `div/` salvo los positivos (menos `24-b83-p02` en
 core_defaults, que sigue en `div/`: el marco del stack cambia de nombre; y `25-b93-p03` en carril_a) y los
 `24-b83h1-` en core_defaults. Los `25-b91-p` esperan `div/` en carril_a e igual en core_defaults (sin

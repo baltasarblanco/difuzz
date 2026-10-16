@@ -91,7 +91,7 @@ known limits are in [SECURITY.md](SECURITY.md).
 ## AI assistance
 
 difuzz is built with Anthropic's Claude as a coding assistant. The author sets the design,
-reviews every change and runs the checks before anything is merged.
+reviews the changes and decides what is merged; the full test suite runs before every merge.
 
 ## License
 

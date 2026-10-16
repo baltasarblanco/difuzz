@@ -62,7 +62,7 @@ const SALUDO: &str = "difuzz-preparar v1";
 
 /// Cuanto puede tardar una minificacion antes de darla por colgada. Generoso a
 /// proposito: el binario lleva debug-assertions (Cargo.toml) y un fixture grande
-/// tarda segundos. NO SE cual es el maximo real del corpus; ver INFORME.
+/// tarda segundos. NO SE cual es el maximo real del corpus: no esta medido.
 const TIMEOUT_MINIFICAR: Duration = Duration::from_secs(60);
 
 /// RLIMIT_AS del hijo. La pila del hilo que minifica (256 MiB) es reserva
@@ -178,7 +178,7 @@ pub fn configurar_memoria(jobs: usize, mem_hijo_mib: Option<u64>) -> String {
 /// cuando los minificadores y el hijo de analisis de su worker esperan (cada worker hace una cosa a
 /// la vez), asi que `jobs` x tope sigue acotando lo que corre a la vez; la otra mitad de la memoria
 /// queda para difuzz, los hijos ociosos y el resto de la maquina. Es un tope de RSS medido (no
-/// RLIMIT_AS: ver `runner::Excedido` y el INFORME de 11b).
+/// RLIMIT_AS: V8 reserva GB virtuales y el programa veria un `RangeError`; ver `runner::Excedido`).
 pub fn tope_node(jobs: usize, mem_node_mib: Option<u64>) -> (u64, String) {
     match mem_node_mib {
         Some(m) => (m.saturating_mul(1 << 20), "--mem-node".into()),

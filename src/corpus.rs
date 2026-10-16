@@ -1,5 +1,5 @@
-//! GEN, version F1: el generador mas tonto posible. Archivos `input.js` del
-//! corpus de SWC, sin mutar. Se reemplaza en F2/F3; la interfaz es un Vec de rutas.
+//! GEN: el generador mas tonto posible. Archivos `input.js` del corpus de SWC,
+//! sin mutar. La interfaz es un Vec de rutas: otro generador puede ocupar su lugar.
 
 use std::path::{Path, PathBuf};
 
