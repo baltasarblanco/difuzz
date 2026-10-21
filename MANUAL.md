@@ -395,7 +395,7 @@ sobre el crudo con esos literales salados también lo explica (sin literales que
 confirmación con la sal y alcanza con lo anterior, como en A contra B). Si no, o si no se puede
 saber, sigue a `codegen/` con el paso en `pasos:`. Así, un bug de codegen en una rama que depende del
 texto de `toString` o de `.stack`, o que solo se ve en un marco del stack, ya no se excusa (10.1b,
-MEDIDO con O8 de oxc 0.153.0, [oxc#6154](https://github.com/oxc-project/oxc/issues/6154): los tres repros de las revisiones de 10.1 van a `codegen/`). El
+MEDIDO con O8 de oxc 0.153.0, [oxc#6154](https://github.com/oxc-project/oxc/issues/6154): los tres repros de las revisiones internas de 10.1 van a `codegen/`). El
 precio, el mismo que en A contra B: un valor derivado del contenido (`String(f).length`,
 `stack.length`) da inconcluso y va a `codegen/` aunque solo difiera el texto.
 
@@ -658,8 +658,8 @@ Principios:
     [oxc#6154](https://github.com/oxc-project/oxc/issues/6154)). Si lo toca, el
     `.name` cambió, y eso ya es un bug de keep_names que el programa puede estar imprimiendo con
     la forma del mensaje (oxc 0.153.0 manglea un parámetro con default anónimo:
-    `(handler = () => {}) => handler.name` da `e`; [oxc#27725](https://github.com/oxc-project/oxc/issues/27725)): `Inconcluso`, `div/` con nota (H1 de la
-    revisión del bloque 8). Se mira el binding renombrado, no el texto: no importa cómo lea el
+    `(handler = () => {}) => handler.name` da `e`; [oxc#27725](https://github.com/oxc-project/oxc/issues/27725)): `Inconcluso`, `div/` con nota (encontrado en una
+    revisión interna). Se mira el binding renombrado, no el texto: no importa cómo lea el
     programa el `.name` (`f["na" + "me"]`, `Reflect.get`). Sin keep_names (core_defaults) el
     cambio del `.name` es la asunción "No Reliance on Function.prototype.name" y no se mira.
     Lo que keep_names promete es `.name`, no el nombre con que V8 rotula un marco de stack: con
@@ -815,8 +815,8 @@ Principios:
     literal se imprime, y A con más pila elige el mismo. `console.log(t[i] === 0 ? "cero" :
     "otro")` con `t = [0, bug.length]` (A: `otro`; B y A con más pila: `cero`), o el mismo valor en
     un `if` que imprime una línea que A no tiene (`if (t[i] === 0) console.log("cero")`). La sal
-    llega a `cero`, el token que difiere, y el salado también coincide: `known/` (MEDIDO en la
-    revisión A del bloque 10 con oxc 0.153.0 y el bug F ([oxc#27098](https://github.com/oxc-project/oxc/pull/27098)), en tres programas de ese tipo,
+    llega a `cero`, el token que difiere, y el salado también coincide: `known/` (MEDIDO en una
+    revisión interna con oxc 0.153.0 y el bug F ([oxc#27098](https://github.com/oxc-project/oxc/pull/27098)), en tres programas de ese tipo,
     en las 4 celdas de oxc; igual con `c9eab79`). Por la salida no se distingue de un positivo de
     verdad (`rec(4800) ? "desbordo" : "cupo"`, que sigue en `known/`): la sal no lo puede cerrar.
     Caso fijo `26-b102b-l01` en la aceptación, con su destino actual.
@@ -878,8 +878,8 @@ Principios:
   síntoma de `known-sintomas.tsv` (por eso su encabezado pasó a `sintoma v3`: las tablas viejas se
   descartan una vez). `console.log(handler)` con `handler` un parámetro con default anónimo que oxc
   0.153.0 manglea ([oxc#27725](https://github.com/oxc-project/oxc/issues/27725)) da `[Function: handler]` contra `[Function: e]` y va a `div/` con el paso
-  `nombres_inspect` en la traza (antes de 9.1 iba a `iguales` en las 4 celdas: H3 de la revisión
-  del bloque 8; casos `25-b91-`). El modo lo fija `main::process_case` por caso
+  `nombres_inspect` en la traza (antes de 9.1 iba a `iguales` en las 4 celdas: encontrado en una revisión
+  interna; casos `25-b91-`). El modo lo fija `main::process_case` por caso
   (`oracle::con_nombres_crudos`, por hilo). Lo que cuesta, MEDIDO en el corpus de SWC (3119 casos,
   9e52cef contra 9.1): en oxc carril_a y core_defaults ningún caso cambia de destino; en swc
   carril_a, 3: `hoist_props/issue_2508_5` y `_6` pasan de `iguales` a `div/` (`o.f = function
@@ -897,7 +897,7 @@ Principios:
   exporta, observa o devuelve el programa pasa por `ser` del preload (`src/preload.js`,
   `serFuncion`), que hasta 10.3 escribía toda función como `fn`, sin nombre: un bug de keep_names
   ([oxc#27725](https://github.com/oxc-project/oxc/issues/27725)) que solo se veía en lo que exporta un módulo mudo quedaba en `iguales` también en carril_a
-  (MEDIDO en la revisión del bloque 9: `export function make(handler = ()
+  (MEDIDO en una revisión interna: `export function make(handler = ()
   => {}) { return handler; }` con `--invocar`, y un objeto exportado con esa función).
   Ahora la escribe como `util.inspect`, `[Function: handler]` o `[Function (anonymous)]`, y la
   comparación la trata como al resto de los nombres (arriba): borrada en core_defaults, cruda en
