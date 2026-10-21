@@ -70,7 +70,7 @@ cambia; van a `div/` en carril_a y a `known/` en core_defaults, donde keep_names
 por un `try` armado en runtime, que `runner::puede_atrapar` no ve en el minificado; con el bug en el catch van
 a `div/`), 6 de los nombres que imprime `util.inspect` (`25-b91-`, ítem 9.1: el mismo bug de keep_names que
 `24-b83h1-`, visto como `[Function: handler]` contra `[Function: e]`, con clase, `bound`, privado y `catch`;
-[oxc#27725](https://github.com/oxc-project/oxc/issues/27725), y el privado, como pregunta en el mismo [oxc#27725](https://github.com/oxc-project/oxc/issues/27725);
+[oxc#27725](https://github.com/oxc-project/oxc/issues/27725) (el campo privado, como pregunta en ese issue);
 `c01` es el control con las formas que keep_names cubre), 6 de los menores de `mensaje_nombre` (`25-b93-`,
 ítem 9.3: V8 escribe una llamada como `(...)` y el acceso opcional como `?.`, `cb(...) is not a function`; los
 positivos `p01` y `p02` van a `known/`; `p03`, un parámetro con default anónimo, a `div/` en carril_a por H1;

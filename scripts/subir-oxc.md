@@ -105,8 +105,9 @@ Por celda, cada caso cuyo estado cambia. Estado = destinos del caso (`div:<kind>
   corrida cuya version vieja aparezca en `ENVIAR` (tambien al bajar, donde no aplica). Si un repro da otra salida,
   el bug pudo arreglarse: no mandarlo sin revisar.
 - **Tests que dependen de bugs de oxc**: `subproceso.rs` `panic_del_minifier_cruza_el_pipe` usa el
-  panic O6 (`"\ud800"["0"]`, [oxc#26636](https://github.com/oxc-project/oxc/issues/26636)) para probar el camino de panic. Si oxc lo arregla, el test falla y hay
-  que buscarle otro panic (no es una regresion de difuzz).
+  panic O6 (`"\ud800"["0"]`, [oxc#26636](https://github.com/oxc-project/oxc/issues/26636), cerrado el 19-oct) para probar el camino de panic. O6 ya
+  esta arreglado en 0.155.0: al subir oxc, ese test y el golden `oxc-o6` deberian dejar de dar panic y hay
+  que buscarles otro panic (no es una regresion de difuzz).
 - **Comentarios con la version vieja** (`menciones-vieja.txt`): documentan con que version se verifico
   algo (`backend/oxc.rs` asunciones, `checks.rs` globals de oxc_ecmascript). No se cambian solos:
   hay que releer esa parte del fuente nuevo y recien ahi actualizar la cita.

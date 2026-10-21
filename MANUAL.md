@@ -395,7 +395,7 @@ sobre el crudo con esos literales salados también lo explica (sin literales que
 confirmación con la sal y alcanza con lo anterior, como en A contra B). Si no, o si no se puede
 saber, sigue a `codegen/` con el paso en `pasos:`. Así, un bug de codegen en una rama que depende del
 texto de `toString` o de `.stack`, o que solo se ve en un marco del stack, ya no se excusa (10.1b,
-MEDIDO con O8 de oxc 0.153.0, [oxc#6154](https://github.com/oxc-project/oxc/issues/6154): los tres repros de las revisiones internas de 10.1 van a `codegen/`). El
+MEDIDO con O8 de oxc 0.153.0, [oxc#6154](https://github.com/oxc-project/oxc/issues/6154): los tres repros de las revisiones internas de `--crudo` (10.1) van a `codegen/`). El
 precio, el mismo que en A contra B: un valor derivado del contenido (`String(f).length`,
 `stack.length`) da inconcluso y va a `codegen/` aunque solo difiera el texto.
 

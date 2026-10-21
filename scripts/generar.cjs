@@ -32,7 +32,7 @@
 const fs = require('fs');
 // --con-conocidos: tambien genera los patrones de los bugs conocidos. Donde esta cada uno: A en un
 // comentario de oxc#27412, B oxc#27834, C oxc#27863, D oxc#27864, el default con efecto en
-// un rest en oxc#24331 (esta forma, https://github.com/oxc-project/oxc/issues/24331#issuecomment-6267846946), E oxc#27621, F oxc#27098, G oxc#25158,
+// un rest en oxc#24331 (esta forma, https://github.com/oxc-project/oxc/issues/24331#issuecomment-6267846946), E oxc#27621, F oxc#27098, G oxc#27098 (de la familia de oxc#25158),
 // H oxc#27622, I oxc#27695 y oxc#27719, K oxc#27656.
 const CONOCIDOS = process.argv.includes('--con-conocidos');
 const path = require('path');
@@ -167,9 +167,9 @@ class Gen {
     const n = () => (this.chance(0.6) ? `(${this.num()})` : `Number(${this.prim(sc)})`);
     switch (this.int(16)) {
       case 0: return `${this.paren(s())}.${this.pick(['charAt', 'charCodeAt', 'codePointAt', 'at'])}(${n()})`;
-      // E/F (del generador): indexOf con no-ASCII (offset en bytes), posiciones >= 2**31, y
+      // F (del generador): indexOf con no-ASCII (offset en bytes), posiciones >= 2**31, y
       // substring/slice con fin NaN/undefined se pliegan mal (oxc#27098; el no-ASCII, tambien oxc#25158); sin --con-conocidos esos
-      // casos usan receptor ASCII literal y posiciones literales finitas. G (oxc#25158): en indexOf, con
+      // casos usan receptor ASCII literal y posiciones literales finitas. G (oxc#27098, de la familia de oxc#25158): en indexOf, con
       // busqueda "" y una posicion mas alla del largo del receptor (`("").indexOf((""), (2))` se
       // pliega a 2, node da 0); sin --con-conocidos indexOf toma solo las posiciones de nFin que no
       // pasan el largo de su receptor (lastIndexOf no diverge: nFin entera). Un solo pick, como antes.
@@ -646,7 +646,7 @@ class Gen {
       () => `${s()}.${this.pick(['toLowerCase', 'toUpperCase', 'trim', 'trimStart', 'trimEnd'])}()`,
       () => `${s()}.concat(${a()}, ${a()})`,
       () => `${s()}.${this.pick(['substring', 'slice'])}(${af()}${this.chance(0.6) ? `, ${af()}` : ''})`,
-      // posiciones fuera de rango en indexOf/lastIndexOf: G, oxc#25158 (solo con --con-conocidos). Sin el,
+      // posiciones fuera de rango en indexOf/lastIndexOf: G, oxc#27098, de la familia de oxc#25158 (solo con --con-conocidos). Sin el,
       // indexOf no recibe una posicion mayor que el largo de su receptor (con S, solo `1` sobre `""`:
       // `"".indexOf("", 1)` se pliega a 1, node da 0). Un solo pick, como antes.
       () => {

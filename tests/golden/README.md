@@ -41,7 +41,8 @@ Por qué cada clase esperada:
   miscompile ([oxc#26511](https://github.com/oxc-project/oxc/pull/26511)). Con el oráculo, oxc cambia `var e = eval; e("x")` por `eval("x")`: `global/local` contra
   `local/local` (Stdout) en las 4 de oxc, con `solo_debug_assertions: si` en el meta. swc: igual.
 - `swc-s1-use-strict`: swc inlinea una función estricta y pierde la directiva. Solo diverge en sloppy (carril A).
-  Reportado como [comentario en swc#9238](https://github.com/swc-project/swc/issues/9238#issuecomment-6150632079).
+  Reportado como [comentario en swc#9238](https://github.com/swc-project/swc/issues/9238#issuecomment-6150632079)
+  (cerrado por [swc#12580](https://github.com/swc-project/swc/pull/12580)).
 - `swc-s3-neg-zero-member`: swc imprime `-0[-0]=0` (SyntaxError) solo con el preset carril_a en A. En B el original ya
   lanza TypeError (propiedad sobre un primitivo en estricto), y por eso es ThrowType en los dos presets. [swc#12588](https://github.com/swc-project/swc/issues/12588).
 - `oxc-cbrt-stderr` (11.1, repro `s8` de la revisión integral 1): el bug E de oxc (`Math.cbrt(-8)` → `NaN`,
