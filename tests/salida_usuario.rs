@@ -523,7 +523,7 @@ fn pipe_cerrado_no_pierde_la_divergencia() {
     }
     let b = base("pipe-div");
     let corpus = b.join("corpus");
-    // golden oxc-o1 (el Issue C, #PENDIENTE-C): div:ThrowNew en oxc carril_a (tests/golden/esperado.tsv).
+    // golden oxc-o1 (el Issue C, oxc#27863): div:ThrowNew en oxc carril_a (tests/golden/esperado.tsv).
     let o1 = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/golden/corpus/oxc-o1/input.js");
     caso(&corpus, "o1", &std::fs::read(o1).unwrap());
     caso(&corpus, "igual", b"console.log(1);\n");

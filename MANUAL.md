@@ -1165,7 +1165,7 @@ Sin `node` en el `PATH`, los tests que lo necesitan fallan con un mensaje claro.
   en 8 celdas (1136 comparaciones). Las 9 del bug de los paréntesis de oxc (O8,
   [oxc#6154](https://github.com/oxc-project/oxc/issues/6154)) van a `codegen/`; los
   bugs del minificador que también tocan (keepNames con `(0, function(){})`, O9, conocido y sin reportar; la clase con
-  `static ["prototype"]`, O10, #PENDIENTE-O10), a `div/`. Destinos justificados en
+  `static ["prototype"]`, O10, [oxc#27965](https://github.com/oxc-project/oxc/issues/27965)), a `div/`. Destinos justificados en
   [`tests/codegen/README.md`](tests/codegen/README.md).
 
 ```sh

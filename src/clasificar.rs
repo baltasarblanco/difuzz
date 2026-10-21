@@ -860,7 +860,7 @@ fn tokens_js(s: &str) -> Vec<String> {
 }
 
 /// M13: el flag `extends` (estatico) mira todo el programa: en 9460 un
-/// `class extends 1` atrapado a proposito tapaba un bug real (O5: oxc#24331, #PENDIENTE-O5). Se cambia
+/// `class extends 1` atrapado a proposito tapaba un bug real (O5: oxc#24331, https://github.com/oxc-project/oxc/issues/24331#issuecomment-6267846946). Se cambia
 /// cada heredero literal por `null`, se minifica igual y se compara: si la
 /// divergencia sigue, `extends` no la explica (`false`). Si no hay nada que
 /// cambiar o algo falla, inconcluso (b1-b: antes `true`, se conservaba el flag).
@@ -1232,7 +1232,7 @@ mod tests {
     }
 
     /// M17: "solo sloppy" exige que el original sea estricto-valido y que la
-    /// divergencia desaparezca en estricto. Un bug real (O1, el Issue C: #PENDIENTE-C) no se esconde.
+    /// divergencia desaparezca en estricto. Un bug real (O1, el Issue C: oxc#27863) no se esconde.
     #[test]
     fn oxc_solo_sloppy() {
         use super::sloppy_only;
@@ -1276,7 +1276,7 @@ mod tests {
         let (o, m, a, b) = ab("const __proto__ = 0;\nconsole.log(Object.keys({ __proto__ }));\n");
         assert_eq!(sloppy_only(&r, (Minifier::Oxc, Preset::CoreDefaults), &o, &m, &a, &b), Ok(super::Sloppy::No));
         // b1-b (R1-H01, c4 10-rt-sloppy-miente): el bug de oxc (borra la IIFE con
-        // rest y default con efecto; oxc#24331, #PENDIENTE-O5) esta en la rama sloppy. En estricto el
+        // rest y default con efecto; oxc#24331, https://github.com/oxc-project/oxc/issues/24331#issuecomment-6267846946) esta en la rama sloppy. En estricto el
         // original toma la otra rama: antes `Ok(true)` (known/), ahora inconcluso.
         let (o, m, a, b) = ab("function rec(v) { console.log(v); }\nfunction f() { return this; }\nif (f() === undefined) {\n  console.log(\"estricto\");\n} else {\n  (function (...[value = rec(\"rest\")]) {})();\n}\nconsole.log(\"fin\");\n");
         assert_eq!(a.stdout, "rest\nfin\n");
@@ -1361,7 +1361,7 @@ mod tests {
             assert_eq!(sloppy_only(&r, (Minifier::Oxc, preset), &o, &m, &a, &b), Ok(Sloppy::Renombrando), "{preset:?}");
         }
         // Miente: `var arguments` inofensivo y el bug de 9460 (IIFE con rest y
-        // default con efecto; oxc#24331, #PENDIENTE-O5) en otra sentencia. Renombrado y en estricto, el bug sigue.
+        // default con efecto; oxc#24331, https://github.com/oxc-project/oxc/issues/24331#issuecomment-6267846946) en otra sentencia. Renombrado y en estricto, el bug sigue.
         let (o, m, a, b) = ab("function rec(v) { console.log(v); }\nfunction g() { var arguments = 1; return arguments; }\nconsole.log(g());\n(function (...[value = rec(\"rest\")]) {})();\nconsole.log(\"fin\");\n", Preset::CoreDefaults);
         assert_eq!(a.stdout, "1\nrest\nfin\n");
         assert_ne!(b.stdout, a.stdout, "oxc ya no tiene el bug de 9460: buscar otro");

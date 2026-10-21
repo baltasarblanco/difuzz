@@ -118,7 +118,7 @@ exacta, corridas con `--crudo` (el texto crudo contra el original que imprime el
 celdas (oxc|swc × carril a|b × core_defaults|carril_a): 1136 comparaciones. La clase de un caso con
 `codegen/` es `codegen:<kind>+<clase>` (ortogonal). Las 9 formas del bug de los paréntesis de oxc
 (O8, [oxc#6154](https://github.com/oxc-project/oxc/issues/6154) y [oxc#9029](https://github.com/oxc-project/oxc/issues/9029))
-van a `codegen/` en las 8 celdas; O9 (conocido, sin reportar) y O10 (#PENDIENTE-O10) a `div/` por el oráculo de siempre. Origen,
+van a `codegen/` en las 8 celdas; O9 (conocido, sin reportar) y O10 ([oxc#27965](https://github.com/oxc-project/oxc/issues/27965)) a `div/` por el oráculo de siempre. Origen,
 adaptaciones y la justificación de cada destino en `tests/codegen/README.md`. Reutiliza
 `tests/golden/verificar.sh`, que para esto acepta `--difuzz "ARGS"` (argumentos extra para cada
 celda).

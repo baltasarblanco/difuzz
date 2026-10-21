@@ -1,9 +1,9 @@
 # caso	celda	clase esperada
 # celda = <minifier>-<carril>-<preset>; clase = div:<kind> | panic | recursos | asserts | known | lint | descarte:<causa> | igual
 # Una celda sin fila para un caso espera "igual". Formato y clases: tests/golden/verificar.sh.
-# Corpus: el c4 de la revision 1 (generado), 21 casos. El bug real es O1 (`{__proto__}`, el Issue C, #PENDIENTE-C;
+# Corpus: el c4 de la revision 1 (generado), 21 casos. El bug real es O1 (`{__proto__}`, el Issue C, oxc#27863;
 # el minificado no parsea: ThrowNew) o el de fixture/issues/9460 (IIFE con rest y default con efecto
-# borrada: Stdout; oxc#24331, esta forma #PENDIENTE-O5). MEDIDO con el binario de 46e6749 (09-oct), igual a la tabla de b1-b (08-oct).
+# borrada: Stdout; oxc#24331, esta forma https://github.com/oxc-project/oxc/issues/24331#issuecomment-6267846946). MEDIDO con el binario de 46e6749 (09-oct), igual a la tabla de b1-b (08-oct).
 00-o1-solo	oxc-a-core_defaults	div:ThrowNew
 00-o1-solo	oxc-a-carril_a	div:ThrowNew
 00-o1-solo	oxc-b-core_defaults	div:ThrowNew
@@ -75,7 +75,7 @@
 09-nombres-positivo	oxc-b-core_defaults	known
 # 10-rt-extends-miente: known/ por decision del 09-oct, aceptado como limite conocido.
 # El revisor 1 lo marco "ambiguo"; b1-b lo explica: oxc borro la clase (la asuncion extends) y con eso
-# la rama del bug de 9460 (oxc#24331, #PENDIENTE-O5) queda muerta, asi que B == A' y la divergencia la explica entera la
+# la rama del bug de 9460 (oxc#24331, https://github.com/oxc-project/oxc/issues/24331#issuecomment-6267846946) queda muerta, asi que B == A' y la divergencia la explica entera la
 # asuncion. LIMITE: el re-chequeo compara salidas, no caminos; no puede separar este caso "miente" de
 # 01-extends-positivo sin medir cobertura de V8 (que rama corrio en A y en A'). El bug real queda
 # cubierto por 10-rt-solo (div/).
@@ -598,7 +598,7 @@
 23-b71b-q02t-marco-forjado-tabla	oxc-b-carril_a	div:Stdout
 # b7-8 (10-oct): el patron del bug de V8 13.6 con el sensor de violaciones (sloppy + `eval` directo + clase; SIGSEGV en el
 # GC con el inspector pausando dentro de la definicion de una clase). En el carril A el caso corre entero sin el sensor
-# (`sensor: omitido` en meta.txt). omitido-bug: el bug de 9460 (IIFE con rest borrada; oxc#24331, #PENDIENTE-O5) con el programa que tumba a node
+# (`sensor: omitido` en meta.txt). omitido-bug: el bug de 9460 (IIFE con rest borrada; oxc#24331, https://github.com/oxc-project/oxc/issues/24331#issuecomment-6267846946) con el programa que tumba a node
 # 20/20 con el sensor: div/ igual que con fe0cd86 (antes por `sensor_caido`). omitido-tdz: la TDZ atrapada que oxc borra
 # (known/ con el sensor, MEDIDO con fe0cd86) pasa a div/ en el carril A: sin el sensor no hay evidencia. En el carril B
 # (modulo, estricto) el sensor corre: known/ como antes.
@@ -681,7 +681,7 @@
 # `mensaje_nombre` re-minifica sin mangle y exige que B sea un renombre alfa-equivalente de eso y que eso de lo
 # mismo que A: p01 (mensaje) y p03 (nombres privados `this[#h]` y `{ payload }`) a known/; p02 (el error con su
 # stack) a known/ en carril_a y en div/ en core_defaults (el marco cambia de nombre, `at run` -> `at e`: n-principio
-# lo deja en div/). Negativos con un bug real: n01 (9460 en otra linea; oxc#24331, #PENDIENTE-O5), n02 (el mensaje sale del codigo que 9460
+# lo deja en div/). Negativos con un bug real: n01 (9460 en otra linea; oxc#24331, https://github.com/oxc-project/oxc/issues/24331#issuecomment-6267846946), n02 (el mensaje sale del codigo que 9460
 # deja de correr) y n03 (bug F, oxc#27098, dentro de la expresion que V8 escribe) siguen en div/. MEDIDO con el binario de 8.3.
 24-b83-n01-bug-al-lado	oxc-a-core_defaults	div:Stdout
 24-b83-n01-bug-al-lado	oxc-a-carril_a	div:Stdout
@@ -762,7 +762,7 @@
 # `(...)` y el acceso opcional como `?.` (`cb(...) is not a function`, `o?.g`, `o.f(...)?.g`; MEDIDO en node
 # 24.14.1). Con 9e52cef la localizacion no los aceptaba y los positivos p01 y p02 iban a div/ en las 4 celdas; ahora
 # known/. p03 es el caso c03 de esa revision: `f` es un parametro con default anonimo que oxc manglea tambien con keep_names (H1, oxc#27725):
-# div/ en carril_a, known/ en core_defaults. n01 (bug de 9460 al lado; oxc#24331, #PENDIENTE-O5) y n02 (bug F, oxc#27098, en el argumento, que V8 no
+# div/ en carril_a, known/ en core_defaults. n01 (bug de 9460 al lado; oxc#24331, https://github.com/oxc-project/oxc/issues/24331#issuecomment-6267846946) y n02 (bug F, oxc#27098, en el argumento, que V8 no
 # escribe pero el programa imprime) siguen en div/. p04 (M5, `(h) = function () {}`): known/ con la base y con 9.3
 # (el codegen de oxc quita los parentesis del destino, O8, oxc#6154: no alcanzable de punta a punta); fija el destino.
 25-b93-n01-llamada-bug-al-lado	oxc-a-core_defaults	div:Stdout

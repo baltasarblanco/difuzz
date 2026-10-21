@@ -56,7 +56,7 @@ fn con_salto(mut s: String) -> String {
 mod tests {
     use super::*;
 
-    /// Aceptacion de M29 con el reducido de O1, el Issue C (#PENDIENTE-C) (reconstruido: el reducido original
+    /// Aceptacion de M29 con el reducido de O1, el Issue C (oxc#27863) (reconstruido: el reducido original
     /// no se conservo).
     #[test]
     fn emite_o1_de_oxc() {

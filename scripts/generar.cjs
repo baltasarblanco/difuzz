@@ -31,8 +31,8 @@
 
 const fs = require('fs');
 // --con-conocidos: tambien genera los patrones de los bugs conocidos. Donde esta cada uno: A en un
-// comentario de oxc#27412, B oxc#27834, C #PENDIENTE-C, D #PENDIENTE-D, el default con efecto en
-// un rest en oxc#24331 (esta forma, #PENDIENTE-O5), E oxc#27621, F oxc#27098, G oxc#25158,
+// comentario de oxc#27412, B oxc#27834, C oxc#27863, D oxc#27864, el default con efecto en
+// un rest en oxc#24331 (esta forma, https://github.com/oxc-project/oxc/issues/24331#issuecomment-6267846946), E oxc#27621, F oxc#27098, G oxc#25158,
 // H oxc#27622, I oxc#27695 y oxc#27719, K oxc#27656.
 const CONOCIDOS = process.argv.includes('--con-conocidos');
 const path = require('path');
@@ -571,7 +571,7 @@ class Gen {
       } else if (k === 4) {
         const pr = this.id('__proto__x');
         const which = this.int(4);
-        // `const __proto__` + `{ __proto__ }` es el Issue C (#PENDIENTE-C): solo con --con-conocidos
+        // `const __proto__` + `{ __proto__ }` es el Issue C (oxc#27863): solo con --con-conocidos
         if (which === 0 && CONOCIDOS && !this.yaProto) { this.yaProto = true; out.push(`const __proto__ = ${this.lit()}; P("pp", Object.keys({ __proto__ }));`); }
         else if (which === 0) out.push(`P("pp0", Object.keys({ "__proto__": ${this.lit()}, ["__proto__"]: 2 }));`);
         else if (which === 1) out.push(`P("pp2", Object.getPrototypeOf({ __proto__: null }) === null, Object.keys({ ["__proto__"]: 1 }), Object.keys({ "__proto__": {} }));`);
@@ -604,11 +604,11 @@ class Gen {
     for (let i = 0; i < n; i++) {
       const k = this.int(11);
       const f = this.id('h');
-      // `catch (h) { var h }` con h = nombre de la function expression es el Issue D (#PENDIENTE-D): solo con --con-conocidos
+      // `catch (h) { var h }` con h = nombre de la function expression es el Issue D (oxc#27864): solo con --con-conocidos
       if (k === 0) out.push(`P("nfe", (function ${f}() { ${CONOCIDOS ? this.pick([`${f} = 1;`, '']) : ''} try { t("ty", 0); } catch (${f}) { ${this.pick([...(CONOCIDOS ? [`var ${f};`] : []), `${f} = 2;`, ''])} } return typeof ${f}; })());`);
       else if (k === 1) out.push(`P("iife", (function (x, y) { return ${this.pick(['x + y', '[x, y]', 'arguments.length', 'y', 'typeof y'])}; })(${this.expr(sc, 1)}${this.chance(0.5) ? `, ${this.expr(sc, 1)}` : ''}));`);
       else if (k === 2) out.push(`P("arr", ((x = t("dx", ${this.lit()}), y = x) => [x, y])(${this.pick(['', 'void 0', this.expr(sc, 1)])}));`);
-      // default con efecto dentro de un rest es de la familia de oxc#24331 (esta forma, #PENDIENTE-O5): solo con --con-conocidos
+      // default con efecto dentro de un rest es de la familia de oxc#24331 (esta forma, https://github.com/oxc-project/oxc/issues/24331#issuecomment-6267846946): solo con --con-conocidos
       else if (k === 3) out.push(`P("rest", (function (...[r1 = ${CONOCIDOS ? 't("rd", 1)' : '1'}, ...r2]) { return [r1, r2.length]; })(${this.pick(['', '0', 'void 0, 2', this.expr(sc, 1)])}));`);
       else if (k === 4) out.push(`P("ac", (function () { var r = Array(arguments.length); for (var ix = 0; ix < arguments.length; ix++) r[ix] = arguments[ix]; return r; })(${this.lit()}, ${this.lit()}));`);
       else if (k === 5) out.push(`{ const fs = []; for (let ii = 0; ii < 3; ii++) { fs.push(() => ii); ${this.pick(['', 'ii++;', 'if (ii) continue;'])} } P("lp", fs.map((g) => g())); }`);
