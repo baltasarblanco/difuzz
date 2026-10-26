@@ -5,14 +5,12 @@ difuzz minifies the program, runs the original and the minified program under `n
 compares what they do. If they differ, the minifier changed the program's behavior: that is a
 candidate miscompilation.
 
-It has found miscompilations in both supported minifiers that were reported upstream, for example
-SWC [#12397](https://github.com/swc-project/swc/issues/12397) and
-[#12400](https://github.com/swc-project/swc/issues/12400) (fixed by
-[#12398](https://github.com/swc-project/swc/pull/12398) and
-[#12401](https://github.com/swc-project/swc/pull/12401)) and oxc
-[#27621](https://github.com/oxc-project/oxc/pull/27621),
-[#27622](https://github.com/oxc-project/oxc/pull/27622) and
-[#27656](https://github.com/oxc-project/oxc/pull/27656) (merged fixes).
+It has found miscompilations in both supported minifiers that were reported upstream, and the
+author's fixes for them have been merged: 6 in SWC (for example
+[#12401](https://github.com/swc-project/swc/pull/12401) and
+[#12544](https://github.com/swc-project/swc/pull/12544)) and 4 in oxc (for example
+[#27621](https://github.com/oxc-project/oxc/pull/27621) and
+[#27656](https://github.com/oxc-project/oxc/pull/27656)).
 
 The full manual, the `--help` text, the program's output and the code comments are in Spanish:
 see [MANUAL.md](MANUAL.md).
